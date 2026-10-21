@@ -788,3 +788,29 @@ def test_cost_state_timestamp(sample: tuple[Path, dict[str, Any]]) -> None:
     # A parse that starts at the cost-state line has seen no time yet.
     (late,) = of(parse(main, start=cost.offset), CostState)
     assert late.offset == cost.offset and late.timestamp is None
+
+
+def test_cost_state_next_timestamp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = SessionWriter(tmp_path, cwd="/w", session_id="s1")
+    s.assistant(Reply(at(10), output=5))
+    s.cost_state(0.5, {})
+    s.unknown_record()  # never decoded: does not end the window
+    s.ai_title("Synthetic")  # decoded, but has no time
+    s.cost_state(0.6, {})
+    s.turn_duration(at(9), 100)  # out of order: still the first one after them
+    s.assistant(Reply(at(20), output=5))
+    s.cost_state(0.7, {})
+    s.close()
+    log = session_log(s.path)
+    batches = parse(log)
+    costs = of(batches, CostState)
+    assert [c.total_cost_usd for c in costs] == [0.5, 0.6, 0.7]
+    assert [c.timestamp for c in costs] == [at(10), at(10), at(20)]
+    assert [c.next_timestamp for c in costs] == [at(9), at(9), None]
+    # Records keep file order: the held cost-states come before the turn event.
+    kinds = [type(r).__name__ for r in batches[0].records]
+    assert kinds.index("CostState") < kinds.index("Event")
+    # A cost-state at the end of a batch leaves next_timestamp to the store.
+    monkeypatch.setattr(claude_code, "MAX_BATCH_LINES", 2)
+    split = of(parse(log), CostState)
+    assert split[0].next_timestamp is None and split[1].next_timestamp == at(9)

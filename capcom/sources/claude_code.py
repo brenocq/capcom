@@ -24,7 +24,7 @@ import re
 import shlex
 from collections import Counter, OrderedDict
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -334,6 +334,9 @@ class _Pending:
 class _BatchState:
     records: list[Record] = field(default_factory=list)
     pending: dict[str, _Pending] = field(default_factory=dict)
+    # Cost-states waiting for the first timestamped record after them (their
+    # next_timestamp); released in file order when it comes, or at the batch's end.
+    held_costs: list[CostState] = field(default_factory=list)
     lines: int = 0
     bytes: int = 0
     skipped: int = 0
@@ -362,6 +365,10 @@ class _Parser:
 
     def flush(self, end_offset: int) -> Batch:
         b = self.batch
+        # No timestamped record after them in this batch: next_timestamp stays None
+        # (the store fills it from the file's next batch).
+        b.records.extend(b.held_costs)
+        b.held_costs.clear()
         for mid, p in b.pending.items():
             req = self._request(mid, p)
             if req is not None:
@@ -460,6 +467,12 @@ class _Parser:
         t = _ts(rec.get("timestamp"))
         if t is not None:
             self.last_ts = t
+            if b.held_costs:
+                # Only records the adapter decodes count as "the next record": a line
+                # the prefilter skips (a type capcom does not use) is never parsed, so
+                # its time is unknown here. Released before this record's own output.
+                b.records.extend(replace(c, next_timestamp=t) for c in b.held_costs)
+                b.held_costs.clear()
             if b.first_seen is None or t < b.first_seen:
                 b.first_seen = t
             if b.last_seen is None or t > b.last_seen:
@@ -890,7 +903,7 @@ class _Parser:
                 web_searches=_int(m.get("webSearchRequests")),
                 cost_usd=_float(m.get("costUSD")),
             )
-        self.batch.records.append(
+        self.batch.held_costs.append(
             CostState(
                 session_id=self.log.session_id,
                 offset=offset,
