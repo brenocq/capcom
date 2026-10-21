@@ -4,6 +4,7 @@ rate-limit errors, and the status line change that starts recording."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -80,15 +81,18 @@ def _status_line(settings: Path) -> tuple[dict[str, Any] | None, str | None]:
 
 
 def where_capcom() -> tuple[bool, str | None]:
-    """Whether `capcom` is on PATH outside a virtual environment, and the path found
-    (`uv run` puts the project's environment on PATH, which Claude Code's shell lacks)."""
-    found = shutil.which("capcom")
-    if found is None:
-        return False, None
-    in_venv = sys.prefix != sys.base_prefix and Path(found).resolve().is_relative_to(
-        Path(sys.prefix).resolve()
-    )
-    return not in_venv, found
+    """Whether `capcom` is on PATH outside the running environment's own bin folder,
+    and the path found. `uv run` puts that folder first on PATH, and Claude Code's
+    shell lacks it; a `uv tool install` also runs from an environment, but links its
+    command into a folder of its own (`~/.local/bin`), which that shell does find."""
+    dirs = os.environ.get("PATH", "").split(os.pathsep)
+    if sys.prefix != sys.base_prefix:
+        own = (Path(sys.prefix) / "bin").resolve()
+        dirs = [d for d in dirs if d and Path(d).resolve() != own]
+    found = shutil.which("capcom", path=os.pathsep.join(dirs))
+    if found is not None:
+        return True, found
+    return False, shutil.which("capcom")
 
 
 def install_text(settings: Path, on_path: bool, found: str | None = None) -> str:

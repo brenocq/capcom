@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from capcom.config import Config
-from capcom.limits.cli import PREFIX, install_text, run_limits, unwrap, wrap
+from capcom.limits.cli import PREFIX, install_text, run_limits, unwrap, where_capcom, wrap
 from capcom.limits.model import load_samples, sample_json, samples_path
 from capcom.types import Event, EventKind, LimitWindow
 from tests.limits.fakes import T0, FakeIndex, minutes, req, sample
@@ -54,6 +54,47 @@ def test_install_when_already_installed(tmp_path: Path) -> None:
     bad = tmp_path / "bad.json"
     bad.write_text("{nope")
     assert install_text(bad, on_path=True).startswith("capcom limits: cannot read")
+
+
+def executable(folder: Path) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "capcom"
+    path.write_text("#!/bin/sh\n")
+    path.chmod(0o755)
+    return path
+
+
+def run_from(monkeypatch: pytest.MonkeyPatch, env: Path, *path: Path) -> None:
+    """As if running from the virtual environment at `env`, with `path` as PATH."""
+    monkeypatch.setattr(sys, "prefix", str(env))
+    monkeypatch.setattr(sys, "base_prefix", "/usr")
+    monkeypatch.setenv("PATH", os.pathsep.join(map(str, path)))
+
+
+def test_where_capcom_skips_the_uv_run_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    venv = tmp_path / ".venv"
+    own = executable(venv / "bin")
+    run_from(monkeypatch, venv, venv / "bin", tmp_path / "usr-bin")
+    assert where_capcom() == (False, str(own))
+    installed = executable(tmp_path / "local-bin")
+    run_from(monkeypatch, venv, venv / "bin", tmp_path / "local-bin")
+    assert where_capcom() == (True, str(installed))
+
+
+def test_where_capcom_finds_a_uv_tool_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tool = tmp_path / "tools" / "capcom"
+    local = tmp_path / "local-bin"
+    local.mkdir()
+    (local / "capcom").symlink_to(executable(tool / "bin"))
+    run_from(monkeypatch, tool, local)
+    assert where_capcom() == (True, str(local / "capcom"))
+
+
+def test_where_capcom_finds_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    run_from(monkeypatch, tmp_path / ".venv", tmp_path / "empty")
+    assert where_capcom() == (False, None)
 
 
 def test_install_command_reads_settings_only(tmp_path: Path) -> None:
