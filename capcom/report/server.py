@@ -70,6 +70,7 @@ RUN_SCAN = "Run <code>capcom scan</code> in a terminal, then reload this page."
 SCANNING = "capcom serve is reading the logs into the index now; reload in a few minutes."
 NO_INDEX_PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>capcom: no index</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/style.css"></head>
 <body class="bare"><main class="panel narrow">
 <h1>No index to read yet</h1>
@@ -384,6 +385,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._api(path[5:], dict(parse_qsl(url.query)))
             elif path.startswith("/static/"):
                 self._static(path[8:])
+            elif path == "/favicon.ico":  # browsers ask for it before reading the page
+                self._static("favicon.svg")
             else:
                 self._page(path)
         except (BrokenPipeError, ConnectionResetError):
