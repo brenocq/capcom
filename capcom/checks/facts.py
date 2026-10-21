@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import heapq
 from bisect import bisect_right
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -37,6 +37,15 @@ from statistics import median
 
 from capcom.cost.model import price, price_usage
 from capcom.cost.prices import is_placeholder, normalize
+from capcom.explain.rules import RESUME_REACH, RESUME_SKEW, RESUME_TOOLS, USER_TOOLS
+from capcom.explain.shared import (
+    IDLE_EXPIRY,
+    LATE_COMPACTION,
+    LATE_RESUME_EXPIRY,
+    LONG_CONTEXT,
+    TOOL_WAIT_EXPIRY,
+    expiry_kind,
+)
 from capcom.types import (
     AgentInfo,
     AttrValue,
@@ -56,41 +65,17 @@ LOOKBACK = timedelta(days=3)
 # used when the event has no `tools_size_tokens`. Not measured; a round guess.
 SHAPE_TOOLS_SHARE = 0.75
 DEFAULT_TOOL_TOKENS = 600  # one tool schema, when no listing in the logs gives a size
-LONG_CONTEXT = 150_000  # past this a thread is "long-running"
-LATE_COMPACTION = 400_000  # a compaction with more pre_tokens than this ran late
 LONG_REPORT_TOKENS = 1_500  # an Agent result above this is a long report
 REWRITE_SHARE = 0.5  # a request writing this share of its prompt rewrote the cache
 MIN_REWRITE_TOKENS = 10_000
 CACHE_TTL_5M = timedelta(minutes=5)
 CACHE_TTL_1H = timedelta(hours=1)
-# The three causes of a cache expiry, named as explain names them. These mirror
-# capcom.explain.shared (EXPIRY_CAUSES, expiry_kind) until it is on main; then import
-# them from there instead.
-TOOL_WAIT_EXPIRY = "tool_wait_expiry"  # a tool's result came back past the lifetime
-LATE_RESUME_EXPIRY = "late_resume_expiry"  # a subagent resumed late by its parent
-IDLE_EXPIRY = "idle_expiry"  # the main thread waited on the user
-EXPIRY_CAUSES = (TOOL_WAIT_EXPIRY, LATE_RESUME_EXPIRY, IDLE_EXPIRY)
-
-
-def expiry_kind(
-    gap: timedelta, lifetime: timedelta, tool_ran: timedelta | None, subagent: bool
-) -> str | None:
-    """Why a cache expired over a pause of `gap`: None within the lifetime (never
-    under 5 minutes); a tool wait when a tool's result came back after the lifetime
-    (`tool_ran`, from the request that called it); else a late resume for a
-    subagent, or the user away for a main thread."""
-    if gap <= max(lifetime, timedelta(minutes=5)):
-        return None
-    if tool_ran is not None and tool_ran > lifetime:
-        return TOOL_WAIT_EXPIRY
-    return LATE_RESUME_EXPIRY if subagent else IDLE_EXPIRY
-
-
 AGENT_TOOLS = frozenset({"Agent", "Task"})
 EVIDENCE_PER_FINDING = 5
-# A fresh agent after a handoff rebuilds part of its context: a handoff note, the
-# files it rereads. Charged once per handoff at the thread's cache-write price.
+# A fresh agent's starting context when its thread's own is unknown (the thread
+# began before the window, or its first request in it is already big).
 HANDOFF_TOKENS = 40_000
+START_KNOWN_BELOW = LONG_CONTEXT * 2 // 3  # a first context above this is not a start
 BUCKET_TOKENS = 10_000  # the context histogram's bucket (a multiple divides LONG_CONTEXT)
 RESUME_GAP = timedelta(minutes=10)  # a main-thread pause this long starts a new run
 # Tool names the agent types called are read this far back at least, so the
@@ -144,6 +129,13 @@ class Thread:
     result_at: datetime | None = None  # when the last of those calls' results came back
     result_call: ToolCall | None = None
     above: bool = False  # the last request's context was past LONG_CONTEXT
+    start: int | None = None  # the context a fresh agent of this thread starts at
+    prev_ctx: int | None = None
+    sim: float | None = None  # the handed-off agent's context (long_running_agents)
+    late_sim: float | None = None  # the earlier-compacted context (late_compactions)
+    late_comp: Compaction | None = None
+    last_calls: int = 0  # tool calls of the last request
+    last_stop: str | None = None
     write_1h: bool = False  # the thread's last cache write used the 1-hour lifetime
     away_at: datetime | None = None  # the last away_summary
     # main threads: context bucket -> [requests, sum of read rates, sum of ctx x rate]
@@ -174,7 +166,7 @@ class LongContext:
     excess_usd: float = 0.0
     max_context: int = 0
     evidence: dict[ThreadKey, tuple[int, Evidence]] = field(default_factory=dict)
-    # per thread: [rereads past the line (USD), handoff cost (USD), crossings, turns]
+    # per thread: [saving of the simulated handoffs (USD), handoffs, turns past the line]
     per_thread: dict[ThreadKey, list[float]] = field(default_factory=dict)
 
 
@@ -187,7 +179,21 @@ class Compaction:
     excess_usd: float = 0.0  # turns before it above LATE_COMPACTION
     turns: int = 0
     trigger: str | None = None
-    handoff_usd: float = 0.0  # HANDOFF_TOKENS at the thread's write price
+    post_tokens: int = 0
+
+
+@dataclass(slots=True)
+class _Expiry:
+    """A rewrite after a gap past the cache lifetime, before it is named."""
+
+    r: Request
+    project: str
+    who: str
+    gap: timedelta
+    ttl: timedelta
+    wait: tuple[timedelta, timedelta, ToolCall | None] | None  # (ran, after, call)
+    away: bool
+    lo: datetime  # a resuming call must come after this
 
 
 @dataclass(slots=True)
@@ -370,6 +376,9 @@ class _Pass:
         self.index = index
         self.table = table
         self.f = Facts(since=since, until=until)
+        self.pending: deque[_Expiry] = deque()
+        self.sub_last: dict[str, datetime] = {}  # session -> its last subagent request
+        self.resume_calls: dict[str, deque[tuple[datetime, str | None]]] = {}
         self._reads: dict[tuple[str, str | None, str | None, object], float] = {}
         self._writes: dict[tuple[str, str | None, str | None, object, bool], float] = {}
 
@@ -448,6 +457,8 @@ class _Pass:
             size = _int(a.get("size_tokens"))
             tool = a.get("tool") if isinstance(a.get("tool"), str) else None
             call = t.pending.get(str(a.get("tool_use_id")))
+            if call is not None and call.name in USER_TOOLS:
+                call = None  # its result waits on the user, not on the tool
             if call is not None and (t.result_at is None or e.timestamp >= t.result_at):
                 t.result_at, t.result_call = e.timestamp, call
             if a.get("is_image") is True:
@@ -459,6 +470,7 @@ class _Pass:
             t.away_at = e.timestamp
         elif e.kind is EventKind.COMPACTION:
             t.above = False  # the context starts again below the line
+            t.late_sim = t.late_comp = None
             for key in [k for k in t.items if k[:2] not in _SURVIVES_COMPACTION]:
                 self.close(t, key)
         elif e.kind is EventKind.SPAWN:
@@ -548,33 +560,8 @@ class _Pass:
             if t.last_model is not None and model != t.last_model:
                 label = f"{t.last_model} to {model}, {u.cache_write:,} tokens rewritten"
                 self.rewrite(f.switches, project, r, label)
-            elif (
-                cause := expiry_kind(gap, ttl, self.tool_ran(t), r.agent_id is not None)
-            ) is not None:
-                minutes = gap.total_seconds() / 60
-                if cause == TOOL_WAIT_EXPIRY and t.result_call is not None:
-                    call, ran = t.result_call, self.tool_ran(t) or gap
-                    label = (
-                        f"{who} waited {ran.total_seconds() / 60:.0f} min on {tool_label(call)}, "
-                        f"{u.cache_write:,} tokens rewritten"
-                    )
-                    rw = self.rewrite(f.tool_waits, project, r, label)
-                    rw.causes[call.name] = rw.causes.get(call.name, 0) + 1
-                    rw.longest = max(rw.longest, ran)
-                elif cause == LATE_RESUME_EXPIRY:
-                    label = (
-                        f"{who} resumed {minutes:.0f} min after its last turn, "
-                        f"{u.cache_write:,} tokens rewritten"
-                    )
-                    rw = self.rewrite(f.resumes, project, r, label)
-                    rw.longest = max(rw.longest, gap)
-                else:  # IDLE_EXPIRY: the user was away
-                    away = t.away_at is not None and t.away_at >= t.last
-                    note = ", after an away_summary" if away else ""
-                    label = f"{minutes:.0f} min idle{note}, {u.cache_write:,} tokens rewritten"
-                    rw = self.rewrite(f.idle, project, r, label)
-                    rw.confirmed += 1 if away else 0
-                    rw.longest = max(rw.longest, gap)
+            elif gap > ttl:
+                self.expiry(t, r, project, who, gap, ttl)
 
         if u.cache_write_1h > 0:
             t.write_1h = True
@@ -586,45 +573,9 @@ class _Pass:
         if not placeholder:
             self.model_mix(r, cost, project)
 
-        # context past the useful size
-        above_line = ctx > LONG_CONTEXT and reread > 0
-        if above_line:
-            tk = (t.session_id, t.agent_id)
-            handoff = HANDOFF_TOKENS * self.write_rate(r, t.write_1h)
-            late = self.next_late_compaction(t, r.timestamp)
-            band = (min(ctx, LATE_COMPACTION) - LONG_CONTEXT) * reread
-            above = max(0, ctx - LATE_COMPACTION) * reread
-            lc = f.long_context.setdefault(project, LongContext())
-            if late is not None:
-                late.excess_usd += above
-                late.turns += 1 if above > 0 else 0
-                if not late.handoff_usd:
-                    late.handoff_usd = handoff
-                above = 0.0
-            acc = lc.per_thread.setdefault(tk, [0.0, 0.0, 0, 0])
-            acc[0] += band + above
-            acc[3] += 1
-            if not t.above:  # one handoff per crossing of the line
-                acc[1] += handoff
-                acc[2] += 1
-            lc.threads.add(tk)
-            lc.turns += 1
-            lc.excess_usd += band + above
-            lc.max_context = max(lc.max_context, ctx)
-            if ctx > lc.evidence.get(tk, (0, None))[0]:
-                who = (
-                    "main thread"
-                    if r.agent_id is None
-                    else f"subagent {f.agent_type(r.agent_id) or '?'}"
-                )
-                ev = Evidence(
-                    f"{who} of session {_short(r.session_id)} reached {ctx:,} tokens",
-                    session_id=r.session_id,
-                    agent_id=r.agent_id,
-                    timestamp=r.timestamp,
-                    message_id=r.message_id,
-                )
-                lc.evidence[tk] = (ctx, ev)
+        # context past the useful size: simulated handoffs and earlier compactions
+        if reread > 0:
+            self.simulate(t, r, ctx, reread)
 
         if r.agent_id is not None and r.tool_calls:
             kind = f.agent_type(r.agent_id) or "(unknown agent)"
@@ -644,9 +595,16 @@ class _Pass:
         t.last = r.timestamp
         t.pending = {tc.tool_use_id: tc for tc in r.tool_calls if tc.tool_use_id}
         t.result_at = t.result_call = None
+        t.last_calls, t.last_stop = len(r.tool_calls), r.stop_reason
+        if r.agent_id is not None:
+            self.sub_last[r.session_id] = r.timestamp
+        if any(tc.name in RESUME_TOOLS for tc in r.tool_calls):
+            log = self.resume_calls.setdefault(r.session_id, deque())
+            log.append((r.timestamp, r.agent_id))
+            while log and log[0][0] < r.timestamp - 2 * RESUME_REACH:
+                log.popleft()
         if not placeholder:
             t.last_model = model
-            t.above = above_line
 
     def main_thread(self, t: Thread, r: Request, ctx: int, rate: float) -> None:
         """A main-thread request into its thread's context histogram, and a resume
@@ -687,13 +645,133 @@ class _Pass:
         mm.top_calls += len(r.tool_calls)
         mm.top_threads.add(tk)
 
-    @staticmethod
-    def tool_ran(t: Thread) -> timedelta | None:
-        """How long the last of thread `t`'s previous request's tool calls ran: from
-        that request to its result; None when no result came back."""
-        if t.last is None or t.result_at is None or t.result_call is None:
-            return None
-        return t.result_at - t.last
+    def simulate(self, t: Thread, r: Request, ctx: int, rate: float) -> None:
+        """Advance thread `t`'s two simulations by request `r` (context `ctx`, read
+        price `rate`), the formulas of long_running_agents and late_compactions."""
+        f = self.f
+        if t.start is None:
+            t.start = ctx if ctx <= START_KNOWN_BELOW else HANDOFF_TOKENS
+        step = ctx - t.prev_ctx if t.prev_ctx is not None else 0
+        t.prev_ctx = ctx
+        tk = (t.session_id, t.agent_id)
+        # a handoff each time the simulated agent passes the line: a fresh one starts
+        # at the thread's starting context and grows by the thread's own increments
+        sim = ctx if t.sim is None else max(t.sim + step, min(ctx, t.start))
+        cost = sim * rate
+        handoff = sim > LONG_CONTEXT
+        if handoff:
+            sim = t.start
+            cost = sim * self.write_rate(r, t.write_1h)
+        t.sim = sim
+        if ctx > LONG_CONTEXT or handoff:
+            lc = f.long_context.setdefault(t.project, LongContext())
+            acc = lc.per_thread.setdefault(tk, [0.0, 0, 0])
+            acc[0] += ctx * rate - cost
+            acc[1] += 1 if handoff else 0
+            acc[2] += 1 if ctx > LONG_CONTEXT else 0
+            lc.threads.add(tk)
+            lc.turns += 1 if ctx > LONG_CONTEXT else 0
+            lc.max_context = max(lc.max_context, ctx)
+            if ctx > lc.evidence.get(tk, (0, None))[0]:
+                who = (
+                    "main thread"
+                    if r.agent_id is None
+                    else f"subagent {f.agent_type(r.agent_id) or '?'}"
+                )
+                ev = Evidence(
+                    f"{who} of session {_short(r.session_id)} reached {ctx:,} tokens",
+                    session_id=r.session_id,
+                    agent_id=r.agent_id,
+                    timestamp=r.timestamp,
+                    message_id=r.message_id,
+                )
+                lc.evidence[tk] = (ctx, ev)
+        # a late compaction run at LATE_COMPACTION instead: from the turn the context
+        # passed it, the thread restarts at the compaction's logged post size
+        if t.late_sim is None and ctx > LATE_COMPACTION:
+            comp = self.next_late_compaction(t, r.timestamp)
+            if comp is not None:
+                t.late_comp = comp
+                t.late_sim = float(comp.post_tokens or t.start)
+        elif t.late_sim is not None and t.late_comp is not None:
+            q = t.late_comp.post_tokens or t.start
+            t.late_sim = max(t.late_sim + step, min(ctx, q))
+            if t.late_sim > LATE_COMPACTION:
+                t.late_sim = float(q)
+        if t.late_sim is not None and t.late_comp is not None:
+            t.late_comp.excess_usd += (ctx - t.late_sim) * rate
+            t.late_comp.turns += 1
+
+    def expiry(
+        self, t: Thread, r: Request, project: str, who: str, gap: timedelta, ttl: timedelta
+    ) -> None:
+        """Name a rewrite after a gap past the cache lifetime with explain's
+        `expiry_kind`, from the same inputs: the thread's own tool wait (user tools
+        left out) or, on a main thread, its subagents' work through the gap; and
+        whether a finished subagent was resumed by another thread's SendMessage or
+        Agent call (up to RESUME_REACH before the request or RESUME_SKEW after, so a
+        candidate waits in `pending` until the stream passes that)."""
+        assert t.last is not None
+        waits: list[tuple[timedelta, timedelta, ToolCall | None]] = []
+        if t.result_at is not None and t.result_call is not None:
+            waits.append((t.result_at - t.last, r.timestamp - t.result_at, t.result_call))
+        bg = self.sub_last.get(r.session_id)
+        if r.agent_id is None and bg is not None and bg > t.last:
+            waits.append((bg - t.last, r.timestamp - bg, None))
+        wait = max(waits, key=lambda w: w[0], default=None)
+        away = t.away_at is not None and t.away_at >= t.last
+        e = _Expiry(r, project, who, gap, ttl, wait, away, max(t.last, r.timestamp - RESUME_REACH))
+        candidate = (
+            r.agent_id is not None and not t.last_calls and t.last_stop in (None, "end_turn")
+        )
+        if not candidate:
+            self.record(e, resumed=False)
+        elif self.resumed(e):
+            self.record(e, resumed=True)
+        else:
+            self.pending.append(e)
+
+    def resumed(self, e: _Expiry) -> bool:
+        hi = e.r.timestamp + RESUME_SKEW
+        return any(
+            e.lo < when <= hi and aid != e.r.agent_id
+            for when, aid in self.resume_calls.get(e.r.session_id, ())
+        )
+
+    def flush(self, now: datetime | None) -> None:
+        """Decide the pending late-resume candidates whose look-ahead has passed."""
+        while self.pending and (now is None or self.pending[0].r.timestamp + RESUME_SKEW < now):
+            e = self.pending.popleft()
+            self.record(e, resumed=self.resumed(e))
+
+    def record(self, e: _Expiry, resumed: bool) -> None:
+        f, r, u = self.f, e.r, e.r.usage
+        ran, after, call = e.wait if e.wait is not None else (None, None, None)
+        cause = expiry_kind(e.gap, e.ttl, ran, after, r.agent_id is not None, resumed)
+        minutes = e.gap.total_seconds() / 60
+        if cause == TOOL_WAIT_EXPIRY and ran is not None:
+            what = tool_label(call) if call is not None else "its subagents' work"
+            label = (
+                f"{e.who} waited {ran.total_seconds() / 60:.0f} min on {what}, "
+                f"{u.cache_write:,} tokens rewritten"
+            )
+            rw = self.rewrite(f.tool_waits, e.project, r, label)
+            name = call.name if call is not None else "background agents"
+            rw.causes[name] = rw.causes.get(name, 0) + 1
+            rw.longest = max(rw.longest, ran)
+        elif cause == LATE_RESUME_EXPIRY:
+            label = (
+                f"{e.who} resumed {minutes:.0f} min after its last turn, "
+                f"{u.cache_write:,} tokens rewritten"
+            )
+            rw = self.rewrite(f.resumes, e.project, r, label)
+            rw.longest = max(rw.longest, e.gap)
+        elif cause == IDLE_EXPIRY:
+            note = ", after an away_summary" if e.away else ""
+            label = f"{minutes:.0f} min idle{note}, {u.cache_write:,} tokens rewritten"
+            rw = self.rewrite(f.idle, e.project, r, label)
+            rw.confirmed += 1 if e.away else 0
+            rw.longest = max(rw.longest, e.gap)
 
     def rewrite(self, into: dict[str, Rewrite], project: str, r: Request, label: str) -> Rewrite:
         excess = rewrite_excess(r, self.table)
@@ -737,12 +815,14 @@ class _Pass:
         for e in self.index.events(f.since, f.until, kinds=frozenset({EventKind.COMPACTION})):
             pre = _int(e.attrs.get("pre_tokens"))
             trigger = e.attrs.get("trigger")
+            post = _int(e.attrs.get("post_tokens"))
             comp = Compaction(
                 (e.session_id, e.agent_id),
                 e.timestamp,
                 e.key,
                 pre,
                 trigger=trigger if isinstance(trigger, str) else None,
+                post_tokens=post,
             )
             f.compactions.setdefault(comp.thread, []).append(comp)
         for comps in f.compactions.values():
@@ -756,11 +836,13 @@ class _Pass:
                 calls.update(tc.name for tc in r.tool_calls)
         events = self.index.events(f.since - LOOKBACK, f.until, kinds=_INTERESTING)
         requests = self.index.requests(f.since, f.until)
-        for _, _, _, rec in heapq.merge(_tagged(events, 0), _tagged(requests, 1)):
+        for when, _, _, rec in heapq.merge(_tagged(events, 0), _tagged(requests, 1)):
+            self.flush(when)
             if isinstance(rec, Request):
                 self.request(rec)
             else:
                 self.event(rec)
+        self.flush(None)
         for t in f.threads.values():
             for key in list(t.items):
                 self.close(t, key)

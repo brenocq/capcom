@@ -7,9 +7,10 @@ their read rates and of context x read rate):
 
     band_usd(lo, hi) = sum over requests of (min(context, hi) - lo)+ x read price
 
-with `hi` = LONG_CONTEXT, so the part past the line stays with `long_running_agents`
-(and above LATE_COMPACTION with `late_compactions`): the context findings remain
-disjoint. A session that is a heartbeat is not also a session that never ended.
+with `hi` = LONG_CONTEXT for a session that never ended (it overlaps the
+long-running and late-compaction findings, other ways to the same rereads), and no
+upper end for a heartbeat, whose sessions those two findings leave out. A session
+that is a heartbeat is not also a session that never ended.
 """
 
 from __future__ import annotations
@@ -23,7 +24,6 @@ from capcom.checks.agents import AgentDefinition
 from capcom.checks.facts import (
     BUCKET_TOKENS,
     EVIDENCE_PER_FINDING,
-    LONG_CONTEXT,
     Facts,
     ModelMix,
     Thread,
@@ -40,6 +40,7 @@ from capcom.checks.rules import (
     _net,
     _usd,
 )
+from capcom.explain.shared import LONG_CONTEXT
 from capcom.types import Evidence, Finding
 
 NEVER_ENDED_SPAN = timedelta(days=7)  # a session active longer than this never ended
@@ -180,7 +181,7 @@ def session_never_ended(facts: Facts) -> list[Finding]:
         band_usd(fresh_context, LONG_CONTEXT) - active days x HANDOFF_TOKENS x write price
 
     floored at zero: the rereads above what a fresh session typically carries (the
-    part past LONG_CONTEXT is left to `long_running_agents`), less a fresh start
+    part past LONG_CONTEXT is in `long_running_agents`), less a fresh start
     with a handoff note on each day it was used."""
     typical = fresh_context(facts)
     per_project: dict[str, list[tuple[Thread, int, int, float]]] = defaultdict(list)

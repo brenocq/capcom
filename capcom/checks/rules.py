@@ -9,10 +9,10 @@ size in tokens times that request's price per prompt token (facts.py), which is
 "size x requests x the right price" with cache reads and rewrites priced as they
 were billed. Each check's docstring says what it counts.
 
-The context and cache findings are disjoint within a project: long contexts and
-late compactions price the tokens past their threshold at the cache-read price
-(what rereading them cost, split between the two at LATE_COMPACTION), while the
-rewrite findings (idle, tool waits, model switches; each request in at most one)
+The context findings price rereads at the cache-read price: long contexts and
+late compactions (two ways to the same rereads, so they overlap each other)
+against a simulated handoff or earlier compaction, while the rewrite findings
+(idle, tool waits, model switches; each request in at most one)
 count only a rewrite's premium above that read. Items carried in prompts are
 priced at the full prompt price, so they overlap those findings: `overlaps()` names
 the kinds a finding may share dollars with, and such findings are not to be added up.
@@ -31,12 +31,7 @@ from capcom.checks.agents import AgentDefinition
 from capcom.checks.facts import (
     EVIDENCE_PER_FINDING,
     HANDOFF_TOKENS,
-    IDLE_EXPIRY,
-    LATE_COMPACTION,
-    LATE_RESUME_EXPIRY,
-    LONG_CONTEXT,
     LONG_REPORT_TOKENS,
-    TOOL_WAIT_EXPIRY,
     Account,
     Compaction,
     Facts,
@@ -47,6 +42,13 @@ from capcom.checks.facts import (
     heartbeat,
 )
 from capcom.cost.top import TEMPORARY, project_label
+from capcom.explain.shared import (
+    IDLE_EXPIRY,
+    LATE_COMPACTION,
+    LATE_RESUME_EXPIRY,
+    LONG_CONTEXT,
+    TOOL_WAIT_EXPIRY,
+)
 from capcom.types import AttrValue, Evidence, Finding
 
 MEMORY_BUDGET_TOKENS = 2_000  # one always-loaded file of about 150 lines
@@ -1011,19 +1013,21 @@ def _net(rereads: float, handoffs: float) -> float:
 
 
 def long_running_agents(facts: Facts) -> list[Finding]:
-    """Threads whose prompts grew past LONG_CONTEXT. Saving, per thread:
+    """Threads whose prompts grew past LONG_CONTEXT. Saving, per thread, what its
+    requests paid to read their prompts less what they would have paid had it
+    handed off each time it passed the line (facts.simulate):
 
-        sum over its turns past the line of (context - LONG_CONTEXT) x read price
-        - crossings x HANDOFF_TOKENS x its cache-write price
+        sum over its requests of context x read price - simulated cost
 
-    floored at zero. Heartbeat sessions (facts.heartbeat) are left to
-    `heartbeat_growing_session`, whose advice fits them. The first term is what
-    rereading the tokens past the useful size cost (a rewrite's premium on them is
-    left to the rewrite findings; the part above LATE_COMPACTION before a late compaction is left to
-    `late_compactions`). The second is what the advice costs: a fresh agent at each
-    crossing (the first turn past the line, again after a compaction brought the
-    context back under it) rebuilds a handoff context of HANDOFF_TOKENS, written
-    once to the cache."""
+    floored at zero. The simulated agent follows the thread's own requests: it
+    grows by the same per-request increments, and each time it passes
+    LONG_CONTEXT a fresh agent takes over at the thread's starting context (its
+    first request's, or HANDOFF_TOKENS when that is unknown or already big), whose
+    first request writes that context to the cache instead of reading. Prices are
+    the read price of each request (a rewrite's premium is left to the rewrite
+    findings). Heartbeat sessions (facts.heartbeat) are left to
+    `heartbeat_growing_session`. An earlier compaction is the other way to the
+    same dollars: `late_compactions` overlaps this finding."""
     out: list[Finding] = []
     grouped: dict[str, list[tuple[str, LongContext]]] = defaultdict(list)
     beats = _heartbeats(facts)
@@ -1034,11 +1038,10 @@ def long_running_agents(facts: Facts) -> list[Finding]:
         per_thread = [v for lc in lcs for k, v in lc.per_thread.items() if k not in beats]
         if not per_thread:
             continue
-        gross = sum(v[0] for v in per_thread)
-        usd = sum(_net(v[0], v[1]) for v in per_thread)
-        handoffs = int(sum(v[2] for v in per_thread))
+        usd = sum(max(0.0, v[0]) for v in per_thread)
+        handoffs = int(sum(v[1] for v in per_thread))
         threads: set[tuple[str, str | None]] = set().union(*(lc.threads for lc in lcs)) - beats
-        turns = int(sum(v[3] for v in per_thread))
+        turns = int(sum(v[2] for v in per_thread))
         evs = sorted(
             (e for lc in lcs for k, e in lc.evidence.items() if k not in beats),
             key=lambda p: -p[0],
@@ -1054,9 +1057,9 @@ def long_running_agents(facts: Facts) -> list[Finding]:
             summary=(
                 f"{len(threads)} thread(s) ({subagents} subagents) ran {turns:,} turns past "
                 f"{_k(LONG_CONTEXT)} tokens, up to {_k(biggest)}; every such turn rereads "
-                f"the whole context. Rereading the part past {_k(LONG_CONTEXT)} cost "
-                f"{_usd(gross)}; the saving is net of {handoffs} handoff(s), each "
-                f"rebuilding about {_k(HANDOFF_TOKENS)} tokens in a fresh agent."
+                f"the whole context. Handing off at {_k(LONG_CONTEXT)} ({handoffs} "
+                "handoff(s), each fresh agent starting from its thread's first context "
+                "and growing as the thread did) would have read that much less."
             ),
             advice=(
                 "One task per agent: hand off with a short note and start fresh, or "
@@ -1068,9 +1071,8 @@ def long_running_agents(facts: Facts) -> list[Finding]:
                 "turns": turns,
                 "max_context": biggest,
                 "threshold": LONG_CONTEXT,
-                "rereads_usd": round(gross, 6),
                 "handoffs": handoffs,
-                "handoff_tokens": HANDOFF_TOKENS,
+                "start_tokens_default": HANDOFF_TOKENS,
             },
         )
         if f:
@@ -1080,9 +1082,11 @@ def long_running_agents(facts: Facts) -> list[Finding]:
 
 def late_compactions(facts: Facts) -> list[Finding]:
     """Compactions that started above LATE_COMPACTION tokens. Saving, per
-    compaction: the turns before it, (context - LATE_COMPACTION) x their cache-read
-    price, less one handoff (HANDOFF_TOKENS at the thread's cache-write price: the
-    fresh session the advice starts), floored at zero."""
+    compaction, floored at zero: from the turn its thread passed LATE_COMPACTION to
+    the compaction, each turn's context x read price less the same for a thread
+    compacted then (facts.simulate): it restarts at the post-compaction size the
+    logs show and grows by the thread's own increments (compacting again at the
+    line). It overlaps `long_running_agents`, the other way to the same dollars."""
     per_project: dict[str, list[Compaction]] = defaultdict(list)
     beats = _heartbeats(facts)
     for (sid, _aid), comps in facts.compactions.items():
@@ -1094,8 +1098,7 @@ def late_compactions(facts: Facts) -> list[Finding]:
     out: list[Finding] = []
     for project, found in per_project.items():
         comps = sorted(found, key=lambda c: -c.pre_tokens)
-        gross = sum(c.excess_usd for c in comps)
-        usd = sum(_net(c.excess_usd, c.handoff_usd) for c in comps)
+        usd = sum(max(0.0, c.excess_usd) for c in comps)
         pres = [c.pre_tokens for c in comps]
         f = _finding(
             facts,
@@ -1106,7 +1109,7 @@ def late_compactions(facts: Facts) -> list[Finding]:
             summary=(
                 f"{len(comps)} compaction(s) started above {_k(LATE_COMPACTION)} tokens "
                 f"({', '.join(_k(p) for p in pres[:5])}); the turns before them reread "
-                f"everything above that, for {_usd(gross)}, less one handoff each."
+                "everything; compacting at the line would have saved the difference."
             ),
             advice=(
                 f"Compact by hand when the context passes {_k(LATE_COMPACTION)}, or end the "
@@ -1127,7 +1130,6 @@ def late_compactions(facts: Facts) -> list[Finding]:
                 "compactions": len(comps),
                 "max_pre_tokens": max(pres),
                 "threshold": LATE_COMPACTION,
-                "rereads_usd": round(gross, 6),
             },
         )
         if f:
@@ -1150,15 +1152,17 @@ IDLE_CAUSES = {
 
 
 def idle_cache_rewrites(facts: Facts) -> list[Finding]:
-    """Main-thread requests that rewrote at least half their prompt after a pause
-    past the cache lifetime (5 minutes, or 1 hour when the request wrote with the
-    1-hour lifetime) that was not a tool call: the user was away (an away_summary
-    confirms some). Saving: each rewrite's cost above reading the same tokens."""
+    """Requests that rewrote at least half their prompt after a pause past the
+    cache lifetime (5 minutes, or 1 hour when the request wrote with the 1-hour
+    lifetime) that explain's `expiry_kind` names IDLE_EXPIRY: no tool or
+    background agent ran through it and no lead resumed it, so someone was away
+    (an away_summary confirms some). Saving: each rewrite's cost above reading the
+    same tokens."""
     out = _rewrites(
         facts,
         facts.idle,
         kind="idle_cache_rewrites",
-        title="Cache rewrites after the user was away",
+        title="Cache rewrites after idling",
         what="after a pause longer than the cache lifetime",
         advice=(
             "Before a long break, compact or end the session with a handoff note, and "
@@ -1419,6 +1423,15 @@ _OVERLAP_PAIRS: frozenset[frozenset[str]] = frozenset(
     {frozenset({a, b}) for a in _PROMPT_ITEMS for b in _CONTEXT}
     | {frozenset({"agent_tools_unused", b}) for b in _PROMPT_ITEMS[:3]}
     | {frozenset({"one_command_subagents", b}) for b in (*_PROMPT_ITEMS, *_CONTEXT)}
+    # two ways to the same rereads: a handoff, an earlier compaction, a fresh session
+    | {
+        frozenset(pair)
+        for pair in (
+            ("long_running_agents", "late_compactions"),
+            ("long_running_agents", "session_never_ended"),
+            ("late_compactions", "session_never_ended"),
+        )
+    }
     # pricing a type's requests on Sonnet cuts every dollar they spent
     | {frozenset({"model_mix", b}) for b in (*_PROMPT_ITEMS, *_CONTEXT, "one_command_subagents")}
 )

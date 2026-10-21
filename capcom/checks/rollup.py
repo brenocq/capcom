@@ -28,7 +28,7 @@ KIND_TITLES = {
     "long_subagent_reports": "Long subagent reports",
     "long_running_agents": "Long-running agents",
     "late_compactions": "Compactions that ran too late",
-    "idle_cache_rewrites": "Cache rewrites after the user was away",
+    "idle_cache_rewrites": "Cache rewrites after idling",
     "subagent_resumed_late": "Subagents resumed after their cache expired",
     "subagent_cache_expiry": "Caches expired during long tool calls",
     "model_switches": "Model switches mid-session",
