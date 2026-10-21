@@ -10,16 +10,25 @@ On top: a long-context rate set when the prompt is above the model's threshold
 "fast", and the geo multiplier for `inference_geo` (models 4.6 and later), each on
 every token category. A request older than a price change uses the older price.
 Thinking is part of output and is not priced again.
+
+A request of a model the table lacks altogether (not a Claude model, so no family to
+fall back on) that carries the cost its source reported (`reported_cost_usd`,
+OpenClaw's own estimate for its direct calls) is priced at that cost, flagged
+inexact and priced_as `REPORTED`; a reported 0 means the source had no price either
+(OpenClaw writes 0 for models it has no rates for), so the request stays unpriced.
+The source gives no split capcom keeps, so the whole amount is shown as input. A
+price-table row for the model takes over as soon as there is one.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from capcom.cost.prices import lookup, price_at
+from capcom.cost.prices import ZERO_MODEL, is_placeholder, lookup, price_at
 from capcom.types import CostBreakdown, PriceTable, Request, Usage
 
 PER_MTOK = 1_000_000
+REPORTED = "openclaw-estimate"  # priced_as of a request priced at its reported cost
 
 
 def price_usage(
@@ -67,6 +76,11 @@ def price_usage(
 
 def price(request: Request, table: PriceTable) -> CostBreakdown:
     """The API-equivalent cost of one request, in USD."""
+    reported = request.reported_cost_usd
+    if reported is not None and reported > 0 and not is_placeholder(request.model):
+        p, _ = lookup(table, request.model)
+        if p.model == ZERO_MODEL:
+            return CostBreakdown(input=reported, priced_as=REPORTED, exact_price=False)
     return price_usage(
         request.model,
         request.usage,
