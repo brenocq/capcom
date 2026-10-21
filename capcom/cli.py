@@ -38,6 +38,24 @@ def _calibrate(args: argparse.Namespace) -> int:
     return run_calibrate(load_config(), limit=args.limit)
 
 
+def _serve(args: argparse.Namespace) -> int:
+    from capcom.report.server import run_serve
+
+    return run_serve(load_config(), port=args.port, open_browser=args.open)
+
+
+def _spikes(args: argparse.Namespace) -> int:
+    from capcom.explain.cli import run_spikes
+
+    return run_spikes(load_config(), days=args.days, limit=args.limit)
+
+
+def _checks(args: argparse.Namespace) -> int:
+    from capcom.checks.cli import run_checks_view
+
+    return run_checks_view(load_config(), days=args.days, limit=args.limit)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="capcom", description=__doc__)
     parser.add_argument("--version", action="version", version=f"capcom {__version__}")
@@ -58,6 +76,21 @@ def build_parser() -> argparse.ArgumentParser:
     cal = sub.add_parser("calibrate", help="capcom's totals against Claude Code's cost-state")
     cal.add_argument("--limit", type=int, default=20)
     cal.set_defaults(func=_calibrate)
+
+    serve = sub.add_parser("serve", help="the local website, on 127.0.0.1")
+    serve.add_argument("--port", type=int, default=8787)
+    serve.add_argument("--open", action="store_true", help="open it in the browser")
+    serve.set_defaults(func=_serve)
+
+    spikes = sub.add_parser("spikes", help="spend spikes and their causes")
+    spikes.add_argument("--days", type=int, default=14, help="window, in days (0: all)")
+    spikes.add_argument("--limit", type=int, default=20)
+    spikes.set_defaults(func=_spikes)
+
+    checks = sub.add_parser("checks", help="setup warnings with their weekly saving")
+    checks.add_argument("--days", type=int, default=14, help="window, in days (0: all)")
+    checks.add_argument("--limit", type=int, default=20)
+    checks.set_defaults(func=_checks)
     return parser
 
 
