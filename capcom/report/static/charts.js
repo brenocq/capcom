@@ -127,8 +127,13 @@ export function bandChart(opts) {
     const near = placed.some((p) => fx - p.fx < 0.16 && fx - p.fx > -0.04);
     const place = near ? '.below' : fy < 0.1 ? '.beside' : '';
     const pos = `left:${(fx * 100).toFixed(2)}%;top:${(fy * 100).toFixed(2)}%`;
-    plot.append(h('span.enddot', { style: pos }),
-      h('span.endlab' + place + (fx < 0.15 ? '.leftward' : ''), { style: pos, text: usd(end, end >= 100 ? 0 : 2) }));
+    const lab = h('span.endlab' + place + (fx < 0.15 ? '.leftward' : ''), { style: pos, text: usd(end, end >= 100 ? 0 : 2) });
+    plot.append(h('span.enddot', { style: pos }), lab);
+    // once laid out, move the label to the first place no marker covers
+    if (placed.length && typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(() => clearOfMarks(plot, lab));
+      ro.observe(plot);
+    }
   }
   const guide = h('div.guide', { hidden: true });
   plot.append(guide);
@@ -147,6 +152,25 @@ export function bandChart(opts) {
   plot.addEventListener('mouseleave', () => { guide.hidden = true; hideTip(); });
   const xt = timeTicks(x0, x1);
   return h('div', null, plot, xAxis(xt, x0, x1, left));
+}
+
+// The end label's places, tried in order until one overlaps no spike marker and
+// stays inside the plot (the first one when none does).
+const END_PLACES = [[], ['below'], ['beside'], ['leftward'], ['below', 'leftward']];
+
+function clearOfMarks(plot, lab) {
+  const marks = [...plot.querySelectorAll('.spikemark')].map((m) => m.getBoundingClientRect());
+  const box = plot.getBoundingClientRect();
+  if (!box.width) return;
+  const hits = (r) => marks.some((m) => r.left < m.right + 2 && r.right > m.left - 2 && r.top < m.bottom + 2 && r.bottom > m.top - 2);
+  const inside = (r) => r.left >= box.left - 40 && r.right <= box.right + 4 && r.top >= box.top - 24 && r.bottom <= box.bottom + 4;
+  for (const place of END_PLACES) {
+    lab.classList.remove('below', 'beside', 'leftward');
+    lab.classList.add(...place);
+    const r = lab.getBoundingClientRect();
+    if (!hits(r) && inside(r)) return;
+  }
+  lab.classList.remove('below', 'beside', 'leftward');
 }
 
 // ------------------------------------------------------------------ per-day bars

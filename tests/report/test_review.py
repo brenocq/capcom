@@ -17,6 +17,7 @@ import pytest
 
 from capcom.report import api
 from capcom.report.analysis import Analysis
+from capcom.report.calibration import REASON_LABELS
 from capcom.report.server import STATIC, Scanner, Site
 from capcom.report.tally import project_display, project_names
 from capcom.store.index import open_index
@@ -248,7 +249,7 @@ def test_spike_markers(spiky_path: Path) -> None:
         (mark,) = marks["marks"]
         assert mark["n"] == 1 and mark["kind"] == "single_request"
         assert mark["session_id"] == "sp" and mark["title"] == "Spiky"
-        assert mark["t"] == int((NOW - timedelta(hours=2, minutes=30)).timestamp() * 1000)
+        assert mark["t"] == (NOW - timedelta(hours=2, minutes=30)).isoformat()
         assert mark["excess_usd"] > 1
 
 
@@ -283,7 +284,7 @@ def test_calibration_reason_labels(client: Client) -> None:
     cal = client.get("/api/session/s1")[1]["calibration"]
     assert "compaction" in cal["reasons"]
     labels = dict(zip(cal["reasons"], cal["reason_labels"], strict=True))
-    assert labels["compaction"] == api.REASON_LABELS["compaction"]
+    assert labels["compaction"] == REASON_LABELS["compaction"]
 
 
 def test_real_spikes_fn_is_used() -> None:

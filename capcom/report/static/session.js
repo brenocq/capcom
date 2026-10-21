@@ -12,6 +12,10 @@ import { timelineMissing } from './spend.js';
 
 export async function renderSession(main, r) {
   const d = await api('session/' + encodeURIComponent(r.arg || ''));
+  // the API's times are ISO; the charts below place them in epoch ms
+  for (const p of d.pauses) { p.start = Date.parse(p.start); p.end = Date.parse(p.end); }
+  for (const c of d.compactions) c.t = Date.parse(c.t);
+  for (const a of [d.main, ...d.agents]) if (a) { a.first = a.first && Date.parse(a.first); a.last = a.last && Date.parse(a.last); }
   const sn = d.session, t = d.totals;
   const first = sn.first_seen ? new Date(sn.first_seen) : null, last = sn.last_seen ? new Date(sn.last_seen) : null;
 
@@ -95,8 +99,14 @@ function calibration(c, t) {
   const why = c.comparable ? '' : ` The two cannot be compared exactly because of ${reasons.length ? joinAnd(reasons) : 'calls the logs lack'}.`;
   const est = estimateNote(t);
   return h('section.card.banner', null, mark,
-    h('span.msg', null, h('strong', { text: lead }), ` Claude Code's own estimate for this session is ${usd(c.claude_code_usd)}; capcom's, over the same window of the logs, is ${usd(c.capcom_usd)}${apart}.${why}${est ? ' ' + est + '.' : ''}`),
+    h('span.msg', null, h('strong', { text: lead }), ` Claude Code's own estimate ${c.part && !c.part.whole_session ? `for ${partWords(c.part)}` : 'for this session'} is ${usd(c.claude_code_usd)}; capcom's, over the same window of the logs, is ${usd(c.capcom_usd)}${apart}.${why}${est ? ' ' + est + '.' : ''}`,
+      c.note ? h('span.note.block', { text: c.note }) : null),
     h('div.vals', null, h('span', null, 'Claude Code', h('b', { text: usd(c.claude_code_usd) })), h('span', null, 'capcom', h('b', { text: usd(c.capcom_usd) }))));
+}
+
+// "the last process (Oct 16 10:02 to Oct 21 14:10, process 2 of 3)"
+function partWords(p) {
+  return p.process && p.processes > 1 ? `process ${p.process} of ${p.processes} (${p.text.split(', process')[0]})` : `the last process (${p.text.split(', the last')[0]})`;
 }
 
 function unfolded(d) {
@@ -250,8 +260,9 @@ function agentsTable(d) {
       const color = a.agent_type === 'main' ? 'var(--s1)' : SERIES[i % SERIES.length];
       return h('tr', null,
         h('td', null, h('span', { style: 'display:flex;align-items:center;gap:8px;font-weight:500' }, h('span.sw', { style: `background:${color}` }), a.agent_type === 'main' ? 'main thread' : a.agent_type)),
-        h('td.num', { text: a.agent_type === 'main' ? '' : String(a.spawns) }),
-        h('td.num', { text: String(a.median_tool_calls), style: a.agent_type !== 'main' && a.median_tool_calls <= 2 ? 'color:var(--clay)' : null }),
+        h('td.num', { text: a.spawns == null ? 'n/a' : String(a.spawns), style: a.spawns == null ? 'color:var(--muted)' : null }),
+        // the main thread is one thread: its calls are a count, not a median
+        h('td.num', { text: a.median_tool_calls == null ? `${a.tool_calls} in all` : String(a.median_tool_calls), style: a.median_tool_calls != null && a.median_tool_calls <= 2 ? 'color:var(--clay)' : null }),
         h('td.num', { text: tokens(a.average_peak_context) }),
         h('td', null, h('div.track', { style: 'width:140px' }, h('div', { style: `width:${(a.share * 100).toFixed(1)}%;background:${color}` }))),
         h('td.cost', { text: usd(a.usd) }));

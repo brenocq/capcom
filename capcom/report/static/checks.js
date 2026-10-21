@@ -1,7 +1,7 @@
 // Checks: setup warnings drawn from real usage, ranked by the weekly saving, each
 // with its evidence, a small chart from its numbers and the change to paste.
 
-import { h, usd, tokens, seg, empty, setQuery, sessionHref, stamp, maxOf, copyButton, daysText } from './lib.js';
+import { h, usd, pct, tokens, seg, empty, setQuery, sessionHref, stamp, maxOf, copyButton, daysText } from './lib.js';
 import { pendingBlock } from './sessions.js';
 
 const RANGES = [[7, '7 days'], [14, '14 days'], [30, '30 days']];
@@ -32,24 +32,50 @@ export async function renderChecks(main, r) {
   if (d.overlapping) {
     main.append(h('p.notice', { text: 'Some of these savings count the same dollars: a long context and the late compaction that ends it, say. Each saving is an “up to” on its own; the total counts each dollar once, over the findings that do not overlap.' }));
   }
-  // the largest in full; the small ones as rows that open to the same content
-  const big = d.findings.filter((f, i) => i < FULL && f.saving_usd_per_week >= 1);
-  for (const f of big) main.append(card(f));
-  const rest = d.findings.slice(big.length);
-  if (rest.length) {
-    main.append(h('section.card.minor', null,
-      h('h2.small', { text: `${rest.length} smaller finding${rest.length === 1 ? '' : 's'}` }),
-      rest.map((f) => h('details', null,
-        h('summary', null,
-          h('span.n', { text: String(f.n) }),
-          h('span.mtext', null, h('b', { text: f.title }), f.scope && f.scope !== 'all' ? h('span.note', { text: ' · ' + (f.scope_label || f.scope), title: f.scope_path || null }) : null,
-            h('span.note.block', { text: f.summary })),
-          h('span.save.small', { text: 'up to ' + usd(f.saving_usd_per_week, 2) + '/wk' })),
-        body(f)))));
+  // one row per kind across its projects or agent types, largest first; a row
+  // opens to its findings, one per scope
+  const byN = new Map(d.findings.map((f) => [f.n, f]));
+  const titleOf = new Map((d.rollups || []).map((r) => [r.kind, r.title]));
+  const counted = (d.rollups || []).filter((r) => !r.judgement_call);
+  const judged = (d.rollups || []).filter((r) => r.judgement_call);
+  if (counted.length) {
+    main.append(h('section.card.rollups', null, h('h2', { text: 'By kind' }),
+      h('p.note', { style: 'margin:0 0 8px', text: 'Each kind across the places it was found, with the share of each. Open a row for its findings.' }),
+      counted.map((r, i) => rollupRow(r, byN, titleOf, i === 0))));
   }
+  if (judged.length) {
+    const sum = judged.reduce((a, r) => a + r.saving_usd_per_week, 0);
+    main.append(h('section.card.rollups.judged', null,
+      h('div.split', null, h('h2', { text: 'Judgement calls' }), h('span.save.small', { text: 'up to ' + usd(sum, 2) + '/wk more' })),
+      h('p.note', { style: 'margin:0 0 8px', text: 'A judgement call on quality, not in the total: such a change trades some quality for its saving, and would shrink the other savings on the same requests.' }),
+      judged.map((r) => rollupRow(r, byN, titleOf, false))));
+  }
+  if (d.small && d.small.findings) {
+    main.append(h('p.note', { style: 'margin:0', text: `${d.small.findings} more finding${d.small.findings === 1 ? '' : 's'} under ${usd(d.small.below_usd_per_week, 2)}/wk, ${usd(d.small.usd_per_week, 2)}/wk together: not listed, not in the total.` }));
+  }
+  if (d.footer) main.append(h('p.note.footer', { text: d.footer }));
 }
 
-const FULL = 8;  // findings shown in full; the rest as rows
+// A roll-up row: the kind, its weekly saving, the scopes with their shares, what
+// it overlaps; it opens to its findings.
+function rollupRow(r, byN, titleOf, open) {
+  const findings = r.findings.map((n) => byN.get(n)).filter(Boolean);
+  const many = r.scopes.length !== 1;
+  const noun = r.scope_noun + (many ? 's' : '');
+  const scopes = r.scopes.length === 1 && r.scopes[0].scope === 'all' ? 'across every project'
+    : `across ${r.scopes.length} ${noun}: ` + r.scopes.slice(0, 4).map((x) => `${x.scope_label} ${pct(x.share)}`).join(', ') + (r.scopes.length > 4 ? `, ${r.scopes.length - 4} more` : '');
+  const tags = [];
+  if (r.judgement_call) tags.push(h('span.tag', { text: 'judgement call, not in the total' }));
+  else if (r.counted === 'none') tags.push(h('span.tag.over', { text: 'overlaps: not in the total', title: 'Its dollars are counted under the kind it overlaps.' }));
+  else if (r.counted === 'some') tags.push(h('span.tag.over', { text: 'partly in the total', title: 'Some of its findings overlap a larger one and are left out of the total.' }));
+  if (r.overlaps.length) tags.push(h('span.note', { text: 'may share dollars with ' + r.overlaps.map((k) => titleOf.get(k) || k).join(', ') }));
+  return h('details.rollup', { open: open || null },
+    h('summary', null,
+      h('span.mtext', null, h('b', { text: r.title }), h('span.note.block', { text: scopes }), tags.length ? h('span.tags', null, ...tags) : null),
+      h('span.save', null, h('small', { text: 'up to ' }), usd(r.saving_usd_per_week, r.saving_usd_per_week < 10 ? 2 : 0) + '/wk')),
+    h('div.rfind', null, findings.map((f) => card(f))));
+}
+
 
 // "across 4 findings that don't overlap (of 5)", worded as in `capcom checks`
 export function totalLabel(t) {
@@ -63,7 +89,8 @@ function card(f) {
   box.append(h('div.chead', null,
     h('span.n', { text: String(f.n) }),
     h('div.ctext', null,
-      h('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;align-items:baseline' }, h('h2', { text: f.title }), f.scope && f.scope !== 'all' ? h('span.chip', { text: f.scope_label || f.scope, title: f.scope_path || null }) : null),
+      h('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;align-items:baseline' }, h('h2', { text: f.title }), f.scope && f.scope !== 'all' ? h('span.chip', { text: f.scope_label || f.scope, title: f.scope_path || null }) : null,
+        f.counted ? null : h('span.tag.over', { text: f.metrics && f.metrics.judgement_call ? 'judgement call' : 'overlaps a larger finding', title: 'Not added to the total.' })),
       h('p.para', { text: f.summary })),
     h('span.save', { title: 'Estimated at this window’s pace' }, h('small', { text: 'up to ' }), usd(f.saving_usd_per_week, f.saving_usd_per_week < 10 ? 2 : 0) + '/wk')));
   box.append(body(f));

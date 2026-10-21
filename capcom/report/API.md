@@ -22,8 +22,12 @@ middle of a scan, the terminal says so (the next scan reads the rest).
 Conventions:
 
 - Money is API-equivalent USD at list prices (`capcom.cost`), not the bill.
-- Times are ISO 8601 strings in the machine's local time zone, except series and the
-  session's per-request columns, which use epoch milliseconds (`ms`).
+- Times are ISO 8601 strings in the machine's local time zone, with their offset
+  (spike starts and ends, chart markers, pauses, compactions, threads' first and
+  last request included). The only epoch milliseconds (`ms`) are the x values of
+  charts: series `times`, the session's per-request column `requests.t`, a spike
+  `window`'s `start`, `spike_start` and `spike_end`, and the limits' point arrays
+  (`fan`, `history`, `points`). Dates without a time (`regime.day`) are `YYYY-MM-DD`.
 - "Today" and day windows start at local midnight; a window of `days` holds that many
   whole local days, today included.
 - Placeholder replies (`<synthetic>` models) are left out, as in `capcom top`.
@@ -85,7 +89,7 @@ end of step *i*, so the last total is the window's total. At most six members pl
 session_id, title, project, project_path, agent_id, requests, cost_usd, excess_usd, cause, cause_label,
 confidence, headline}]}` from `capcom.timeline.find_spikes` over the window: `count`
 and `excess_usd` cover them all, `marks` the 12 largest by excess, numbered 1.. in time
-order (`t`, `end` in ms). The charts draw them as numbered markers linking to
+order (`t`, `end` ISO). The charts draw them as numbered markers linking to
 `/spikes?spike=<key>`. `cause`, `cause_label`, `confidence` and `headline` (the title)
 are the main cause from `capcom.explain` (its largest share of the excess), null when
 there is none; `project` is the session's project label (`project_path` its full
@@ -93,6 +97,26 @@ folder), null without a session; `explained` is false while `capcom.explain` is 
 
 `unavailable` lists the analysis modules that are not built yet; the parts that need
 them are `null`.
+
+**Regime** ("what changed", `capcom.report.story` over `capcom.timeline.regime_changes`):
+
+```
+{day, before_usd_per_day, after_usd_per_day, after_days, ratio, rise_usd_per_day,
+ sessions: [{key, label, title, project, rise_usd, share, rest, in_text}],
+ agent_types: [{key, label, rise_usd, share, rest}],
+ text}
+```
+
+The latest day of the window where the mean daily spend rose to a new level: `after`
+is the mean of up to 7 days from `day`, `before` of the 7 days before it (which may
+precede the window), `ratio` their quotient (null when nothing was spent before).
+Only whole local days count. `sessions` and `agent_types` split the rise
+(`rise_usd_per_day`): the top 3 by their own rise (`share` of it), then one
+`rest: true` entry (`key` null) so they add up; an agent type's `key` is `main` for
+main threads. `in_text` marks the sessions `text` names: "Spend rose ×11.9 from Oct
+16 ($10 to $119 a day): improved d3f68339 (52%) and toy-brain bcbbaac4 (35%); coder
+subagents 53%." (`capcom top` and `capcom spikes` print the same line). Null when the
+spend kept its level.
 
 **Projects**: one display rule, `capcom.timeline.groups.ProjectNames`, shared with
 `capcom top --by project`. A project folder's path is a session's cwd, or the ancestor
@@ -124,6 +148,8 @@ true while serve's first scan has not finished: totals may be partial until then
                    same_hour_average_usd, same_hour},
  spending_now: {usd_last_hour, spark: {step_s, times, values} | null},
  cumulative_today: Cumulative (by category, 5-minute steps) | null,
+ spikes_today: Spikes | null,
+ regime: Regime | null,                          # a change in the last 14 days
  limits: Limits without segments,                # see /api/limits
  unavailable}
 Block = {since, totals, sessions, by_project: [Group], by_agent: [Group],
@@ -139,13 +165,14 @@ main threads, else the agent type; projects as in "Projects" above.
 
 ### `GET /api/spend?days=14&group=category`
 
-`days` is one of 7, 14, 30, 90; `group` one of `category`, `project`, `model`, `agent`,
-`session`.
+`days` is one of 7, 14, 30, 90; `group` one of `category`, `project`, `model`, `agent`
+(also accepted as `agent_type`), `session`.
 
 ```
 {window: {days, since, until, group}, totals, sessions_count, temporary_sessions,
  cumulative: Cumulative | null,       # steps: 30 min (7 d), 1 h (14 d), 2 h (30 d), 6 h (90 d)
  spikes: Spikes | null,
+ regime: Regime | null,               # a change dated inside the window
  daily: {members: [{key, label}], days: [{date, values, total}]} | null,
  heatmap: {weekdays: [Mon..Sun], cells: [7][24] USD, max} | null,
  context_buckets: [{label, requests, usd}],   # <50k, 50-100k, ..., >600k tokens of context
@@ -159,13 +186,18 @@ by local weekday and hour. The window's dates count back from today's local date
 each starts at its own local midnight, so a daylight-saving change inside the window
 moves no request to the wrong day.
 
+`sessions_count` leaves out the sessions in temporary folders (/tmp), counted apart in
+`temporary_sessions`; together they are `/api/sessions`' `total` for the same `days`
+(whose `temporary` counts the same temporary sessions).
+
 ### `GET /api/sessions?days=14&q=&sort=usd&limit=200`
 
 `days` 0 means all time. `q` matches the title, the project label or folder, or an
 agent type of the session (case-insensitive). `sort`: `usd`, `last`, `peak_context`,
 `active_seconds`, `subagents`, `requests` (descending, ties by cost; zeros sort as
 numbers, missing values last).
-`{window: {days, since, until}, total, sessions: [Session row]}`.
+`{window: {days, since, until}, total, temporary, sessions: [Session row]}`: `total`
+counts every matching session, temporary folders included (`temporary` of them).
 
 ### `GET /api/session/<session_id>`
 
@@ -173,14 +205,16 @@ numbers, missing values last).
 {session: {session_id, title, project, project_path, project_dir, cwd, git_branch, version,
            entrypoint, first_seen, last_seen, running, models, efforts},
  totals, active_seconds,
- calibration: {claude_code_usd, capcom_usd, spread, comparable, reasons,
-               reason_labels} | null,
+ calibration: {claude_code_usd, capcom_usd, spread, comparable, reasons, reason_labels,
+               part: {since, until, first, last, process, processes, whole_session, text},
+               session_usd, note} | null,
  requests: {t, agent, context, usd, output, cache_write, estimated},   # columns, time order
  thinned: {requests, kept, spikes} | null,
  main: {first, last, requests, usd, tool_calls, peak_context} | null,
  agents: [{agent_id, agent_type, first, last, requests, usd, tool_calls,
            peak_context, finished}],
- agent_types: [{agent_type, spawns, median_tool_calls, average_peak_context, usd, share}],
+ agent_types: [{agent_type, spawns, tool_calls, median_tool_calls, average_peak_context,
+                usd, share}],   # main: spawns and median_tool_calls null (one thread)
  pauses: [{start, end, minutes, next_usd, next_cache_write}],    # gaps of 5 minutes or more
  compactions: [{t, agent_id, trigger, pre_tokens, post_tokens}],
  spikes: {count, excess_usd, explained, items: [Spike item]} | null}
@@ -200,7 +234,15 @@ that fit, a thread with at least a run's worth of requests in runs of its own (t
 main thread keeps its line) and the smaller threads' requests together. The
 session's first and last request stay. Totals, `main`, `agents` and
 `pauses` count every request. `reason_labels` are the `reasons` in words (the ids
-come from `capcom.cost.calibrate`). A session whose replies are all placeholders has
+come from `capcom.cost.calibrate`). Claude Code's cost-state counts one process: `part`
+is the stretch of the session it compares, from the process start (`since`) to the
+first record after the cost-state (`until`, null while open), with its first and
+last request; `process` of `processes` numbers it among the processes that wrote a
+cost-state (null without a start time), and `whole_session` is false when the
+session has requests before it (a resumed session). `capcom_usd` is that part;
+`session_usd` is every request, as `totals.usd`; `note` says so in one line when
+they differ ("Claude Code's cost-state counts only process 2 of 3 ..."), else null.
+`capcom calibrate` prints the same part per session (`--days`, `--project`). A session whose replies are all placeholders has
 0 active seconds. A session is
 `running` when it wrote within the last 10 minutes.
 
@@ -211,33 +253,41 @@ Sessions with a record in the last 10 minutes, fastest first:
 usd_last_10_min, usd_per_hour, last_seen}]}`. The rate is the last 10 minutes' spend
 times six.
 
-### `GET /api/spikes?days=14&project=<label>`
+### `GET /api/spikes?days=14&project=<label>&cause=<cause>`
 
 501 (`module` `timeline` or `explain`, milestone 3) until both are built. `days` is
 1 to 366. `project` (optional) is a project label, its full folder or its project
-folder; a project no session has is a 400 `bad_query`.
+folder; a project no session has is a 400 `bad_query`. `cause` (optional) is a cause id
+(`capcom.types.CauseKind`, e.g. `tool_wait_expiry`); an unknown one is a 400.
 
 ```
 {days, since, until, count, excess_usd,
  explained,                                     # spikes with a cause other than unexplained
+ largest,                                       # key of the largest spike: the default pick
+ cause,                                         # the cause filter, null without one
  project, project_path,                         # the filter, null without one
  by_project: [{project, project_path, excess_usd, spikes}],   # largest first
- causes: [{cause, label, excess_usd, explanations}],   # largest first, unexplained last
+ causes: [{cause, label, color, excess_usd, explanations}],  # largest first, unexplained last
  spikes: [Spike item + {n, window}]}
 Spike item = {key, kind, scope, start, end, session_id, agent_id, agent_type, title,
               project, project_path, requests, cost_usd, baseline_usd, excess_usd,
-              cause, cause_label, confidence, headline,   # the main cause, as in Spikes
+              cause, cause_label, cause_color, confidence, headline,   # the main cause
               explanations: [{cause, cause_label, confidence, confidence_label,
                               excess_usd, title, summary, advice, evidence: [Evidence]}]}
 Evidence = {label, session_id, agent_id, timestamp, message_id, event_key}
-window = {start, step_s, usual: [usd], extra: [usd], spike_start, spike_end}   # ms
+window = {start, step_s, usual: [usd], extra: [usd], spike_start, spike_end}   # a chart: ms
 ```
 
 `causes` add up the explanations of every spike of the window (of the project's
 spikes with `?project=`, which also narrows `count`, `excess_usd`, `explained` and
 `spikes`); `by_project` adds up the excess of every spike of the window per project,
 whatever the filter (`project` null for spikes without a session), so its sums equal
-the unfiltered `excess_usd`; `spikes` lists the 40
+the unfiltered `excess_usd`. With `?cause=`, `count`, `excess_usd`, `explained` and
+`spikes` keep the spikes with an explanation of that cause, while `causes` still
+lists every cause (the page's filter chips). A cause's `color` is a CSS value: the
+validated palette (`--s1`..`--s6`, in order) for tool-wait expiries, late-resumed
+subagents, idle rewrites, parallel subagents' work, fan-out and compaction, gray for
+the others and the unexplained rest; it is the same in every window. `spikes` lists the 40
 largest by excess, numbered in time order. `scope` is `thread` (one agent thread,
 `agent_id` null for the main thread) or `session` (all threads of the session). The
 `window` is about 36 bars around the spike (30 minutes to 3 hours each side) of the
@@ -291,10 +341,26 @@ logs.
 
 ```
 {days, since, until, overlapping,
- total: {usd_per_week, findings, of, all, text} | null,
+ total: {usd_per_week, findings, of, all, text,
+         judgement_calls: {usd_per_week, findings, items: [{kind, scope, usd_per_week}]}?} | null,
+ rollups: [{kind, title, headline, saving_usd_per_week, scope_noun,
+            scopes: [{scope, scope_label, saving_usd_per_week, share}],
+            findings: [n], overlaps: [kind], judgement_call, counted}],
  findings: [{n, kind, title, scope, scope_label, scope_path, summary, saving_usd_per_week, advice, change,
-             evidence: [Evidence], metrics, overlaps: [kind], counted, visual}]}
+             evidence: [Evidence], metrics, overlaps: [kind], counted, visual}],
+ small: {findings, usd_per_week, below_usd_per_week},
+ footer}
 ```
+
+`rollups` (`capcom.checks.rollup`) is one row per kind across its scopes (projects, or
+agent types for `scope_noun` "agent type"), largest first and judgement calls last:
+its saving, each scope's `share` of it, the `n` of its findings, the kinds it may
+share dollars with, and whether its findings are all, some or none `counted` in the
+total. Rows of different kinds are not to be added up (`overlaps`); the total is.
+Findings under $0.10/week are not in `findings` nor in the total: `small` counts
+them. `judgement_calls` (only when there are any) are findings whose saving trades
+quality (a cheaper model for an agent): never in the total. `footer` says in words
+what the total covers.
 
 Findings come ranked by weekly saving; `scope_label` names a project scope as in
 "Projects" (other scopes, an agent type or `all`, as they are). Some savings count the same dollars
