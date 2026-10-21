@@ -119,7 +119,7 @@ function unfolded(d) {
   ctx.append(svg);
   for (const c of d.compactions) {
     const left = (x(c.t) * 100).toFixed(2) + '%';
-    const mark = h('div', { style: `position:absolute;top:0;bottom:0;left:${left};border-left:1px dashed var(--clay)` });
+    const mark = h('div', { style: `position:absolute;top:0;bottom:0;left:${left};border-left:1px dashed var(--clay);opacity:0.6` });
     ctx.append(tipOn(mark, `Compaction at ${stamp(new Date(c.t))}`, [
       { label: 'Trigger', value: c.trigger || 'unknown' },
       { label: 'Before', value: c.pre_tokens != null ? tokens(c.pre_tokens) : '?' },
@@ -138,15 +138,18 @@ function unfolded(d) {
       s('path', { d: bars((i) => R.agent[i] >= 0), fill: 'none', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke', style: 'stroke:var(--s2)' }))));
 
   // pauses
+  // a chip for each long pause where it fits (about 6% of the width), else a tick
+  let lastChip = -1;
   const pauses = h('div', { style: 'position:relative;height:26px' }, d.pauses.map((p) => {
     const mid = (x(p.start) + x(p.end)) / 2;
     const left = (mid * 100).toFixed(2) + '%';
     const shift = mid > 0.94 ? '-100%' : mid < 0.06 ? '0' : '-50%';
-    const longp = p.minutes >= 30;
-    const el = longp
+    const chip = p.minutes >= 30 && mid - lastChip >= 0.06;
+    if (chip) lastChip = mid;
+    const el = chip
       ? h('span', { class: p.minutes >= 60 ? 'pausechip warn' : 'pausechip', style: `left:${left};transform:translateX(${shift})`, text: duration(p.minutes * 60) })
       : h('span.pausetick', { style: `left:${left}` });
-    return tipOn(el, `Pause of ${duration(p.minutes * 60)}, ${hm(new Date(p.start))} to ${hm(new Date(p.end))}`, [
+    return tipOn(el, `Pause of ${duration(p.minutes * 60)}, ${stamp(new Date(p.start))} to ${stamp(new Date(p.end))}`, [
       { label: 'Next request', value: usd(p.next_usd) },
       { label: 'Cache written', value: tokens(p.next_cache_write) },
     ]);
@@ -181,8 +184,10 @@ function unfolded(d) {
   const marks = [{ t: start, label: stamp(new Date(start)) }];
   for (const g of x.gaps) marks.push({ t: g.end, label: stamp(new Date(g.end)) });
   marks.push({ t: end, label: stamp(new Date(end)) });
-  const labels = marks.filter((m, i) => i === 0 || x(m.t) - x(marks[i - 1].t) > 0.08 || i === marks.length - 1);
-  if (labels.length > 1 && x(labels[labels.length - 1].t) - x(labels[labels.length - 2].t) < 0.08) labels.splice(labels.length - 2, 1);
+  const labels = [];
+  for (const m of marks.slice(0, -1)) if (!labels.length || x(m.t) - x(labels[labels.length - 1].t) > 0.12) labels.push(m);
+  while (labels.length > 1 && 1 - x(labels[labels.length - 1].t) < 0.12) labels.pop();
+  labels.push(marks[marks.length - 1]);
   if (!x.gaps.length) {
     for (let k = 1; k < 4; k++) labels.splice(k, 0, { t: start + (end - start) * k / 4, label: hm(new Date(start + (end - start) * k / 4)) });
     labels.sort((a, b) => a.t - b.t);
