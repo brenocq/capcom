@@ -284,8 +284,10 @@ sentences, else null. `capcom calibrate` prints the same part per session (`--da
 
 Sessions with a record in the last 10 minutes, fastest first:
 `{window_s: 600, sessions: [{session_id, title, project, agents_active,
-usd_last_10_min, usd_per_hour, last_seen}]}`. The rate is the last 10 minutes' spend
-times six.
+usd_last_10_min, usd_per_hour, last_seen}], watching, index_updated?}`. The rate is the
+last 10 minutes' spend times six. `watching` is false when this server never scans
+(`serve --no-scan`): the index then stops at `index_updated` (ISO), so an empty list
+means nothing new was read, not that no session ran.
 
 ### `GET /api/spikes?days=14&project=<label>&cause=<cause>`
 

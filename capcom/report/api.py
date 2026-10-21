@@ -104,6 +104,7 @@ class Context:
     openclaw_root: Path | None = None  # None: from the configuration
     state_dir: Path | None = None  # where the usage samples are; None: no samples
     scanning: bool = False  # serve's first scan is still running: totals may be partial
+    watching: bool = True  # False: this server never scans (serve --no-scan), so "live" is stale
 
     def local(self, t: datetime) -> datetime:
         return t.astimezone(self.tz)
@@ -1025,7 +1026,11 @@ def live(ctx: Context) -> dict[str, Any]:
             }
         )
     out.sort(key=lambda s: (-float(s["usd_per_hour"] or 0), str(s["session_id"])))
-    return {"window_s": int(LIVE_WINDOW.total_seconds()), "sessions": out}
+    reply: dict[str, Any] = {"window_s": int(LIVE_WINDOW.total_seconds()), "sessions": out}
+    reply["watching"] = ctx.watching
+    if not ctx.watching:  # nothing new reaches the index: say how old it is, never "no session"
+        reply["index_updated"] = status(ctx).get("index", {}).get("updated")
+    return reply
 
 
 # --------------------------------------------------------------------------- spikes

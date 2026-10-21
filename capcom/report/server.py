@@ -473,6 +473,7 @@ class Handler(BaseHTTPRequestHandler):
                 openclaw_root=self.site.openclaw_root,
                 state_dir=self.site.state_dir,
                 scanning=self.site.scanner is not None and self.site.scanner.first_scan,
+                watching=self.site.scanner is not None,
             )
             payload = ENDPOINTS[name](ctx, parts[1] if len(parts) == 2 else "", query)
             body = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode()
