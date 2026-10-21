@@ -86,3 +86,10 @@ def test_claude_models_ignore_the_reported_cost() -> None:
 
 def test_placeholders_ignore_the_reported_cost() -> None:
     assert price(_with_cost(req(model="<synthetic>"), 1.0), T).total == 0
+
+
+def test_explain_costs_use_the_reported_cost_fallback() -> None:
+    from capcom.explain.rules import Pricer
+
+    r = _with_cost(req(model="some-other-model-1", input=M, output=M), 0.42)
+    assert Pricer(T).cost(r) == pytest.approx(0.42)
