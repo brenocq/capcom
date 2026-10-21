@@ -2,7 +2,7 @@
 
 `cumulative` and `per_step` give the chart series (series.py), grouped as in
 groups.py; `find_spikes` finds single expensive requests and slope changes per
-agent thread (spikes.py)."""
+agent thread, and slope changes of whole sessions (subagent fan-out) (spikes.py)."""
 
 from __future__ import annotations
 
