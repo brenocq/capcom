@@ -115,6 +115,9 @@ export const categoryColor = (key) => SERIES[Math.max(0, CATEGORY_ORDER.indexOf(
 
 const memo = new Map();
 
+// Drop the kept results, so the next draw fetches fresh data.
+export function forget() { memo.clear(); }
+
 export class ApiError extends Error {
   constructor(status, body) {
     super(body && body.message ? body.message : `HTTP ${status}`);
@@ -219,4 +222,66 @@ export function setQuery(params) {
   const qs = q.toString();
   history.replaceState(null, '', location.pathname + (qs ? '?' + qs : ''));
   window.dispatchEvent(new Event('capcom-route'));
+}
+
+// The largest value of an array, by a loop (spreading a big array into Math.max
+// overflows the call stack).
+export function maxOf(values, floor = -Infinity) {
+  let m = floor;
+  for (const v of values) if (v > m) m = v;
+  return m;
+}
+
+// A button that copies `text` to the clipboard and says so.
+export function copyButton(text, label = 'Copy') {
+  const btn = h('button.copy', { type: 'button', text: label });
+  btn.addEventListener('click', async () => {
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    } catch (e) {
+      const area = h('textarea', { style: 'position:fixed;left:-9999px', 'aria-hidden': 'true' });
+      area.value = text;
+      document.body.append(area);
+      area.select();
+      try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
+      area.remove();
+    }
+    btn.textContent = ok ? 'Copied' : 'Select and copy by hand';
+    setTimeout(() => { btn.textContent = label; }, 1800);
+  });
+  return btn;
+}
+
+// "today" or "the last N days"
+export function daysText(days) { return days === 1 ? 'today' : `the last ${days} days`; }
+
+// The cause labels and confidence names of capcom.explain (the API sends labels too).
+export const CONFIDENCE = { clear: 'clear cause', likely: 'likely cause', unexplained: 'unexplained' };
+
+// A spike's kind in words: [headline, tag].
+export const SPIKE_KINDS = {
+  single_request: ['One request far above its recent median', 'Single request'],
+  slope_change: ['The spend rate rose and stayed up', 'Slope change'],
+};
+
+// A spike's headline and tag: its main cause when capcom.explain gave one, else
+// what capcom.timeline saw.
+export function spikeText(m) {
+  const kind = SPIKE_KINDS[m.kind] || [m.kind, m.kind];
+  return { title: m.headline || kind[0], tag: m.cause_label || kind[1], unexplained: m.cause === 'unexplained' };
+}
+
+// The Spikes page for one spike: a window of whole days that starts on or before it.
+export function spikeHref(key, startMs, days) {
+  // Local calendar days from the spike's day to today, inclusive: a spike at
+  // 23:30 seen at 00:30 needs days=2, not 1.
+  const day0 = new Date(startMs);
+  day0.setHours(0, 0, 0, 0);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const back = Math.round((today - day0) / 864e5) + 1;
+  const d = days || [1, 7, 14, 30, 90].find((x) => x >= back) || Math.min(366, back + 1);
+  return `/spikes?days=${d}` + (key ? '&spike=' + encodeURIComponent(key) : '');
 }

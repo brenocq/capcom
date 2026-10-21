@@ -1,5 +1,5 @@
-// The sessions table (Spend and the Sessions page), and the Spikes and Checks
-// pages, which wait for milestones 3 and 4.
+// The sessions table (Spend and the Sessions page), and the block shown for a
+// part whose analysis module is not built yet.
 
 import { h, api, usd, tokens, pct, duration, stamp, seg, empty, setQuery, sessionHref, ApiError } from './lib.js';
 
@@ -63,23 +63,4 @@ export async function pendingBlock(kind, query = '') {
     }
     throw err;
   }
-}
-
-export async function renderPending(main, kind) {
-  const p = PENDING[kind];
-  main.append(h('header.head', null, h('div.titles', null, h('h1', { text: p.title }), h('p.sub', { text: 'Last 14 days' }))));
-  const { data, block } = await pendingBlock(kind, 'days=14');
-  const card = h('section.card');
-  if (block) card.append(block);
-  else if (kind === 'checks') {
-    card.append(data.findings.length ? h('div.blist', null, data.findings.map((f) => h('div', { style: 'display:flex;justify-content:space-between;gap:12px;border-top:0.5px solid var(--l12);padding-top:10px' },
-      h('span', { style: 'display:flex;flex-direction:column;gap:2px' }, h('b', { text: f.title }), h('span.note', { text: f.summary })),
-      h('span.mono', { style: 'color:var(--clay)', text: usd(f.saving_usd_per_week, 0) + '/wk' })))) : empty(null, 'No findings in this window.'));
-  } else {
-    const items = data.explanations.length ? data.explanations : data.spikes.map((sp) => ({ spike: sp, title: sp.kind.replace('_', ' '), excess_usd: sp.excess_usd }));
-    card.append(items.length ? h('div.blist', null, items.map((e) => h('a', { href: e.spike.session_id ? sessionHref(e.spike.session_id) : '#', style: 'display:flex;justify-content:space-between;gap:12px;text-decoration:none;border-top:0.5px solid var(--l12);padding-top:10px' },
-      h('span', { style: 'display:flex;flex-direction:column;gap:2px' }, h('b', { text: e.title }), h('span.note', { text: stamp(new Date(e.spike.start)) })),
-      h('span.mono', { style: 'color:var(--clay)', text: '+' + usd(e.excess_usd) })))) : empty(null, 'No spikes in this window.'));
-  }
-  main.append(card);
 }

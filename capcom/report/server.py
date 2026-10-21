@@ -15,6 +15,8 @@ never overlap.
 from __future__ import annotations
 
 import contextlib
+import importlib
+import io
 import json
 import sqlite3
 import sys
@@ -27,7 +29,7 @@ from datetime import UTC, datetime, tzinfo
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 from capcom.config import Config
@@ -98,6 +100,11 @@ class Scanner:
     def running(self) -> bool:
         return self._lock.locked()
 
+    @property
+    def first_scan(self) -> bool:
+        """True while the first scan has not finished: the index may be partial."""
+        return self._thread.is_alive() and self.scans == 0 and not self._stop.is_set()
+
     def scan_once(self) -> bool:
         if not self._lock.acquire(blocking=False):
             return False
@@ -124,6 +131,36 @@ class Scanner:
         self._stop.set()
         if self._thread.is_alive():
             self._thread.join(timeout)
+
+
+class FailuresOnly(io.StringIO):
+    """A progress stream for `scan_all` that passes on only the lines about files
+    that failed, so the background scan stays quiet otherwise."""
+
+    def __init__(self, out: TextIO | None = None) -> None:
+        super().__init__()
+        self._out = out
+        self._pending = ""
+
+    def write(self, text: str) -> int:
+        self._pending += text.replace("\r", "\n")
+        *lines, self._pending = self._pending.split("\n")
+        out = self._out or sys.stderr
+        for line in lines:
+            if ": failed on " in line:
+                print("capcom serve: " + line.removeprefix("capcom scan: "), file=out, flush=True)
+        return len(text)
+
+
+def background_scan(config: Config, out: TextIO | None = None) -> object:
+    """One incremental scan, as `run_scan` does it, reporting only the failed files."""
+    from capcom.store.index import check_index_path
+    from capcom.store.scan import scan_all
+
+    check_index_path(config.index_path, (config.claude_root, config.openclaw_root))
+    source = importlib.import_module("capcom.sources.claude_code").ClaudeCodeSource()
+    with open_index(config.index_path) as index:
+        return scan_all(index, source, config, FailuresOnly(out))
 
 
 class IndexMissing(Exception):
@@ -243,8 +280,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             index = _open(self.site)
         except IndexMissing as err:
+            scanning = self.site.scanner is not None and self.site.scanner.running
+            action = SCANNING if scanning else "Run `capcom scan` first."
             self._error(
-                HTTPStatus.SERVICE_UNAVAILABLE, "no_index", f"{err} Run `capcom scan` first."
+                HTTPStatus.SERVICE_UNAVAILABLE, "no_index", f"{err} {action}", scanning=scanning
             )
             return
         try:
@@ -256,6 +295,7 @@ class Handler(BaseHTTPRequestHandler):
                 tz=self.site.tz,
                 index_path=self.site.index_path,
                 openclaw_root=self.site.openclaw_root,
+                scanning=self.site.scanner is not None and self.site.scanner.first_scan,
             )
             payload = ENDPOINTS[name](ctx, parts[1] if len(parts) == 2 else "", query)
             self._json(HTTPStatus.OK, payload)
@@ -301,9 +341,7 @@ def make_server(site: Site, port: int) -> ThreadingHTTPServer:
 def run_serve(config: Config, port: int, open_browser: bool, scan: bool = True) -> int:
     scanner = None
     if scan:
-        from capcom.store.scan import run_scan
-
-        scanner = Scanner(lambda: run_scan(config, quiet=True))
+        scanner = Scanner(lambda: background_scan(config))
     site = Site(
         index_path=config.index_path,
         table=load_prices(),
@@ -331,4 +369,10 @@ def run_serve(config: Config, port: int, open_browser: bool, scan: bool = True) 
         server.server_close()
         if scanner is not None:
             scanner.stop(timeout=5)
+            if scanner.running:
+                print(
+                    "capcom serve: stopped in the middle of a scan. The index keeps what was "
+                    "written so far; the next scan reads the rest.",
+                    file=sys.stderr,
+                )
     return 0

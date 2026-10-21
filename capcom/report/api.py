@@ -9,11 +9,12 @@ names, counts, times and dollars; never a prompt, a reply or a spawn description
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import math
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, tzinfo
+from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,7 @@ from capcom.config import load_config
 from capcom.cost.calibrate import check_session
 from capcom.cost.model import price
 from capcom.cost.prices import is_placeholder, normalize
-from capcom.cost.top import MAIN_THREAD
+from capcom.cost.top import MAIN_THREAD, project_label
 from capcom.report.analysis import Analysis, Unavailable
 from capcom.report.tally import (
     PAUSE_SECONDS,
@@ -36,7 +37,11 @@ from capcom.report.tally import (
 from capcom.timeline.groups import OPENCLAW, TEMPORARY, folder_name
 from capcom.types import (
     AgentInfo,
+    CauseKind,
     EventKind,
+    Evidence,
+    Explanation,
+    Finding,
     GroupBy,
     Index,
     PriceTable,
@@ -52,6 +57,7 @@ SPEND_DAYS = (7, 14, 30, 90)
 OTHER = "(other)"
 MAX_MARKERS = 12  # spike markers on a cumulative chart: the largest by excess
 MAX_POINTS = 4000  # per-request columns of a session above this are thinned
+MAX_SESSION_SPIKES = 8  # spikes listed on a session's page: the largest by excess
 
 # Why a session's totals cannot be compared with Claude Code's cost-state
 # (capcom.cost.calibrate reason ids), in words for the report.
@@ -95,6 +101,7 @@ class Context:
     tz: tzinfo | None = None  # None: the machine's local time zone
     index_path: Path | None = None
     openclaw_root: Path | None = None  # None: from the configuration
+    scanning: bool = False  # serve's first scan is still running: totals may be partial
 
     def local(self, t: datetime) -> datetime:
         return t.astimezone(self.tz)
@@ -223,15 +230,20 @@ def _spike_marks(
         return None
     marks = sorted(found, key=lambda sp: -sp.excess_usd)[:MAX_MARKERS]
     marks.sort(key=lambda sp: (sp.start, sp.session_id or ""))
+    explained = _try(lambda: ctx.analysis.explain(ctx.index, ctx.table, marks), unavailable)
+    causes = _by_spike(explained or [])
     return {
         "count": len(found),
         "excess_usd": round(sum(sp.excess_usd for sp in found), 6),
+        "explained": explained is not None,
         "marks": [
             {
                 "n": i + 1,
+                "key": spike_key(sp),
                 "t": ms(sp.start),
                 "end": ms(sp.end),
                 "kind": sp.kind.value,
+                "scope": sp.scope,
                 "session_id": sp.session_id,
                 "title": titles.get(sp.session_id) if sp.session_id else None,
                 "agent_id": sp.agent_id,
@@ -239,6 +251,7 @@ def _spike_marks(
                 "cost_usd": round(sp.cost_usd, 6),
                 "excess_usd": round(sp.excess_usd, 6),
             }
+            | _headline(causes.get(sp, ()))
             for i, sp in enumerate(marks)
         ],
     }
@@ -259,6 +272,7 @@ def _try(fn: Any, unavailable: list[str]) -> Any:
 def status(ctx: Context) -> dict[str, Any]:
     sessions = sum(1 for _ in ctx.index.sessions())
     out: dict[str, Any] = {"now": iso(ctx.now, ctx.tz), "sessions": sessions}
+    out["scanning"] = ctx.scanning
     out["prices_checked"] = ctx.table.checked.isoformat()
     if ctx.index_path is not None:
         st = ctx.index_path.stat()
@@ -618,9 +632,15 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
             break
 
     row = w.sessions.get(session_id)
+    found: list[Spike] | None = None
+    if counted:
+        since, until = counted[0].timestamp, counted[-1].timestamp + timedelta(seconds=1)
+        with contextlib.suppress(Unavailable):
+            found = ctx.analysis.find_spikes(ctx.index, ctx.table, since, until, session_id)
     thinned = None
     if len(counted) > MAX_POINTS:
-        spiky = _session_spike_requests(ctx, session_id, counted, message_ids)
+        ids = _thin_keep_ids(found or ())
+        spiky = {i for i, m in enumerate(message_ids) if m in ids}
         kept = thin(cols["agent"], cols["usd"], cols["context"], spiky, limit=MAX_POINTS)
         cols = {k: [v[i] for i in kept] for k, v in cols.items()}
         thinned = {"requests": len(counted), "kept": len(kept), "spikes": len(spiky)}
@@ -656,6 +676,7 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
         "agent_types": type_rows,
         "pauses": pauses,
         "compactions": compactions,
+        "spikes": _session_spikes(ctx, found, info, names),
     }
 
 
@@ -701,18 +722,46 @@ def _type_row(kind: str, group: list[_Span], total: float) -> dict[str, Any]:
     }
 
 
-def _session_spike_requests(
-    ctx: Context, session_id: str, counted: Sequence[Request], message_ids: Sequence[str]
-) -> set[int]:
-    """Column positions of the requests that make up the session's spikes (none
-    when capcom.timeline is not available)."""
-    since, until = counted[0].timestamp, counted[-1].timestamp + timedelta(seconds=1)
+def _thin_keep_ids(found: Sequence[Spike]) -> set[str]:
+    """The requests thinning keeps for spikes: every request of a thread's spike, and
+    the first and last of a session-wide span (which may hold thousands)."""
+    ids: set[str] = set()
+    for sp in found:
+        if sp.scope == "session":
+            ids.update(sp.message_ids[:1] + sp.message_ids[-1:])
+        else:
+            ids.update(sp.message_ids)
+    return ids
+
+
+def _session_spikes(
+    ctx: Context, found: Sequence[Spike] | None, info: SessionInfo | None, names: Mapping[str, str]
+) -> dict[str, Any] | None:
+    """A session's spikes (the MAX_SESSION_SPIKES largest) with their causes; None
+    when capcom.timeline is not available, `explained` false when capcom.explain
+    is not."""
+    if found is None:
+        return None
+    top = sorted(found, key=lambda sp: -sp.excess_usd)[:MAX_SESSION_SPIKES]
     try:
-        found = ctx.analysis.find_spikes(ctx.index, ctx.table, since, until, session_id)
+        causes: dict[Spike, list[Explanation]] | None = _by_spike(
+            ctx.analysis.explain(ctx.index, ctx.table, top)
+        )
     except Unavailable:
-        return set()
-    ids = {m for sp in found for m in sp.message_ids}
-    return {i for i, m in enumerate(message_ids) if m in ids}
+        causes = None
+    infos = {info.session_id: info} if info else {}
+    agents = {a.agent_id: a for a in ctx.index.agents(session_id=info.session_id)} if info else {}
+    return {
+        "count": len(found),
+        "excess_usd": round(sum(sp.excess_usd for sp in found), 6),
+        "explained": causes is not None,
+        "items": [
+            _spike_json(
+                ctx, sp, None if causes is None else causes.get(sp, []), infos, agents, names
+            )
+            for sp in top
+        ],
+    }
 
 
 def thin(
@@ -722,32 +771,63 @@ def thin(
     keep: set[int],
     limit: int = MAX_POINTS,
 ) -> list[int]:
-    """Positions of the per-request points to keep for a session's charts, about
-    `limit` of them (plus a few per thread), in order.
+    """Positions of the per-request points to keep for a session's charts, in order:
+    at most about `limit` of them, however many threads or spike requests there are.
 
-    Each thread's requests (main or one subagent, in time order) are cut into runs
-    of `ceil(3 n / budget)`; a run keeps its costliest request and its largest and
-    smallest context (local maxima of cost and context, and the drops a compaction
-    leaves). Every thread keeps its first and last request, and every position in
-    `keep` (the spikes) stays; `budget` is `limit` less those, but at least a
-    quarter of it."""
+    The spike requests (`keep`) get up to half of `limit`: all of them when they fit,
+    else they are cut into runs (in time order) that each keep their costliest
+    request and their largest and smallest context. The other requests get the rest
+    of `limit` the same way, in coarser runs: a thread with at least a run's worth of
+    requests (the main thread, a long subagent) is cut into runs of its own, so its
+    line keeps its shape; the requests of the smaller threads are cut together. The
+    session's first and last request always stay."""
     n = len(usd)
     if n <= limit:
         return list(range(n))
+    out = {0, n - 1}
+    spikes = sorted(i for i in keep if 0 <= i < n)
+    share = limit // 2
+    if len(spikes) <= share:
+        out.update(spikes)
+    else:
+        _runs(spikes, math.ceil(3 * len(spikes) / share), usd, context, out)
+    budget = max(limit - len(out), limit // 4)
     by_thread: dict[int, list[int]] = {}
     for i, a in enumerate(threads):
         by_thread.setdefault(a, []).append(i)
-    budget = max(limit - len(keep) - 2 * len(by_thread), limit // 4)
-    run = math.ceil(3 * n / budget)
-    out = set(keep)
+    sizes = [len(idx) for idx in by_thread.values()]
+
+    def points(run: int) -> int:
+        big = sum(math.ceil(k / run) for k in sizes if k >= run)
+        return 3 * (big + math.ceil(sum(k for k in sizes if k < run) / run))
+
+    # the shortest run that fits the budget: at least 3 n / budget, and 6 n / budget
+    # always fits (at most 2 n / run + 1 runs: one per big thread plus the leftovers)
+    lo, hi = math.ceil(3 * n / budget), math.ceil(6 * n / budget)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        lo, hi = (lo, mid) if points(mid) <= budget else (mid + 1, hi)
+    small: list[int] = []
     for idx in by_thread.values():
-        out.update((idx[0], idx[-1]))
-        for c in range(0, len(idx), run):
-            chunk = idx[c : c + run]
-            out.add(max(chunk, key=usd.__getitem__))
-            out.add(max(chunk, key=context.__getitem__))
-            out.add(min(chunk, key=context.__getitem__))
+        if len(idx) >= lo:
+            _runs(idx, lo, usd, context, out)
+        else:
+            small.extend(idx)
+    small.sort()
+    _runs(small, lo, usd, context, out)
     return sorted(out)
+
+
+def _runs(
+    idx: Sequence[int], run: int, usd: Sequence[float], context: Sequence[int], out: set[int]
+) -> None:
+    """Add to `out` the costliest request and the largest and smallest context of
+    each run of `run` positions of `idx`."""
+    for c in range(0, len(idx), run):
+        chunk = idx[c : c + run]
+        out.add(max(chunk, key=usd.__getitem__))
+        out.add(max(chunk, key=context.__getitem__))
+        out.add(min(chunk, key=context.__getitem__))
 
 
 def _price_total(ctx: Context, req: Request) -> float:
@@ -786,31 +866,374 @@ def live(ctx: Context) -> dict[str, Any]:
     return {"window_s": int(LIVE_WINDOW.total_seconds()), "sessions": out}
 
 
+# --------------------------------------------------------------------------- spikes
+
+MAX_SPIKES = 40  # spikes listed on the Spikes page: the largest by excess
+WINDOW_BARS = 36  # about this many bars in a spike's window chart
+_BAR_STEPS = tuple(timedelta(minutes=m) for m in (1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720))
+
+# capcom.types.CauseKind and Confidence in words, as the CLI says them (an
+# unknown id is shown as it is; without capcom.explain there are no causes to name)
+CAUSE_LABELS: dict[str, str] = {}
+CONFIDENCE_LABELS: dict[str, str] = {}
+with contextlib.suppress(Exception):  # like Analysis, a broken module is only missing
+    from capcom.explain import fmt as _fmt
+
+    CAUSE_LABELS = {k.value: v for k, v in _fmt.CAUSE_LABELS.items()}
+    CONFIDENCE_LABELS = {k.value: v for k, v in _fmt.CONFIDENCE_LABELS.items()}
+
+
+def spike_key(sp: Spike) -> str:
+    """A short stable id for a spike, for links (`/spikes?spike=<key>`)."""
+    raw = "|".join(
+        (sp.session_id or "", sp.agent_id or "", sp.start.isoformat(), sp.kind.value, sp.scope)
+    )
+    return hashlib.sha1(raw.encode(), usedforsecurity=False).hexdigest()[:12]
+
+
+def _by_spike(explained: Sequence[Explanation]) -> dict[Spike, list[Explanation]]:
+    out: dict[Spike, list[Explanation]] = {}
+    for e in explained:
+        out.setdefault(e.spike, []).append(e)
+    return out
+
+
+def _evidence_json(ev: Evidence, ctx: Context) -> dict[str, Any]:
+    return {
+        "label": ev.label,
+        "session_id": ev.session_id,
+        "agent_id": ev.agent_id,
+        "timestamp": iso(ev.timestamp, ctx.tz),
+        "message_id": ev.message_id,
+        "event_key": ev.event_key,
+    }
+
+
+def _cause_json(e: Explanation, ctx: Context) -> dict[str, Any]:
+    cause, conf = str(e.cause), str(e.confidence)
+    return {
+        "cause": cause,
+        "cause_label": CAUSE_LABELS.get(cause, cause),
+        "confidence": conf,
+        "confidence_label": CONFIDENCE_LABELS.get(conf, conf),
+        "excess_usd": round(e.excess_usd, 6),
+        "title": e.title,
+        "summary": e.summary,
+        "advice": e.advice,
+        "evidence": [_evidence_json(ev, ctx) for ev in e.evidence],
+    }
+
+
+def _headline(causes: Sequence[Explanation]) -> dict[str, Any]:
+    """The main cause of a spike (its largest share) for a marker or a list row."""
+    if not causes:
+        return {"cause": None, "cause_label": None, "confidence": None, "headline": None}
+    top = max(causes, key=lambda e: e.excess_usd)
+    cause = str(top.cause)
+    return {
+        "cause": cause,
+        "cause_label": CAUSE_LABELS.get(cause, cause),
+        "confidence": str(top.confidence),
+        "headline": top.title,
+    }
+
+
+def _spike_json(
+    ctx: Context,
+    sp: Spike,
+    causes: Sequence[Explanation] | None,
+    infos: Mapping[str, SessionInfo],
+    agents: Mapping[str, AgentInfo],
+    names: Mapping[str, str],
+) -> dict[str, Any]:
+    info = infos.get(sp.session_id) if sp.session_id else None
+    agent = agents.get(sp.agent_id) if sp.agent_id else None
+    return {
+        "key": spike_key(sp),
+        "kind": sp.kind.value,
+        "scope": sp.scope,
+        "start": ms(sp.start),
+        "end": ms(sp.end),
+        "session_id": sp.session_id,
+        "agent_id": sp.agent_id,
+        "agent_type": agent.agent_type if agent else None,
+        "title": info.title if info else None,
+        "project": project_display(info.project_dir, names, ctx.openclaw_dir) if info else None,
+        "requests": len(sp.message_ids),
+        "cost_usd": round(sp.cost_usd, 6),
+        "baseline_usd": round(sp.baseline_usd, 6),
+        "excess_usd": round(sp.excess_usd, 6),
+        "explanations": None if causes is None else [_cause_json(e, ctx) for e in causes],
+    } | _headline(causes or ())
+
+
+def _spike_window(ctx: Context, sp: Spike) -> dict[str, Any]:
+    """The spend of the spike's scope (its thread, or its whole session) in bars
+    around the spike: what its requests cost at the baseline pace ("usual") and
+    above it ("extra"), the extra adding up to the spike's excess."""
+    span = sp.end - sp.start
+    pad = min(max(span, timedelta(minutes=30)), timedelta(hours=3))
+    lo, hi = sp.start - pad, sp.end + pad
+    step = next((st for st in _BAR_STEPS if (hi - lo) / st <= WINDOW_BARS), _BAR_STEPS[-1])
+    lo = datetime.fromtimestamp(lo.timestamp() // step.total_seconds() * step.total_seconds(), UTC)
+    n = max(1, math.ceil((hi - lo) / step))
+    usual, extra = [0.0] * n, [0.0] * n
+    ids = set(sp.message_ids)
+    share = sp.baseline_usd / len(ids) if ids else 0.0
+    spiky: list[tuple[int, float]] = []
+    for r in ctx.index.requests(since=lo, until=lo + n * step, session_id=sp.session_id):
+        if is_placeholder(r.model) or (sp.scope != "session" and r.agent_id != sp.agent_id):
+            continue
+        k = min(n - 1, int((r.timestamp - lo) / step))
+        cost = price(r, ctx.table).total
+        if r.message_id in ids:
+            spiky.append((k, cost))
+        else:
+            usual[k] += cost
+    above = sum(max(0.0, c - share) for _, c in spiky)
+    scale = sp.excess_usd / above if above > 0 else 0.0
+    for k, cost in spiky:
+        x = max(0.0, cost - share) * scale
+        extra[k] += x
+        usual[k] += cost - x
+    return {
+        "start": ms(lo),
+        "step_s": int(step.total_seconds()),
+        "usual": [round(v, 6) for v in usual],
+        "extra": [round(v, 6) for v in extra],
+        "spike_start": ms(sp.start),
+        "spike_end": ms(sp.end),
+    }
+
+
 def spikes(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     days = _int(query, "days", 14, 1, 366)
-    found, explained = ctx.analysis.spikes(ctx.index, ctx.table, ctx.midnight(days - 1), ctx.now)
+    since = ctx.midnight(days - 1)
+    found, explained = ctx.analysis.spikes(ctx.index, ctx.table, since, ctx.now)
+    causes = _by_spike(explained)
+    totals: dict[str, list[float]] = {}
+    for e in explained:
+        row = totals.setdefault(str(e.cause), [0.0, 0])
+        row[0] += e.excess_usd
+        row[1] += 1
+    by_cause = sorted(
+        totals.items(), key=lambda kv: (kv[0] == CauseKind.UNEXPLAINED.value, -kv[1][0])
+    )
+    shown = sorted(found, key=lambda sp: -sp.excess_usd)[:MAX_SPIKES]
+    wanted = query.get("spike")  # a linked spike is listed even when it is not among the largest
+    if wanted and not any(spike_key(sp) == wanted for sp in shown):
+        shown += [sp for sp in found if spike_key(sp) == wanted][:1]
+    shown.sort(key=lambda sp: (sp.start, sp.session_id or "", sp.agent_id or ""))
+    infos = ctx.infos()
+    names = project_names(infos.values())
+    agents = ctx.agents()
+    items = []
+    for i, sp in enumerate(shown):
+        item = _spike_json(ctx, sp, causes.get(sp, []), infos, agents, names)
+        items.append({"n": i + 1} | item | {"window": _spike_window(ctx, sp)})
+    explained_count = sum(
+        1 for sp in found if any(e.cause != CauseKind.UNEXPLAINED for e in causes.get(sp, ()))
+    )
     return {
         "days": days,
-        "spikes": [_plain(s) for s in found],
-        "explanations": [_plain(e) for e in explained],
+        "since": iso(since, ctx.tz),
+        "until": iso(ctx.now, ctx.tz),
+        "count": len(found),
+        "excess_usd": round(sum(sp.excess_usd for sp in found), 6),
+        "explained": explained_count,
+        "causes": [
+            {
+                "cause": k,
+                "label": CAUSE_LABELS.get(k, k),
+                "excess_usd": round(v[0], 6),
+                "explanations": int(v[1]),
+            }
+            for k, v in by_cause
+        ],
+        "spikes": items,
     }
+
+
+# --------------------------------------------------------------------------- checks
+
+ONE_COMMAND_CALLS = 2  # capcom.checks: a subagent with this many tool calls or fewer
+_CALL_BUCKETS = ((0, 0), (1, 1), (2, 2), (3, 3), (4, 5), (6, 10), (11, 20), (21, None))
+MAX_SQUARES = 120  # past this many tools or skills, a bar instead of squares
+MAX_DOTS = 200
 
 
 def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     days = _int(query, "days", 14, 1, 366)
-    found = ctx.analysis.checks(ctx.index, ctx.table, ctx.midnight(days - 1), ctx.now)
-    return {"days": days, "findings": [_plain(f) for f in found]}
+    since = ctx.midnight(days - 1)
+    found = ctx.analysis.checks(ctx.index, ctx.table, since, ctx.now)
+    kinds = {f.kind for f in found}
+    infos = ctx.infos()
+    names = project_names(infos.values())
+    dirs = {info.project_dir for info in infos.values()}
+
+    def same_place(a: str, b: str) -> bool:
+        # two project folders are apart; "all" or an agent type may cover any folder
+        return a == b or a not in dirs or b not in dirs
+
+    kept: list[tuple[str, str]] = []  # (kind, scope) of the findings counted so far
+    counted: list[bool] = []
+    for f in found:  # largest first: keep each that counts dollars none kept so far does
+        over = _overlaps(f)
+        ok = not any(k in over and same_place(sc, f.scope) for k, sc in kept)
+        if ok:
+            kept.append((f.kind, f.scope))
+        counted.append(ok)
+    overlapping = any(_overlaps(f) for f in found)
+    calls = _subagent_calls(ctx, since) if "one_command_subagents" in kinds else {}
+    comps = _compactions(ctx, since) if "late_compactions" in kinds else {}
+    rows = []
+    for i, f in enumerate(found):
+        label = project_display(f.scope, names, ctx.openclaw_dir) if f.scope in dirs else f.scope
+        rows.append(
+            {
+                "n": i + 1,
+                "kind": f.kind,
+                "title": f.title,
+                "scope": f.scope,
+                "scope_label": label,
+                "summary": f.summary,
+                "saving_usd_per_week": round(f.saving_usd_per_week, 6),
+                "advice": f.advice,
+                "change": f.change,
+                "evidence": [_evidence_json(ev, ctx) for ev in f.evidence],
+                "metrics": {k: _plain(v) for k, v in f.metrics.items()},
+                "overlaps": list(_overlaps(f)),
+                "counted": counted[i],
+                "visual": _visual(f, calls, comps),
+            }
+        )
+    total = None
+    if found:
+        picked = [f for f, ok in zip(found, counted, strict=True) if ok]
+        total = {
+            "usd_per_week": round(sum(f.saving_usd_per_week for f in picked), 6),
+            "findings": len(picked),
+            "all": len(picked) == len(found),
+        }
+    return {
+        "days": days,
+        "since": iso(since, ctx.tz),
+        "until": iso(ctx.now, ctx.tz),
+        "findings": rows,
+        "overlapping": overlapping,
+        "total": total,
+    }
+
+
+def _overlaps(f: Finding) -> tuple[str, ...]:
+    raw = f.metrics.get("overlaps")
+    if isinstance(raw, str):
+        return (raw,)
+    return tuple(raw) if isinstance(raw, tuple | list) else ()
+
+
+def _subagent_calls(ctx: Context, since: datetime) -> dict[str, list[int]]:
+    """Tool calls per subagent in the window, by agent type."""
+    per_agent: dict[str, int] = {}
+    for r in ctx.index.requests(since=since, until=ctx.now):
+        if r.agent_id is not None and not is_placeholder(r.model):
+            per_agent[r.agent_id] = per_agent.get(r.agent_id, 0) + len(r.tool_calls)
+    agents = ctx.agents()
+    out: dict[str, list[int]] = {}
+    for aid, n in per_agent.items():
+        info = agents.get(aid)
+        out.setdefault((info.agent_type if info else None) or "", []).append(n)
+    return out
+
+
+def _compactions(ctx: Context, since: datetime) -> dict[str, list[int]]:
+    """Context size when each compaction of the window started, by project label
+    (as capcom.checks scopes them)."""
+    infos = ctx.infos()
+    out: dict[str, list[int]] = {}
+    kinds = frozenset({EventKind.COMPACTION})
+    for e in ctx.index.events(since=since, until=ctx.now, kinds=kinds):
+        pre = e.attrs.get("pre_tokens")
+        info = infos.get(e.session_id)
+        if isinstance(pre, int) and not isinstance(pre, bool) and info is not None:
+            out.setdefault(project_label(info.project_dir), []).append(pre)
+    return out
+
+
+def _num(metrics: Mapping[str, Any], key: str) -> int | None:
+    v = metrics.get(key)
+    return int(v) if isinstance(v, int | float) and not isinstance(v, bool) else None
+
+
+def _visual(
+    f: Finding, calls: Mapping[str, list[int]], comps: Mapping[str, list[int]]
+) -> dict[str, Any] | None:
+    """A small chart for a finding, from its metrics (and, for two kinds, from the
+    index): what was loaded against what was used, calls per subagent, compaction
+    sizes, a size against its limit. None for kinds without one."""
+    m = f.metrics
+    pairs = {
+        "mcp_servers_unused": ("tools_loaded", "tools_called", "MCP tools", "called"),
+        "agent_tools_unused": ("tools_given", "tools_called", "Tools given", "called"),
+        "skills_unused": ("skills_listed", "skills_invoked", "Skills listed", "invoked"),
+        "claudeai_connectors_unused": (
+            "sessions_listing",
+            "sessions_using",
+            "Sessions that loaded them",
+            "called one",
+        ),
+    }
+    if f.kind in pairs:
+        total_key, used_key, label, verb = pairs[f.kind]
+        total, used = _num(m, total_key), _num(m, used_key)
+        if total is None or used is None or total <= 0:
+            return None
+        kind = "squares" if total <= MAX_SQUARES else "split"
+        return {"type": kind, "label": label, "total": total, "filled": min(used, total)} | {
+            "verb": verb
+        }
+    if f.kind == "one_command_subagents":
+        values = calls.get(f.scope, [])
+        if not values:
+            return None
+        buckets = []
+        for lo, hi in _CALL_BUCKETS:
+            count = sum(1 for v in values if v >= lo and (hi is None or v <= hi))
+            label = str(lo) if lo == hi else (f"{lo}+" if hi is None else f"{lo}-{hi}")
+            buckets.append(
+                {
+                    "label": label,
+                    "count": count,
+                    "small": hi is not None and hi <= ONE_COMMAND_CALLS,
+                }
+            )
+        return {"type": "histogram", "label": "Subagents by number of tool calls"} | {
+            "buckets": buckets
+        }
+    if f.kind == "late_compactions":
+        sizes = sorted(comps.get(f.scope, []), reverse=True)[:MAX_DOTS]
+        threshold = _num(m, "threshold")
+        if not sizes or threshold is None:
+            return None
+        return {"type": "dots", "label": "Context size when each compaction started"} | {
+            "values": sizes,
+            "threshold": threshold,
+        }
+    gauges = {
+        "large_memory": ("tokens", "budget_tokens", "Memory files, in tokens"),
+        "long_running_agents": ("max_context", "threshold", "Largest context reached"),
+    }
+    if f.kind in gauges:
+        value_key, limit_key, label = gauges[f.kind]
+        value, limit = _num(m, value_key), _num(m, limit_key)
+        if value is None or limit is None or limit <= 0:
+            return None
+        return {"type": "gauge", "label": label, "value": value, "limit": limit}
+    return None
 
 
 def _plain(obj: Any) -> Any:
-    """A dataclass from capcom.types as JSON-ready data (times as ISO strings)."""
-    from dataclasses import fields, is_dataclass
-
-    if is_dataclass(obj) and not isinstance(obj, type):
-        out = {f.name: _plain(getattr(obj, f.name)) for f in fields(obj)}
-        if hasattr(obj, "excess_usd"):
-            out["excess_usd"] = obj.excess_usd
-        return out
+    """A value from capcom.types as JSON-ready data (times as ISO strings)."""
     if isinstance(obj, datetime):
         return obj.isoformat()
     if isinstance(obj, Mapping):

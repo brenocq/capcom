@@ -109,7 +109,7 @@ export async function renderOverview(main, r) {
   checks.append(found.block || (found.data.findings.length
     ? h('div.blist', null, found.data.findings.slice(0, 3).map((f) => h('a', { href: '/checks', style: 'display:flex;justify-content:space-between;gap:12px;text-decoration:none' },
       h('span', { style: 'display:flex;flex-direction:column;gap:2px' }, h('b', { text: f.title }), h('span.note', { text: f.summary })),
-      h('span.mono', { style: 'color:var(--clay)', text: usd(f.saving_usd_per_week, 0) + '/wk' }))))
+      h('span.mono', { style: 'color:var(--clay);white-space:nowrap', text: 'up to ' + usd(f.saving_usd_per_week, 0) + '/wk' }))))
     : empty(null, 'Nothing to change in the last 14 days.')));
   main.append(h('div.grid', { style: '--min:300px' }, projects, agents, checks));
   main.append(h('p.note', { style: 'margin:0', text: `Totals for ${label}, at list prices (API-equivalent). ${t.inexact_price_requests ? `${t.inexact_price_requests} requests priced as the closest model family.` : ''}` }));

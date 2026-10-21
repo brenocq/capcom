@@ -4,6 +4,7 @@
 import {
   h, api, usd, tokens, pct, seg, legend, empty, errorBox, setQuery, monthDay, localDate, dayName, hm,
   outputUsd, estimateNote, SERIES, OTHER_COLOR, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor,
+  spikeText, spikeHref,
 } from './lib.js';
 import { bandChart, dayBars, heatmap, heatScale } from './charts.js';
 import { sessionsTable } from './sessions.js';
@@ -24,14 +25,10 @@ export function memberLabel(m, group) {
   return m.label;
 }
 
-const KINDS = {
-  single_request: ['One request far above its recent median', 'Single request'],
-  slope_change: ['The spend rate rose and stayed up', 'Slope change'],
-};
-
 function spikeWhen(m) {
   const d = new Date(m.t);
-  const where = [m.title || (m.session_id ? m.session_id.slice(0, 8) : null), m.agent_id ? 'subagent' : 'main thread'].filter(Boolean);
+  const thread = m.scope === 'session' ? 'session-wide' : m.agent_id ? 'subagent' : 'main thread';
+  const where = [m.title || (m.session_id ? m.session_id.slice(0, 8) : null), thread].filter(Boolean);
   return [`${monthDay(d)} ${hm(d)}`, ...where].join(' · ');
 }
 
@@ -54,7 +51,7 @@ export function pickSpikes(sp, x0, x1, gap = 0.04, max = 8) {
 // chart markers from a picked spikes block; `days` picks the Spikes window
 export function spikeMarks(sp, days) {
   if (!sp) return [];
-  return sp.marks.map((m) => ({ n: m.n, t: m.t, href: `/spikes?days=${days}`, aria: `Spike ${m.n}: +${usd(m.excess_usd)} over the baseline, ${spikeWhen(m)}` }));
+  return sp.marks.map((m) => ({ n: m.n, t: m.t, href: spikeHref(m.key, m.t, days), aria: `Spike ${m.n}: ${spikeText(m).title}, +${usd(m.excess_usd)} over the baseline, ${spikeWhen(m)}` }));
 }
 
 // the numbered list next to a chart: the largest spikes first
@@ -62,16 +59,17 @@ export function spikeList(sp, days, limit = 4) {
   if (!sp) return [timelineMissing('Spike detection')];
   if (!sp.count) return [empty(null, 'No spikes: the spend rose at its usual pace.')];
   const rows = [...sp.marks].sort((a, b) => b.excess_usd - a.excess_usd).slice(0, limit);
-  const out = rows.map((m) => h('a.spikerow', { href: `/spikes?days=${days}` },
+  const out = rows.map((m) => h('a.spikerow', { href: spikeHref(m.key, m.t, days) },
     h('span.num', { text: String(m.n) }),
     h('span.body', null,
       h('span.meta', { text: spikeWhen(m) }),
-      h('b', { text: KINDS[m.kind] ? KINDS[m.kind][0] : m.kind }),
-      h('span.tags', null, h('span.tag', { text: KINDS[m.kind] ? KINDS[m.kind][1] : m.kind }),
+      h('b', { text: spikeText(m).title }),
+      h('span.tags', null, h('span.tag', { text: spikeText(m).tag }),
         h('span.plus', { text: `+${usd(m.excess_usd)}` }),
         h('span.note', { text: `${m.requests} request${m.requests === 1 ? '' : 's'}, ${usd(m.cost_usd)} in all` })))));
   const more = sp.count > rows.length ? `${sp.count} spike${sp.count === 1 ? '' : 's'} in all, +${usd(sp.excess_usd)} over their baselines; the largest are marked. ` : '';
-  out.push(h('p.note', { style: 'margin:8px 0 0', text: `${more}Their causes are explained from milestone 3.` }));
+  const why = sp.explained ? 'Each is matched to the cause the logs point to.' : 'Their causes are explained from milestone 3.';
+  out.push(h('p.note', { style: 'margin:8px 0 0', text: `${more}${why}` }));
   return out;
 }
 

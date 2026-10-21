@@ -1,7 +1,7 @@
 // Hand-written SVG charts. Colors are CSS variables, so a theme switch restyles
 // them; values come from the API only.
 
-import { h, s, showTip, hideTip, tipOn, usd, usdShort, two, hm, monthDay, SERIES } from './lib.js';
+import { h, s, showTip, hideTip, tipOn, usd, usdShort, two, hm, monthDay, SERIES, maxOf } from './lib.js';
 
 let uid = 0;
 
@@ -79,7 +79,7 @@ export function bandChart(opts) {
   const tot = [0, ...total];
   const x0 = opts.start, x1 = Math.max(opts.end, times[times.length - 1]);
   const W = 1000, H = opts.height || 300, left = opts.left || 52;
-  const ticks = niceTicks(Math.max(...tot, 1e-6));
+  const ticks = niceTicks(maxOf(tot, 1e-6));
   const ymax = ticks[ticks.length - 1];
   const X = (t) => ((t - x0) / (x1 - x0) * W).toFixed(1);
   const Y = (v) => (H - v / ymax * H).toFixed(1);
