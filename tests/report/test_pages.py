@@ -331,3 +331,45 @@ def test_thin_is_capped_whatever_the_threads() -> None:
     kept = api.thin(threads, usd_col, context, spikes)
     assert len(kept) <= 4_000 + 10
     assert len(spikes & set(kept)) >= 1_500
+
+
+def test_session_wide_spike_does_not_break_the_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session-scope spike of 2,000 requests keeps only its ends in thinning."""
+    monkeypatch.setattr(api, "MAX_POINTS", 500)
+    start = NOW - timedelta(hours=10)
+    reqs = [
+        req(
+            "big",
+            start + timedelta(seconds=10 * i),
+            ALPHA,
+            f"a{i % 50}" if i % 3 else None,
+            output=100 + i % 7,
+        )
+        for i in range(3_000)
+    ]
+    ix = open_index(tmp_path / "index.sqlite")
+    _put(ix, _log(ALPHA, "big"), [SessionInfo("big", ALPHA, cwd="/a", title="Big"), *reqs])
+    ix.close()
+    wide = reqs[500:2_500]
+    sp = Spike(
+        SpikeKind.SLOPE_CHANGE, wide[0].timestamp, wide[-1].timestamp, cost_usd=5.0,
+        baseline_usd=1.0, session_id="big", message_ids=tuple(r.message_id for r in wide),
+        scope="session",
+    )  # fmt: skip
+    assert api._thin_keep_ids([sp]) == {wide[0].message_id, wide[-1].message_id}
+
+    def found(*args: Any) -> list[Spike]:
+        return [sp]
+
+    analysis = Analysis(
+        capcom.timeline.cumulative, capcom.timeline.per_step, found, explain_all, fake_checks
+    )
+    for client in _client(tmp_path / "index.sqlite", analysis):
+        data = client.get("/api/session/big")[1]
+        marks = client.get("/api/spend?days=7")[1]["spikes"]["marks"]
+    assert data["thinned"]["spikes"] == 2
+    assert data["thinned"]["kept"] <= 500 + 10
+    assert data["spikes"]["items"][0]["scope"] == "session"
+    assert marks[0]["scope"] == "session" and marks[0]["agent_id"] is None

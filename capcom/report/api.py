@@ -639,7 +639,7 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
             found = ctx.analysis.find_spikes(ctx.index, ctx.table, since, until, session_id)
     thinned = None
     if len(counted) > MAX_POINTS:
-        ids = {m for sp in found or () for m in sp.message_ids}
+        ids = _thin_keep_ids(found or ())
         spiky = {i for i, m in enumerate(message_ids) if m in ids}
         kept = thin(cols["agent"], cols["usd"], cols["context"], spiky, limit=MAX_POINTS)
         cols = {k: [v[i] for i in kept] for k, v in cols.items()}
@@ -720,6 +720,18 @@ def _type_row(kind: str, group: list[_Span], total: float) -> dict[str, Any]:
         "usd": round(usd, 6),
         "share": round(usd / total, 4) if total else 0.0,
     }
+
+
+def _thin_keep_ids(found: Sequence[Spike]) -> set[str]:
+    """The requests thinning keeps for spikes: every request of a thread's spike, and
+    the first and last of a session-wide span (which may hold thousands)."""
+    ids: set[str] = set()
+    for sp in found:
+        if sp.scope == "session":
+            ids.update(sp.message_ids[:1] + sp.message_ids[-1:])
+        else:
+            ids.update(sp.message_ids)
+    return ids
 
 
 def _session_spikes(

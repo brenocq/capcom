@@ -4,10 +4,11 @@
 
 import {
   h, s, api, usd, tokens, pct, duration, stamp, hm, monthDay, empty, tipOn, showTip, hideTip,
-  outputUsd, estimateNote, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor, SERIES, OTHER_COLOR,
+  outputUsd, estimateNote, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor, SERIES, OTHER_COLOR, maxOf,
+  spikeText, spikeHref,
 } from './lib.js';
 import { niceTicks, activeAxis, xAxis } from './charts.js';
-import { pendingBlock } from './sessions.js';
+import { timelineMissing } from './spend.js';
 
 export async function renderSession(main, r) {
   const d = await api('session/' + encodeURIComponent(r.arg || ''));
@@ -42,13 +43,38 @@ export async function renderSession(main, r) {
   main.append(unfolded(d));
 
   const why = h('section.card.grow3', null, h('h2', { text: 'Why it cost this much' }));
-  const spikes = await pendingBlock('spikes', 'days=90');
-  why.append(spikes.block || h('p.para', { text: 'See the Spikes page for this session’s spikes.' }));
+  why.append(...whyItCost(d.spikes));
   const helped = h('section.card.grow2b', null, h('h2', { text: 'What would have helped' }),
-    empty('Coming in milestone 4', 'Setup checks will estimate what each change would have saved in this session.'));
+    empty(null, 'Setup checks look at all your sessions together, ranked by what each change would save in a week.'),
+    h('a.link', { href: '/checks', text: 'See the checks' }));
   main.append(h('div.row-wrap', { style: 'align-items:flex-start' }, why, helped));
 
   main.append(agentsTable(d));
+}
+
+// The session's spikes, largest first, each with its main cause when capcom.explain
+// gave one (else what capcom.timeline saw).
+function whyItCost(sp) {
+  if (!sp) return [timelineMissing('Spike detection')];
+  if (!sp.count) return [empty(null, 'No spikes: the spend rose at its usual pace. The cost is the sum of its turns, shown above request by request.')];
+  const out = sp.items.map((it) => {
+    const txt = spikeText(it);
+    const cause = it.explanations && it.explanations.length ? it.explanations.reduce((a, b) => (b.excess_usd > a.excess_usd ? b : a)) : null;
+    const thread = it.scope === 'session' ? 'session-wide' : it.agent_id ? `subagent${it.agent_type ? ' ' + it.agent_type : ''}` : 'main thread';
+    return h('a.spikerow', { href: spikeHref(it.key, it.start) },
+      h('span.num', { class: txt.unexplained ? 'num gray' : 'num', text: '+' }),
+      h('span.body', null,
+        h('span.meta', { text: `${stamp(new Date(it.start))} · ${thread}` }),
+        h('b', { text: txt.title }),
+        cause && cause.summary ? h('span.note', { text: cause.summary }) : null,
+        h('span.tags', null, h('span.tag', { text: txt.tag }),
+          h('span.plus', { text: `+${usd(it.excess_usd)}` }),
+          h('span.note', { text: `${it.requests} request${it.requests === 1 ? '' : 's'}, ${usd(it.cost_usd)} in all` }))));
+  });
+  const more = sp.count > sp.items.length ? `${sp.count} spikes in all; the ${sp.items.length} largest are listed. ` : '';
+  const why = sp.explained ? '' : 'Their causes are explained from milestone 3.';
+  out.push(h('p.note', { style: 'margin:8px 0 0', text: `+${usd(sp.excess_usd)} over the usual pace. ${more}${why}` }));
+  return out;
 }
 
 function joinAnd(items) {
@@ -104,7 +130,7 @@ function unfolded(d) {
   // context per request: the main thread as a line, subagents as dots
   const main = R.t.map((_, i) => i).filter((i) => R.agent[i] < 0);
   const line = main.length ? main : R.t.map((_, i) => i);
-  const ticks = niceTicks(Math.max(...R.context, 1), 3);
+  const ticks = niceTicks(maxOf(R.context, 1), 3);
   const cmax = ticks[ticks.length - 1];
   const H = 230;
   const Y = (v) => (H - v / cmax * H).toFixed(1);
@@ -138,7 +164,7 @@ function unfolded(d) {
   hover(svg.parentNode || ctx);
 
   // cost per request
-  const cmaxUsd = Math.max(...R.usd, 1e-6);
+  const cmaxUsd = maxOf(R.usd, 1e-6);
   const bars = (sel) => R.t.map((_, i) => i).filter(sel).map((i) => `M${X(R.t[i])} 80L${X(R.t[i])} ${(80 - R.usd[i] / cmaxUsd * 76).toFixed(1)}`).join('');
   const cost = hover(h('div.chart', { style: 'height:80px;border-bottom:1px solid var(--l15)' },
     s('svg', { viewBox: '0 0 1000 80', preserveAspectRatio: 'none', 'aria-hidden': 'true' },
@@ -177,7 +203,7 @@ function unfolded(d) {
   const types = [...byType.entries()].sort((a, b) => b[1].reduce((s1, z) => s1 + z.usd, 0) - a[1].reduce((s1, z) => s1 + z.usd, 0));
   types.forEach(([type, list], k) => {
     const color = SERIES[(k + 1) % SERIES.length] || OTHER_COLOR;
-    const maxUsd = Math.max(...list.map((a) => a.usd), 1e-9);
+    const maxUsd = maxOf(list.map((a) => a.usd), 1e-9);
     lanes.push(h('div.lab', null, h('span', null, h('b', { text: type }), ` ×${list.length}`)),
       h('div.lane', null, list.map((a) => {
         const l = x(a.first) * 100, w = Math.max((x(a.last) - x(a.first)) * 100, 0.3);

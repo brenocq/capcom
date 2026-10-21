@@ -1,11 +1,13 @@
 // The frame: sidebar (navigation, session search, live sessions, index status,
 // theme toggle) and a router from the URL path to a page.
 
-import { h, s, api, stamp, sessionHref, errorBox } from './lib.js';
+import { h, s, api, stamp, sessionHref, errorBox, forget } from './lib.js';
 import { renderOverview } from './overview.js';
 import { renderSpend } from './spend.js';
 import { renderSession } from './session.js';
-import { renderSessions, renderPending } from './sessions.js';
+import { renderSessions } from './sessions.js';
+import { renderSpikes } from './spikes.js';
+import { renderChecks } from './checks.js';
 
 const ICON = {
   overview: 'M3 12h4l3-8 4 16 3-8h4',
@@ -18,8 +20,8 @@ const NAV = [
   ['overview', '/', 'Overview'],
   ['spend', '/spend', 'Spend'],
   ['sessions', '/sessions', 'Sessions'],
-  ['spikes', '/spikes', 'Spikes', 'M3'],
-  ['checks', '/checks', 'Checks', 'M4'],
+  ['spikes', '/spikes', 'Spikes'],
+  ['checks', '/checks', 'Checks'],
 ];
 
 function icon(d, size = 16) {
@@ -131,8 +133,8 @@ const PAGES = {
   spend: renderSpend,
   sessions: renderSessions,
   session: renderSession,
-  spikes: (main) => renderPending(main, 'spikes'),
-  checks: (main) => renderPending(main, 'checks'),
+  spikes: renderSpikes,
+  checks: renderChecks,
 };
 
 let renderToken = 0;
@@ -150,6 +152,7 @@ async function renderPage() {
   } catch (err) {
     next.replaceChildren(errorBox(err));
   }
+  if (statusData && statusData.scanning) next.prepend(scanningNotice());
   if (token === renderToken) main.replaceWith(next);
 }
 
@@ -157,6 +160,26 @@ window.addEventListener('capcom-route', () => { drawSidebar(); renderPage(); });
 
 drawSidebar();
 renderPage();
-api('status').then((d) => { statusData = d; drawSidebar(); }).catch(() => {});
+// While serve's first scan runs, the totals are partial: say so, and redraw once
+// the scan is done.
+function scanningNotice() {
+  return h('p.notice', { role: 'status' }, h('strong', { text: 'Reading the logs. ' }),
+    'capcom serve is reading the logs into the index now, so the totals below are partial. This page redraws when the first scan is done.');
+}
+
+async function refreshStatus() {
+  const was = statusData && statusData.scanning;
+  try { statusData = await api('status', true); } catch (e) { /* keep the last one */ }
+  drawSidebar();
+  if (statusData && statusData.scanning) {
+    if (!was) renderPage();
+    setTimeout(refreshStatus, 10e3);
+  } else if (was) {
+    forget();
+    renderPage();
+  }
+}
+
+refreshStatus();
 refreshLive();
 setInterval(refreshLive, 30e3);
