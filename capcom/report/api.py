@@ -516,6 +516,103 @@ def spend(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     }
 
 
+TYPICAL_DAYS = 14  # a typical day: the median of the days before it
+DAY_STEP = timedelta(minutes=10)  # a day's cumulative chart
+
+
+def day(ctx: Context, raw: str) -> dict[str, Any]:
+    """One local day: its spend adding up with its spikes, by project, agent type and
+    model, its sessions, and the typical day before it to measure it against."""
+    try:
+        when = date.fromisoformat(raw)
+    except ValueError:
+        raise ApiError(400, "bad_query", "the day must be YYYY-MM-DD") from None
+    if when > ctx.today():
+        raise ApiError(404, "not_found", "that day has not come yet")
+    since = ctx.at_midnight(when)
+    end = ctx.at_midnight(when + timedelta(days=1))
+    until = min(end, ctx.now)
+    w = _window(ctx)
+    for req in ctx.index.requests(since=since, until=until):
+        w.add(req)
+
+    unavailable: list[str] = []
+    cum = _try(
+        lambda: ctx.analysis.cumulative(
+            ctx.index, ctx.table, since, until, GroupBy.CATEGORY, DAY_STEP
+        ),
+        unavailable,
+    )
+    cum_json = None
+    if cum is not None:
+        cum_json = _cumulative_json(_tidy(cum, GroupBy.CATEGORY, w.names), DAY_STEP, until)
+    typical = _typical(ctx, when, w)
+    projects = w.groups_json(w.by_project)
+    for p in projects:
+        p["typical_usd"] = typical["by_project"].get(p["key"], 0.0) if typical else None
+    rows = w.session_rows(ctx.tz)
+    temporary = [r for r in rows if r["temporary"]]
+    return {
+        "day": when.isoformat(),
+        "today": when == ctx.today(),
+        "window": {"since": iso(since, ctx.tz), "until": iso(until, ctx.tz)},
+        "totals": w.total.to_json(),
+        "typical": None
+        if typical is None
+        else {k: v for k, v in typical.items() if k != "by_project"},
+        "cumulative": cum_json,
+        "spikes": _spike_marks(ctx, since, until, w.infos, w.names, unavailable),
+        "by_project": projects,
+        "by_agent": w.groups_json(w.by_agent),
+        "by_model": w.groups_json(w.by_model),
+        "sessions_count": len(rows) - len(temporary),
+        "temporary_sessions": len(temporary),
+        "sessions": rows[:10],
+        "unavailable": unavailable,
+    }
+
+
+def _typical(ctx: Context, when: date, w: Window) -> dict[str, Any] | None:
+    """The median of the days with spend among the TYPICAL_DAYS before `when`, in
+    all, by category and by project: days off would pull a median of every day toward
+    zero and make any working day look expensive. None without such a day."""
+    days = [when - timedelta(days=k) for k in range(TYPICAL_DAYS, 0, -1)]
+    total = dict.fromkeys(days, 0.0)
+    by_category: dict[str, dict[date, float]] = {}
+    by_project: dict[str, dict[date, float]] = {}
+    for req in ctx.index.requests(since=ctx.at_midnight(days[0]), until=ctx.at_midnight(when)):
+        d = ctx.local(req.timestamp).date()
+        if d not in total or is_placeholder(req.model):
+            continue
+        cost = price(req, ctx.table)
+        total[d] += cost.total
+        key = w.names.key(req.project_dir)
+        by_project.setdefault(key, dict.fromkeys(days, 0.0))[d] += cost.total
+        parts = {
+            "cache_read": cost.cache_read,
+            "cache_write": cost.cache_write,
+            "output": cost.output + cost.web,
+            "input": cost.input,
+        }
+        for cat, usd in parts.items():
+            by_category.setdefault(cat, dict.fromkeys(days, 0.0))[d] += usd
+
+    active = [d for d in days if total[d] > 0]
+    if not active:
+        return None
+
+    def median(values: Mapping[date, float]) -> float:
+        return round(statistics.median(values[d] for d in active), 6)
+
+    return {
+        "days": len(active),
+        "of_days": TYPICAL_DAYS,
+        "usd": median(total),
+        "categories": {k: median(v) for k, v in by_category.items()},
+        "by_project": {k: median(v) for k, v in by_project.items()},
+    }
+
+
 def _daily_and_heat(
     ctx: Context, hourly: Sequence[Series], keep: Sequence[str], days: int
 ) -> tuple[dict[str, Any], dict[str, Any]]:

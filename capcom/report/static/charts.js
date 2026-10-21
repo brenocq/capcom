@@ -175,23 +175,29 @@ function clearOfMarks(plot, lab) {
 
 // ------------------------------------------------------------------ per-day bars
 
-// days: [{date (Date), values, total}], members: [{label, color}]
+// days: [{date (Date), iso, values, total}], members: [{label, color}]; each day
+// links to its own page
 export function dayBars(days, members, todayIso) {
   const max = Math.max(...days.map((d) => d.total), 1e-9);
   const many = days.length > 31;
   const bars = h('div.days', { style: many ? 'gap:2px' : '' }, days.map((d) => {
     const bar = h('div.bar', { style: `height:${(d.total / max * 85).toFixed(1)}%` },
       d.values.map((v, j) => (v > 0 ? h('div', { style: `flex:${v} 1 0px;background:${members[j].color}` }) : null)));
-    const col = h('div.day', null, many ? null : h('span.amt', { text: d.total > 0 ? usdShort(d.total) : '' }), bar);
+    const col = h('a.day', { href: `/day/${d.iso}`, 'aria-label': `${monthDay(d.date)}: ${usd(d.total)}, open the day` },
+      many ? null : h('span.amt', { text: d.total > 0 ? usdShort(d.total) : '' }), bar);
     return tipOn(col, `${monthDay(d.date)}: ${usd(d.total)}`, () => members
       .map((m, j) => ({ label: m.label, value: usd(d.values[j]), color: m.color }))
       .filter((r, j) => d.values[j] > 0).reverse());
   }));
   const step = many ? 7 : days.length > 14 ? 3 : 1;
+  // a regular label too close to today's (always shown, at the end) would run into it
+  const clear = (i) => days.length - 1 - i >= Math.ceil(step * 0.8);
   const labs = h('div.daylabs', { style: many ? 'gap:2px' : '' }, days.map((d, i) => {
     const today = d.iso === todayIso;
-    const text = i % step === 0 || today ? (step === 1 ? 'SMTWTFS'[d.date.getDay()] + ' ' + d.date.getDate() : monthDay(d.date)) : '';
-    return h('span', { class: today ? 'today' : null, text, style: step > 1 ? 'overflow:visible' : null });
+    const text = (i % step === 0 && clear(i)) || today ? (step === 1 ? 'SMTWTFS'[d.date.getDay()] + ' ' + d.date.getDate() : monthDay(d.date)) : '';
+    // a label wider than its bar runs to the right; the last one runs left, inside the chart
+    const last = i === days.length - 1 ? ';display:flex;justify-content:flex-end' : '';
+    return h('span', { class: today ? 'today' : null, text, style: step > 1 ? 'overflow:visible' + last : null });
   }));
   return h('div', null, bars, labs);
 }

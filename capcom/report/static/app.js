@@ -5,6 +5,7 @@ import { h, s, api, stamp, sessionHref, errorBox, forget } from './lib.js';
 import { renderOverview } from './overview.js';
 import { renderSpend } from './spend.js';
 import { renderSession } from './session.js';
+import { renderDay } from './day.js';
 import { renderSessions } from './sessions.js';
 import { renderSpikes } from './spikes.js';
 import { renderChecks } from './checks.js';
@@ -73,7 +74,7 @@ let liveData = null, statusData = null;
 
 function drawSidebar() {
   const r = route();
-  const active = r.name === 'session' ? 'sessions' : r.name;
+  const active = { session: 'sessions', day: 'spend' }[r.name] || r.name;
   const nav = document.getElementById('sidebar');
   const input = h('input', { id: 'capcom-find', type: 'search', placeholder: 'Project, title or agent type', value: r.name === 'sessions' ? r.query.get('q') || '' : '' });
   const form = h('form.find', { role: 'search', onsubmit: (e) => { e.preventDefault(); location.href = '/sessions?q=' + encodeURIComponent(input.value.trim()); } },
@@ -136,6 +137,7 @@ const PAGES = {
   spend: renderSpend,
   sessions: renderSessions,
   session: renderSession,
+  day: renderDay,
   spikes: renderSpikes,
   checks: renderChecks,
   limits: renderLimits,

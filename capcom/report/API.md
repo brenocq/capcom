@@ -192,6 +192,28 @@ moves no request to the wrong day.
 `temporary_sessions`; together they are `/api/sessions`' `total` for the same `days`
 (whose `temporary` counts the same temporary sessions).
 
+### `GET /api/day/<YYYY-MM-DD>`
+
+One local day, the page a bar of Spend's per-day chart opens: what it cost against a
+typical day, and where it went. 400 for a malformed date, 404 for a day not yet come.
+
+```
+{day, today, window: {since, until},  # until: the next midnight, or now for today
+ totals, sessions_count, temporary_sessions,
+ typical: {days, of_days, usd, categories: {cache_read, cache_write, output, input}} | null,
+ cumulative: Cumulative | null,       # by category, 10-minute steps
+ spikes: Spikes | null,
+ by_project: [Group + {typical_usd}], by_agent: [Group], by_model: [Group],
+ sessions: [Session row] (10 costliest),
+ unavailable}
+```
+
+`typical` is the median of the days with spend among the 14 before the day (`days` of
+`of_days`), in all and by cost category; each project's `typical_usd` is its median on
+those same days. Days without spend do not count: days off would pull the median
+toward zero and make any working day look expensive. `typical` is null when none of
+the 14 days had spend.
+
 ### `GET /api/sessions?days=14&q=&sort=usd&limit=200`
 
 `days` 0 means all time. `q` matches the title, the project label or folder, or an

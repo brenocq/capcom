@@ -52,7 +52,8 @@ from capcom.types import PriceTable
 
 HOST = "127.0.0.1"
 STATIC = Path(__file__).parent / "static"
-PAGES = {"", "spend", "sessions", "session", "spikes", "checks", "limits"}
+PAGES = {"", "spend", "sessions", "session", "day", "spikes", "checks", "limits"}
+WITH_ARG = {"session", "day"}  # pages and endpoints that take one path segment
 TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -220,6 +221,7 @@ PARAMS: dict[str, tuple[str, ...]] = {
     "spend": ("days", "group"),
     "sessions": ("days", "limit", "sort", "q"),
     "session": (),
+    "day": (),
     "spikes": ("days", "spike", "project", "cause"),
     "checks": ("days",),
     "limits": ("days",),
@@ -406,7 +408,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _page(self, path: str) -> None:
         parts = path.strip("/").split("/")
-        if parts[0] not in PAGES or len(parts) > (2 if parts[0] == "session" else 1):
+        if parts[0] not in PAGES or len(parts) > (2 if parts[0] in WITH_ARG else 1):
             self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
             return
         try:
@@ -435,7 +437,7 @@ class Handler(BaseHTTPRequestHandler):
     def _api(self, route: str, query: dict[str, str]) -> None:
         parts = route.strip("/").split("/")
         name = parts[0]
-        if name not in ENDPOINTS or len(parts) != (2 if name == "session" else 1):
+        if name not in ENDPOINTS or len(parts) != (2 if name in WITH_ARG else 1):
             self._error(HTTPStatus.NOT_FOUND, "not_found", "no such endpoint")
             return
         site = self.site
@@ -502,6 +504,7 @@ ENDPOINTS: dict[str, Endpoint] = {
     "spend": lambda c, _, q: api.spend(c, q),
     "sessions": lambda c, _, q: api.sessions(c, q),
     "session": lambda c, sid, q: api.session(c, sid),
+    "day": lambda c, d, q: api.day(c, d),
     "live": lambda c, _, q: api.live(c),
     "spikes": lambda c, _, q: api.spikes(c, q),
     "checks": lambda c, _, q: api.checks(c, q),

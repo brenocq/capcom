@@ -62,6 +62,43 @@ console.log(JSON.stringify(paths.map((p) => ({ style: p.attrs.style, d: p.attrs.
     return result
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_day_bars_link_each_day_and_keep_the_last_label_clear() -> None:
+    script = (
+        FAKE_DOM
+        + """
+const m = await import('./charts.js');
+const pad = (n) => String(n).padStart(2, '0');
+const days = [];
+for (let i = 0; i < 90; i++) {
+  const d = new Date(2026, 6, 24 + i);
+  const iso = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  days.push({ date: d, iso, values: [i], total: i });
+}
+const el = m.dayBars(days, [{ label: 'a', color: 'red' }], days[89].iso);
+const [bars, labs] = el.children;
+console.log(JSON.stringify({
+  links: bars.children.map((c) => [c.tag, c.attrs.href]),
+  labels: labs.children.map((c) => c.textContent || ''),
+}));
+"""
+    )
+    out = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=STATIC,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    got = json.loads(out.stdout)
+    assert got["links"][0] == ["a", "/day/2026-07-24"]
+    assert got["links"][89] == ["a", "/day/2026-10-21"]
+    # every 7th day is labeled, but not Oct 16, five days before today's label
+    assert got["labels"][77] == "Oct 9" and got["labels"][84] == ""
+    assert got["labels"][89] == "Oct 21"
+
+
 def _ys(d: object) -> list[float]:
     assert isinstance(d, str)
     return [float(pt.split(" ")[1]) for pt in d.lstrip("M").split("L")]

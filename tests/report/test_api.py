@@ -13,6 +13,7 @@ from tests.report.conftest import (
     S1_MAIN,
     S2,
     S3,
+    S4,
     Client,
     usd,
 )
@@ -195,12 +196,66 @@ def test_session_detail(client: Client) -> None:
     assert cal["capcom_usd"] == pytest.approx(usd(TODAY), abs=1e-5)
 
 
+def test_day_against_the_days_with_spend_before_it(client: Client) -> None:
+    status, d, _ = client.get(f"/api/day/{NOW.date()}")
+    assert status == 200 and d["day"] == "2026-10-21" and d["today"] is True
+    assert close(d["totals"]["usd"], usd(TODAY)) and d["sessions_count"] == 1
+    assert d["window"]["until"] == NOW.isoformat()  # today runs up to now
+    assert close(d["cumulative"]["total"][-1], usd(TODAY))
+    # the 14 days before hold three days with spend (s2, s3, s4): their median
+    typical = d["typical"]
+    assert typical["days"] == 3 and typical["of_days"] == 14
+    assert close(typical["usd"], sorted([usd(S2), usd(S3), usd(S4)])[1])
+    [alpha] = d["by_project"]
+    assert alpha["label"] == "alpha" and alpha["typical_usd"] == 0.0
+    assert {a["key"] for a in d["by_agent"]} == {"main", "scout"}
+
+
+def test_a_past_day_and_its_projects_typical_day(client: Client) -> None:
+    status, d, _ = client.get("/api/day/2026-10-18")  # s3, beta
+    assert status == 200 and d["today"] is False
+    assert (
+        close(d["totals"]["usd"], usd(S3)) and d["window"]["until"] == "2026-10-19T00:00:00+00:00"
+    )
+    assert d["typical"]["days"] == 1 and close(d["typical"]["usd"], usd(S4))
+    [beta] = d["by_project"]
+    assert beta["label"] == "beta" and close(beta["typical_usd"], usd(S4))
+
+
+def test_a_day_without_spend(client: Client) -> None:
+    status, d, _ = client.get("/api/day/2026-09-01")
+    assert status == 200 and d["totals"]["requests"] == 0
+    assert d["typical"] is None and d["by_project"] == [] and d["sessions"] == []
+
+
+@pytest.mark.parametrize(
+    ("path", "code"),
+    [("2026-13-01", 400), ("yesterday", 400), ("2026-10-22", 404), ("2026-10-21/x", 404)],
+)
+def test_day_bad_paths(client: Client, path: str, code: int) -> None:
+    assert client.get(f"/api/day/{path}")[0] == code
+
+
+def test_day_page_is_served(client: Client) -> None:
+    status, body, _ = client.get(f"/day/{NOW.date()}")
+    assert status == 200 and b'src="/static/app.js"' in body
+
+
 def test_spawn_description_labels_only_its_agent(client: Client) -> None:
     data = client.get("/api/session/s1")[1]
     [agent] = data["agents"]
     assert agent["description"] == "Map the parser"
     assert json.dumps(data).count("Map the parser") == 1
-    for path in ("overview", "spend", "sessions", "live", "spikes", "checks", "limits"):
+    for path in (
+        "overview",
+        "spend",
+        "sessions",
+        "live",
+        "spikes",
+        "checks",
+        "limits",
+        "day/2026-10-21",
+    ):
         assert "Map the parser" not in json.dumps(client.get(f"/api/{path}")[1]), path
 
 
