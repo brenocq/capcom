@@ -276,3 +276,13 @@ def test_today_against_the_same_hour_across_daylight_saving(tmp_path: Path) -> N
     assert prev["same_hour_average_usd"] == pytest.approx(usd(early) / 7, abs=1e-6)
     assert prev["daily_average_usd"] == pytest.approx(usd(early + late) / 7, abs=1e-6)
     assert d["week"]["elapsed_days"] == pytest.approx(6 + 15 / 24, abs=1e-3)
+
+
+def test_savings_total_says_one_finding_in_the_singular() -> None:
+    from capcom.report.tally import savings_total
+    from capcom.types import Finding
+
+    one = savings_total([Finding("k", "T", "all", "s", 2.0, "a")], set())
+    assert one is not None and "1 finding that doesn't overlap" in one["text"]
+    two = savings_total([Finding("k", "T", "all", "s", 2.0, "a")] * 2, set())
+    assert two is not None and "2 findings that don't overlap" in two["text"]

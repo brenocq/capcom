@@ -9,8 +9,9 @@ is in `api.py` and documented in `API.md`.
 API replies are cached per index generation (`ApiCache`): the key holds the index
 files' sizes and modification times and the index's `PRAGMA data_version` on a held
 read connection, so any write invalidates every entry and a scan that wrote nothing
-none, plus only the query parameters the endpoint reads; entries also expire after a few minutes, since some
-numbers move with the clock alone, and the cache is bounded in bytes.
+none, plus only the query parameters the endpoint reads. Entries also expire after
+a few minutes, since some numbers move with the clock alone, and the cache is
+bounded in bytes.
 
 The index stays fresh through a `Scanner`: an incremental `run_scan` at start and
 then every minute, in one background thread. Only that thread writes the index
