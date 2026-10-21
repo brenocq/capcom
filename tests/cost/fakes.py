@@ -64,6 +64,8 @@ class FakeIndex:
     infos: list[SessionInfo] = field(default_factory=list)
     agent_infos: list[AgentInfo] = field(default_factory=list)
     costs: list[CostState] = field(default_factory=list)
+    # Times of the replies each session lost to another session's log (none by default).
+    shared: dict[str, list[datetime]] = field(default_factory=dict)
 
     def file_state(self, path: Path) -> FileState | None:
         return None
@@ -115,3 +117,12 @@ class FakeIndex:
 
     def last_cost_states(self) -> Iterator[CostState]:
         yield from self.costs
+
+    def shared_replies(
+        self, session_id: str, since: datetime | None = None, until: datetime | None = None
+    ) -> int:
+        return sum(
+            1
+            for t in self.shared.get(session_id, [])
+            if (since is None or t >= since) and (until is None or t < until)
+        )

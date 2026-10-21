@@ -12,7 +12,8 @@ Line shapes (every field but `t` optional):
     {"t": "ev", "kind": "compaction", "key": "u1", "s": "s1", "ts": 3, "attrs": {...}}
     {"t": "ses", "s": "s1", "title": "x", "first": 0, "last": 9}
     {"t": "agent", "id": "a1", "s": "s1", "type": "scout"}
-    {"t": "cost", "s": "s1", "usd": 1.5, "models": {"m": {"input": 3, "cost_usd": 1.5}}, "ts": 4}
+    {"t": "cost", "s": "s1", "usd": 1.5, "models": {"m": {"input": 3, "cost_usd": 1.5}}, "ts": 4,
+     "next": 5}
 
 `ts`, `first` and `last` are seconds after `tests.fixtures.generate.T0`.
 """
@@ -105,6 +106,7 @@ def to_record(d: dict[str, Any], log: LogFile, pos: int) -> Record | None:
             total_cost_usd=d.get("usd", 0.0),
             models={k: ModelUsage(**v) for k, v in d.get("models", {}).items()},
             timestamp=_t(d.get("ts")),
+            next_timestamp=_t(d.get("next")),
         )
     return None
 
@@ -161,6 +163,8 @@ class FakeSource:
                     batch.skipped += 1
                 else:
                     batch.records.append(rec)
+                    if batch.first_timestamp is None and isinstance(rec, (Request, Event)):
+                        batch.first_timestamp = rec.timestamp  # first in file order
                 if batch.lines >= self.batch_lines:
                     yield batch
                     batch = Batch(records=[], end_offset=pos)
