@@ -4,17 +4,19 @@ A thread is one session's main thread (agent_id None) or one of its subagents. T
 kinds, both from ratios against the thread's own recent past:
 
 - SINGLE_REQUEST: a request costing more than `single_ratio` times the median of
-  the thread's previous `history` requests, and more than `single_floor_usd`.
-  Typically a cache rewrite of a big context. The baseline is that median.
-- SLOPE_CHANGE: the cost per active minute over the next `window_turns` requests
+  the thread's previous `history` requests and of its next `window_turns`, and
+  more than `single_floor_usd` above the former, which is the baseline.
+  Typically a cache rewrite of a big context.
+- SLOPE_CHANGE: the cost per turn over the next `window_turns` requests
   is at least `slope_ratio` times the rate over the `baseline_turns` before them,
   and the window spends `slope_floor_usd` more than the old rate would have.
   Consecutive starts that qualify merge into one spike, spanning from the start
   with the highest ratio (where the rate changed) to the end of the last window.
-  Active time is the gap before each request, capped at `idle_cap` (an idle hour
-  is not an hour of work) and at least `min_gap` (`per_minute=False` counts turns
-  instead). Single-request spikes count at their baseline in these windows, so one
-  expensive request does not also read as a slope change.
+  With `per_minute`, the rate is per active minute instead: the gap before each
+  request, capped at `idle_cap` (an idle hour is not an hour of work) and at least
+  `min_gap`. Outliers (single requests far above both sides, whatever their
+  dollar size) count at their baseline in these windows, so one expensive request
+  does not also read as a slope change.
 
 Spikes are reported when they start in [since, until); history up to `lookback`
 before `since` feeds the baselines.
@@ -40,7 +42,7 @@ class SpikeParams:
     history: int = 20
     min_history: int = 5
     single_ratio: float = 5.0
-    single_floor_usd: float = 0.25
+    single_floor_usd: float = 1.0
     baseline_turns: int = 20
     window_turns: int = 10
     slope_ratio: float = 1.5
@@ -48,7 +50,7 @@ class SpikeParams:
     idle_cap: timedelta = timedelta(minutes=5)
     min_gap: timedelta = timedelta(seconds=1)
     lookback: timedelta = timedelta(hours=12)
-    per_minute: bool = True  # slope rate per active minute (False: per turn)
+    per_minute: bool = False  # slope rate per active minute (default: per turn)
 
 
 DEFAULT = SpikeParams()
@@ -63,29 +65,47 @@ class Turn:
     usd: float
 
 
-def single_spikes(
-    session_id: str, agent_id: str | None, turns: list[Turn], p: SpikeParams = DEFAULT
-) -> list[Spike]:
-    out: list[Spike] = []
+def outliers(turns: list[Turn], p: SpikeParams = DEFAULT) -> dict[int, float]:
+    """Turns far above both the median of the thread's previous `history` turns and
+    the median of its next `window_turns` (a request that starts a lasting new
+    level is a slope change, not an outlier), mapped to the previous median."""
+    out: dict[int, float] = {}
     for i, t in enumerate(turns):
         hist = [x.usd for x in turns[max(0, i - p.history) : i]]
         if len(hist) < p.min_history:
             continue
         med = median(hist)
-        if t.usd > p.single_ratio * med and t.usd > p.single_floor_usd:
-            out.append(
-                Spike(
-                    SpikeKind.SINGLE_REQUEST,
-                    start=t.timestamp,
-                    end=t.timestamp + TICK,
-                    cost_usd=t.usd,
-                    baseline_usd=med,
-                    session_id=session_id,
-                    agent_id=agent_id,
-                    message_ids=(t.message_id,),
-                )
-            )
+        if t.usd <= p.single_ratio * med:
+            continue
+        after = [x.usd for x in turns[i + 1 : i + 1 + p.window_turns]]
+        if after and t.usd <= p.single_ratio * median(after):
+            continue
+        out[i] = med
     return out
+
+
+def single_spikes(
+    session_id: str,
+    agent_id: str | None,
+    turns: list[Turn],
+    found: dict[int, float],
+    p: SpikeParams = DEFAULT,
+) -> list[Spike]:
+    """The outliers in `found` whose excess is above the dollar floor."""
+    return [
+        Spike(
+            SpikeKind.SINGLE_REQUEST,
+            start=turns[i].timestamp,
+            end=turns[i].timestamp + TICK,
+            cost_usd=turns[i].usd,
+            baseline_usd=med,
+            session_id=session_id,
+            agent_id=agent_id,
+            message_ids=(turns[i].message_id,),
+        )
+        for i, med in sorted(found.items())
+        if turns[i].usd - med > p.single_floor_usd
+    ]
 
 
 def _active_minutes(turns: list[Turn], p: SpikeParams) -> list[float]:
@@ -103,15 +123,14 @@ def slope_spikes(
     session_id: str,
     agent_id: str | None,
     turns: list[Turn],
-    singles: list[Spike],
+    found: dict[int, float],
     p: SpikeParams = DEFAULT,
 ) -> list[Spike]:
     b, w = p.baseline_turns, p.window_turns
     n = len(turns)
     if n < b + w:
         return []
-    capped = {s.message_ids[0]: s.baseline_usd for s in singles}
-    cost = [capped.get(t.message_id, t.usd) for t in turns]
+    cost = [found.get(i, t.usd) for i, t in enumerate(turns)]
     c = [0.0, *accumulate(cost)]
     units = _active_minutes(turns, p) if p.per_minute else [1.0] * n
     d = [0.0, *accumulate(units)]
@@ -160,8 +179,9 @@ def slope_spikes(
 def thread_spikes(
     session_id: str, agent_id: str | None, turns: list[Turn], p: SpikeParams = DEFAULT
 ) -> list[Spike]:
-    singles = single_spikes(session_id, agent_id, turns, p)
-    return singles + slope_spikes(session_id, agent_id, turns, singles, p)
+    found = outliers(turns, p)
+    singles = single_spikes(session_id, agent_id, turns, found, p)
+    return singles + slope_spikes(session_id, agent_id, turns, found, p)
 
 
 def find_spikes(

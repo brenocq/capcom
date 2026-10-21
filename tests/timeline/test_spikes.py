@@ -90,13 +90,13 @@ def test_slope_change() -> None:
 
 def test_slope_change_from_pace() -> None:
     # same cost per request, but requests come 4x as often: the rate per active
-    # minute rises; per turn it does not
+    # minute rises (per_minute=True); per turn, the default, it does not
     slow = thread([DEAR] * 30, every=2)
     fast = thread([DEAR] * 20, start=58.5, every=0.5)
-    found = spikes(slow + fast)
+    found = spikes(slow + fast, params=SpikeParams(per_minute=True))
     assert [s.kind for s in found] == [SpikeKind.SLOPE_CHANGE]
     assert found[0].start == fast[0].timestamp
-    assert spikes(slow + fast, params=SpikeParams(per_minute=False)) == []
+    assert spikes(slow + fast) == []
 
 
 def test_slope_negatives() -> None:
@@ -133,3 +133,19 @@ def test_window_session_filter_and_order() -> None:
     assert [s.session_id for s in got] == ["s1"]
     assert find_spikes(ix, TABLE, since, since) == []
     assert find_spikes(FakeIndex(), TABLE, *WINDOW) == []
+
+
+def test_small_outliers_do_not_read_as_slope_changes() -> None:
+    # rewrites under the dollar floor are not reported, and do not inflate a window
+    small = {"cache_write_1h": 120_000}  # $0.96: 19x the median, excess under $1
+    costs = [CHEAP] * 30 + [small] + [CHEAP] * 12 + [small] + [CHEAP] * 15
+    assert spikes(thread(costs)) == []
+
+
+def test_a_lasting_big_step_is_one_slope_change() -> None:
+    # 8x per turn from turn 30 on: not ten single-request spikes but one slope change
+    step = {"cache_read": 2_000_000}  # $0.40
+    reqs = thread([CHEAP] * 30 + [step] * 20)
+    found = spikes(reqs)
+    assert [s.kind for s in found] == [SpikeKind.SLOPE_CHANGE]
+    assert found[0].start == reqs[30].timestamp
