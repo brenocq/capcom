@@ -12,12 +12,14 @@ from capcom.cost.top import (
     TEMPORARY,
     Row,
     aggregate,
+    format_calibration,
     format_top,
+    project_label,
     run_calibrate,
     run_top,
     window_start,
 )
-from capcom.types import AgentInfo, CostState, ModelUsage, SessionInfo
+from capcom.types import AgentInfo, Calibration, CostState, ModelUsage, SessionInfo
 
 from .fakes import T0, FakeIndex, at, req
 
@@ -122,7 +124,46 @@ def test_format_top_limits_and_totals() -> None:
     text = format_top(aggregate(sample().requests(), "model", T), "model", limit=2)
     assert "all (4 models)" in text
     assert "2 more rows" in text
-    assert "~ output estimated" in text and "? priced as the closest" in text
+    assert "~ 20% of requests (1) have output estimated" in text
+    assert "output totals are lower bounds" in text
+    assert "? 1 requests of models the price table lacks" in text
+    assert "!" not in text  # the <synthetic> reply is not a model call
+
+
+def test_unpriced_models_are_named_apart() -> None:
+    idx = FakeIndex(
+        reqs=[
+            req("s1", when=at(0), model="gpt-x", output=M),
+            req("s1", when=at(1), model="claude-opus-5-6", output=M),
+        ]
+    )
+    rows = aggregate(idx.requests(), "session", T)
+    assert (rows[0].inexact_price, rows[0].unpriced, rows[0].flags) == (1, 1, "?!")
+    text = format_top(rows, "session", limit=0)
+    assert "! 1 requests of models with no price, counted at $0: gpt-x" in text
+    assert "? 1 requests of models the price table lacks" in text
+
+
+@pytest.mark.parametrize(
+    ("folder", "label"),
+    [
+        ("-home-user-proj", "-home-user-proj"),
+        ("-tmp-lesson-bench-judge-AbC123", TEMPORARY),
+        (
+            "-tmp-claude-1000--home-user-Github-kit-tex-"
+            "0123abcd-0123-4567-89ab-0123456789ab-scratchpad-demo",
+            "temporary (-home-user-Github-kit-tex)",
+        ),
+        (
+            "-tmp-claude-1000--home-user-proj--worktrees-feat-x-"
+            "0123abcd-0123-4567-89ab-0123456789ab",
+            "temporary (-home-user-proj--worktrees-feat-x)",
+        ),
+        ("-tmp-claude-1000--home-user-proj", TEMPORARY),  # no session id after it
+    ],
+)
+def test_project_label(folder: str, label: str) -> None:
+    assert project_label(folder) == label
 
 
 def test_run_top_prints_a_table() -> None:
@@ -183,3 +224,19 @@ def test_run_calibrate() -> None:
     text = out.getvalue()
     assert "fix the parser" in text
     assert "comparable" in text and "all: 1 sessions" in text
+    assert "not comparable: 1 sessions, cost-state $25.00" in text and "no startTime" in text
+
+
+def test_calibrate_splits_the_non_comparable_dollars_by_reason() -> None:
+    checks = [
+        Calibration("s1", 9.0, 10.0, comparable=False, reasons=("WebFetch", "away")),
+        Calibration("s2", 1.0, 2.0, comparable=False, reasons=("away",)),
+        Calibration("s3", 5.0, 5.0),
+    ]
+    text = format_calibration(checks, {}, limit=0)
+    assert "not comparable: 2 sessions, cost-state $12.00" in text
+    assert "counts under each" in text
+    cells = [ln.split() for ln in text.splitlines()]
+    lines = {c[0]: c[1:] for c in cells if len(c) > 1 and c[1].isdigit()}
+    assert lines["away"] == ["2", "$12.00", "$10.00", "-16.7%", "1", "$2.00"]
+    assert lines["WebFetch"] == ["1", "$10.00", "$9.00", "-10.0%", "0", "$0.00"]

@@ -278,6 +278,9 @@ class Batch:
     end_offset: int
     lines: int = 0
     skipped: int = 0
+    # The time of the first timestamped record in the batch, in file order (None if
+    # none): what fills the next_timestamp of earlier cost-states.
+    first_timestamp: datetime | None = None
 
 
 # --------------------------------------------------------------------------- cost
@@ -433,6 +436,13 @@ class Index(Protocol):
         ...
 
     def agents(self, session_id: str | None = None) -> Iterator[AgentInfo]: ...
+
+    def shared_replies(
+        self, session_id: str, since: datetime | None = None, until: datetime | None = None
+    ) -> int:
+        """Replies of `session_id` timed in [since, until) whose row another session's
+        log holds (a copied or forked session), so this session is missing them."""
+        ...
 
     def last_cost_states(self) -> Iterator[CostState]:
         """The last cost-state of each session that has one."""
