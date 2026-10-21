@@ -240,7 +240,8 @@ def format_top(rows: list[Row], by: str, limit: int) -> str:
         share = total.estimated_output / total.requests if total.requests else 0.0
         notes.append(
             f"~ {share:.0%} of requests ({total.estimated_output}) have output estimated "
-            "from content length; output totals are lower bounds"
+            "from content length; output totals are lower bounds (the true output can be "
+            "higher than capcom's estimate)"
         )
     if total.inexact_price:
         notes.append(

@@ -121,6 +121,22 @@ def _put(ix: SqliteIndex, log: LogFile, records: Sequence[Record]) -> None:
     ix.apply(log, Batch(list(records), 100), FileState(log.path, 1, 100, 1, 100))
 
 
+def model_usage(reqs: Sequence[Request]) -> dict[str, ModelUsage]:
+    """cost-state's modelUsage for `reqs`: their tokens per model, as logged."""
+    out: dict[str, ModelUsage] = {}
+    for r in reqs:
+        m = out.get(r.model, ModelUsage())
+        u = r.usage
+        out[r.model] = ModelUsage(
+            input=m.input + u.input,
+            output=m.output + u.output,
+            cache_read=m.cache_read + u.cache_read,
+            cache_write=m.cache_write + u.cache_write,
+            cost_usd=m.cost_usd + usd([r]),
+        )
+    return out
+
+
 def build_index(path: Path) -> Path:
     ix = open_index(path)
     s1 = SessionInfo(
@@ -133,7 +149,7 @@ def build_index(path: Path) -> Path:
     )  # fmt: skip
     cost_state = CostState(
         "s1", 99, total_cost_usd=round(usd(S1_MAIN + S1_AGENT), 6),
-        models={"claude-opus-5-5": ModelUsage(cost_usd=1.0)},
+        models=model_usage(S1_MAIN + S1_AGENT),
     )  # fmt: skip
     _put(ix, _log(ALPHA, "s1"), [s1, *S1_MAIN, *SYNTH, compaction, cost_state])
     scout = AgentInfo("a1", "s1", agent_type="scout", description="Map the parser", finished=True)

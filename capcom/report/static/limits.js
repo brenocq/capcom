@@ -42,6 +42,32 @@ export function runsOut(fc, at) {
   return null;
 }
 
+// Where a chart marks the forecast running out: null unless its most likely
+// crossing of 100 % falls inside [x0, x1] (the reset). `f` is the crossing's place
+// across the plot (0 to 1), `side` where the label goes (left of the marker past the
+// middle, so it never runs off the right edge), `band` the earliest-latest range
+// as fractions clipped to the plot, or null.
+export function runoutMark(fc, x0, x1, weekly) {
+  if (!fc || !fc.runs_out_at || !(x1 > x0)) return null;
+  const t = (iso) => new Date(iso).getTime();
+  const mid = t(fc.runs_out_at);
+  if (!(mid >= x0 && mid <= x1)) return null;
+  const at = (iso) => when(iso, weekly);
+  const frac = (v) => Math.max(0, Math.min(1, (v - x0) / (x1 - x0)));
+  const early = fc.runs_out_early ? t(fc.runs_out_early) : null;
+  const late = fc.runs_out_late ? t(fc.runs_out_late) : null;
+  let sub = null, band = null;
+  if (early !== null && late !== null && early < late) {
+    sub = `between ${at(fc.runs_out_early)} and ${at(fc.runs_out_late)}`;
+    band = [frac(early), frac(late)];
+  } else if (early !== null && early < mid) {
+    sub = `as early as ${at(fc.runs_out_early)}`;
+    band = [frac(early), frac(mid)];
+  }
+  const f = frac(mid);
+  return { t: mid, f, side: f > 0.5 ? 'left' : 'right', title: `Runs out ~${at(fc.runs_out_at)}`, sub, band };
+}
+
 // What the cards and the page say about a window, in words.
 function summary(w) {
   const out = [];
@@ -76,23 +102,26 @@ function fitNote(w) {
 // Each reading is a dot; the stretch from a window's reset (0 %) to its first reading
 // is dashed and labeled, since nothing was read there.
 // opts: {segments: [{points, resets_at, reset, hit_limit, start_known}], fan, now, x0, x1,
-//        height, left, weekly, since (ms: when recording began)}
+//        height, left, weekly, since (ms: when recording began), runout (runoutMark)}
 export function limitChart(opts) {
-  const W = 1000, H = opts.height || 160, left = opts.left || 40;
+  const W = 1000, left = opts.left || 40;
   const { x0, x1 } = opts;
   const fan = opts.fan || [];
-  // a little headroom above the limit when the fan crosses it (clipped there: usage
-  // stops at 100 %)
+  const runout = opts.runout || null;
+  // headroom above the limit when the fan crosses it; the fan is clipped at 100 %
+  // (usage stops there). With a run-out mark the headroom holds its label: 48 px.
+  const H = (opts.height || 160) + (runout ? 30 : 0);
   let top = 100;
   for (const p of fan) top = Math.max(top, p[3]);
-  const ymax = top > 100 ? 120 : 100;
+  const ymax = runout ? 100 * H / (H - 48) : top > 100 ? 120 : 100;
   const X = (t) => ((t - x0) / (x1 - x0) * W).toFixed(1);
   const Y = (v) => (H - v / ymax * H).toFixed(1);
   const id = 'fan' + (++uid);
   const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', 'aria-hidden': 'true', style: 'overflow:hidden' },
     s('defs', null, s('linearGradient', { id, x1: 0, y1: 0, x2: 0, y2: 1 },
       s('stop', { offset: 0, style: 'stop-color:var(--accent);stop-opacity:0.34' }),
-      s('stop', { offset: 1, style: 'stop-color:var(--accent);stop-opacity:0.06' }))));
+      s('stop', { offset: 1, style: 'stop-color:var(--accent);stop-opacity:0.06' })),
+      s('clipPath', { id: id + 'c' }, s('rect', { x: 0, y: Y(100), width: W, height: H - Y(100) }))));
   const hover = [];
   const stroke = { fill: 'none', 'stroke-width': 2, 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke' };
   const gaps = [];
@@ -120,8 +149,10 @@ export function limitChart(opts) {
   if (fan.length > 1) {
     let band = fan.map((p, i) => (i ? 'L' : 'M') + X(p[0]) + ' ' + Y(p[3])).join('');
     for (let i = fan.length - 1; i >= 0; i--) band += 'L' + X(fan[i][0]) + ' ' + Y(fan[i][2]);
-    svg.append(s('path', { d: band + 'Z', fill: `url(#${id})` }));
-    svg.append(s('path', { d: fan.map((p, i) => (i ? 'L' : 'M') + X(p[0]) + ' ' + Y(p[1])).join(''), ...stroke, 'stroke-dasharray': '6 4', style: 'stroke:var(--accent)' }));
+    // clipped at the limit line, so the fan lies flat on it rather than breaking off
+    svg.append(s('g', { 'clip-path': `url(#${id}c)` },
+      s('path', { d: band + 'Z', fill: `url(#${id})` }),
+      s('path', { d: fan.map((p, i) => (i ? 'L' : 'M') + X(p[0]) + ' ' + Y(p[1])).join(''), ...stroke, 'stroke-dasharray': '6 4', style: 'stroke:var(--accent)' })));
     const segs = opts.segments;
     const cur = segs.length ? segs[segs.length - 1] : null;
     if (cur && cur.points.length) {
@@ -153,6 +184,16 @@ export function limitChart(opts) {
   if (opts.now && opts.now < x1 && opts.now > x0) {
     const f = ((opts.now - x0) / (x1 - x0) * 100).toFixed(2) + '%';
     plot.append(h('div.nowline', { style: `left:${f}` }), h('span.nowlab', { style: `left:${f}`, text: 'now' }));
+  }
+  if (runout) {
+    const y100 = yp(100), fx = (f) => (f * 100).toFixed(2) + '%';
+    if (runout.band && runout.band[1] > runout.band[0]) {
+      plot.append(h('div.runband', { style: `left:${fx(runout.band[0])};width:${fx(runout.band[1] - runout.band[0])};top:${y100}` }));
+    }
+    plot.append(h('div.runguide', { style: `left:${fx(runout.f)};top:${y100}` }),
+      h('span.rundot', { style: `left:${fx(runout.f)};top:${y100}`, title: runout.title }),
+      h(`div.runlab.${runout.side}`, { style: `left:${fx(runout.f)};top:${y100}` },
+        h('span.v', { text: runout.title }), runout.sub ? h('span.r', { text: runout.sub }) : null));
   }
   const label = (t) => `${opts.weekly ? monthDay(new Date(t)) + ' ' : ''}${hm(new Date(t))}`;
   plot.addEventListener('mousemove', (e) => {
@@ -193,7 +234,7 @@ export function limitCard(label, w, lim) {
   if (w.current && w.history.length && resets) {
     const x0 = new Date(w.start).getTime(), x1 = new Date(resets).getTime();
     const since = lim.recording_since ? new Date(lim.recording_since).getTime() : null;
-    card.append(limitChart({ segments: [{ points: w.history, reset: false, start_known: w.start_known }], fan: fc ? fc.fan : [], now: fc ? fc.fan[0][0] : null, x0, x1, height: 110, weekly, since }));
+    card.append(limitChart({ segments: [{ points: w.history, reset: false, start_known: w.start_known }], fan: fc ? fc.fan : [], now: fc ? fc.fan[0][0] : null, x0, x1, height: 110, weekly, since, runout: runoutMark(fc, x0, x1, weekly) }));
   }
   const fit = fitNote(w);
   if (fit) card.append(h('span.note', { text: fit }));
@@ -204,6 +245,22 @@ export function limitCard(label, w, lim) {
 
 // ------------------------------------------------------------------ page
 
+// Where the page's chart starts: at the start of the oldest window still in the
+// range (`days` back from now), not at an arbitrary time before it.
+export function chartStart(segs, now, days) {
+  const lo = now - days * 864e5;
+  let x0 = Infinity;
+  for (const sg of segs) {
+    const pts = sg.points;
+    if (!pts.length) continue;
+    const end = sg.resets_at ? new Date(sg.resets_at).getTime() : pts[pts.length - 1][0];
+    if (end < lo) continue;
+    const start = sg.start ? new Date(sg.start).getTime() : pts[0][0];
+    x0 = Math.min(x0, Number.isFinite(start) ? start : pts[0][0]);
+  }
+  return Number.isFinite(x0) && x0 < now ? x0 : now - days * 864e5;
+}
+
 function windowSection(w, now, days, since) {
   const weekly = isWeekly(w);
   const card = h('section.card', null, h('div.split', null, h('h2', { text: w.label[0].toUpperCase() + w.label.slice(1) }),
@@ -212,13 +269,12 @@ function windowSection(w, now, days, since) {
   card.append(h('p.note', { text: summary(w).join(' ') }));
   const segs = [...w.segments].reverse(); // oldest first
   const fc = w.forecast;
-  let first = Infinity;
-  for (const sg of segs) if (sg.points.length) first = Math.min(first, sg.points[0][0]);
-  const x0 = Math.max(now - days * 864e5, Math.min(first, now - (weekly ? 7 : 1) * 864e5));
+  const x0 = chartStart(segs, now, days);
   const end = fc ? new Date(fc.resets_at).getTime() : now;
+  const x1 = Math.max(end, now);
   card.append(limitChart({
     segments: segs,
-    fan: fc ? fc.fan : [], now, x0, x1: Math.max(end, now), height: 180, weekly: true, since,
+    fan: fc ? fc.fan : [], now, x0, x1, height: 180, weekly: true, since, runout: runoutMark(fc, x0, x1, weekly),
   }));
   const fit = fitNote(w);
   if (fit) card.append(h('p.note', { text: fit }));
