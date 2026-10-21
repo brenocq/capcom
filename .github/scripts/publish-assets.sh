@@ -15,7 +15,7 @@ set -eu
 
 root=$(git rev-parse --show-toplevel)
 dir="$root/.github/assets"
-files="banner.svg demo-light.webp demo-dark.webp demo-light.png demo-dark.png feature-adding-up.svg feature-why.svg feature-fan-out.svg feature-checks.svg feature-trust.svg feature-private.svg"
+files="banner.svg demo-light.webp demo-dark.webp demo-light.png demo-dark.png feature-adding-up.svg feature-why.svg feature-fan-out.svg feature-checks.svg feature-limits.svg feature-openclaw.svg feature-trust.svg feature-private.svg"
 
 GIT_INDEX_FILE=$(mktemp -u "${TMPDIR:-/tmp}/capcom-assets-index.XXXXXX")
 export GIT_INDEX_FILE
