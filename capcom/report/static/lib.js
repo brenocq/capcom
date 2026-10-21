@@ -116,12 +116,23 @@ export const categoryColor = (key) => SERIES[Math.max(0, CATEGORY_ORDER.indexOf(
 
 // ------------------------------------------------------------------ API
 
-const memo = new Map();
-// set by the frame (loading.js) to see the replies so far while a job computes
-export const apiHooks = { onPartial: null };
+// One entry per API path: the final reply's promise (kept for the page's life, so
+// a theme switch redraws without fetching again), and while the server computes it
+// as a job, the newest partial reply and the progress (capcom/report/API.md,
+// "Progressive replies").
+const store = new Map();
+// the newest partial of a path whose poll was stopped, to start from next time
+const partials = new Map();
+// `onPartial(path, partial, progress, source)` sees each 202; `pass`, set by the
+// frame while it draws a page, takes the page's api() calls (router.js).
+export const apiHooks = { onPartial: null, pass: null };
 
 // Drop the kept results, so the next draw fetches fresh data.
-export function forget() { memo.clear(); }
+export function forget() {
+  for (const e of store.values()) if (!e.done) e.ctrl.abort();
+  store.clear();
+  partials.clear();
+}
 
 export class ApiError extends Error {
   constructor(status, body) {
@@ -131,19 +142,72 @@ export class ApiError extends Error {
   }
 }
 
-// GET /api/<path>; results are kept for the page's life (a theme switch redraws
-// without fetching again). `fresh` skips the memo (the live list).
-export function api(path, fresh = false) {
-  if (!fresh && memo.has(path)) return memo.get(path);
-  // a slow reply is a server job (202, then 200): follow it to the end
-  const p = getProgressive(path, { onPartial: apiHooks.onPartial && ((...a) => apiHooks.onPartial(path, ...a)) })
-    .catch((err) => { throw err.status ? new ApiError(err.status, err.body) : err; });
-  if (!fresh) {
-    memo.set(path, p);
-    p.catch(() => memo.delete(path));
-  }
-  return p;
+function load(path) {
+  const ctrl = new AbortController();
+  const e = { path, ctrl, done: false, error: null, data: null, partial: partials.get(path) || null, progress: 0, source: null, waiters: new Set() };
+  const wake = () => { for (const w of e.waiters) w(); };
+  e.promise = getProgressive(path, {
+    signal: ctrl.signal,
+    onPartial: (partial, progress, source) => {
+      e.progress = Math.max(e.progress, progress || 0);
+      if (partial) { e.partial = partial; e.source = source; partials.set(path, partial); }
+      wake();
+      if (apiHooks.onPartial) apiHooks.onPartial(path, partial, progress, source);
+    },
+  }).then((data) => {
+    Object.assign(e, { done: true, data, progress: 1 });
+    partials.delete(path);
+    wake();
+    return data;
+  }, (err) => {
+    // kept until the next navigation (stopLoads), so the redraws of this view
+    // show it instead of asking again and again
+    e.error = err.status ? new ApiError(err.status, err.body) : err;
+    wake();
+    throw e.error;
+  });
+  e.promise.catch(() => {}); // the pages see the error; no unhandled rejection
+  store.set(path, e);
+  return e;
 }
+
+// GET /api/<path>, following a server job to its end. While the frame draws a
+// page (`apiHooks.pass`), the page gets the first data there is instead: the
+// final reply, or else the newest partial one (the frame draws again as newer
+// ones come). `fresh` skips the kept results (the live list).
+export function api(path, fresh = false) {
+  if (fresh) {
+    return getProgressive(path).catch((err) => { throw err.status ? new ApiError(err.status, err.body) : err; });
+  }
+  const e = store.get(path) || load(path);
+  return apiHooks.pass ? apiHooks.pass.use(path, e) : e.promise;
+}
+
+// Start loading `path` now, for a page that will ask for it after another reply
+// (Overview asks for checks once its own data is in): the two then load side by side.
+export function preload(path) { if (!store.has(path)) load(path); }
+
+// Where the reply of `path` stands: {done, error, partial, progress}, or null
+// when nothing is loading or kept for it.
+export function apiState(path) {
+  const e = store.get(path);
+  return e ? { done: e.done, error: e.error, partial: e.partial, progress: e.progress, source: e.source, promise: e.promise, entry: e } : null;
+}
+
+// Stop following every reply still computing except `keep` (paths), and drop the
+// errors: the server's jobs go on at low priority and keep their result, so
+// asking again is cheap.
+export function stopLoads(keep = new Set()) {
+  for (const [path, e] of store) {
+    if (e.done || keep.has(path)) continue;
+    store.delete(path);
+    if (!e.error) e.ctrl.abort();
+  }
+}
+
+// Start the server on `path` ahead of a click (a hover on a link to its page):
+// the reply is followed like any other, so the click finds it loading or done.
+export function prefetch(path) { preload(path); }
 
 // ------------------------------------------------------------------ tooltip
 
@@ -224,7 +288,7 @@ export function setQuery(params) {
     if (v === null || v === '') q.delete(k); else q.set(k, v);
   }
   const qs = q.toString();
-  history.replaceState(null, '', location.pathname + (qs ? '?' + qs : ''));
+  history.replaceState(history.state, '', location.pathname + (qs ? '?' + qs : ''));
   window.dispatchEvent(new Event('capcom-route'));
 }
 

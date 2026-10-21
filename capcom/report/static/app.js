@@ -1,7 +1,9 @@
 // The frame: sidebar (navigation, session search, live sessions, index status,
 // theme toggle) and a router from the URL path to a page.
 
-import { h, s, api, stamp, sessionHref, errorBox, forget } from './lib.js';
+import { h, s, api, stamp, sessionHref, forget } from './lib.js';
+import { startRouter, render, go } from './router.js';
+import { swapIn } from './morph.js';
 import { renderOverview } from './overview.js';
 import { renderSpend } from './spend.js';
 import { renderSession } from './session.js';
@@ -77,9 +79,10 @@ function drawSidebar() {
   const active = { session: 'sessions', day: 'spend' }[r.name] || r.name;
   const nav = document.getElementById('sidebar');
   const input = h('input', { id: 'capcom-find', type: 'search', placeholder: 'Project, title or agent type', value: r.name === 'sessions' ? r.query.get('q') || '' : '' });
-  const form = h('form.find', { role: 'search', onsubmit: (e) => { e.preventDefault(); location.href = '/sessions?q=' + encodeURIComponent(input.value.trim()); } },
+  const form = h('form.find', { role: 'search', onsubmit: (e) => { e.preventDefault(); go('/sessions?q=' + encodeURIComponent(input.value.trim())); } },
     h('label', { for: 'capcom-find', text: 'Find a session' }), input);
-  nav.replaceChildren(
+  // drawn anew and swapped in, so the live rates tween and new sessions fade in
+  const fresh = h('nav', { id: 'sidebar', class: 'sidebar', 'aria-label': 'capcom' },
     h('a.brand', { href: '/' }, mark(), h('span', { text: 'capcom' })),
     form,
     h('div.nav', null, NAV.map(([id, href, label, soon]) => h('a', { href, 'aria-current': id === active ? 'page' : null },
@@ -87,6 +90,7 @@ function drawSidebar() {
     liveList(),
     footer(),
   );
+  swapIn(nav, fresh, { animate: nav.childElementCount > 0 });
 }
 
 function liveList() {
@@ -143,27 +147,18 @@ const PAGES = {
   limits: renderLimits,
 };
 
-let renderToken = 0;
-
-async function renderPage() {
-  const r = route();
-  const main = document.getElementById('main');
-  const page = PAGES[r.name];
-  const token = ++renderToken;
-  // Draw into a detached node so a redraw (theme switch) never flashes empty.
-  const next = h('main', { id: 'main', class: 'panel', 'aria-live': 'polite' });
-  if (!main.childElementCount) main.replaceChildren(h('p.loading', { text: 'Loading…' }));
-  try {
-    await page(next, r, () => token === renderToken);
-  } catch (err) {
-    next.replaceChildren(errorBox(err));
-  }
-  if (statusData && statusData.scanning) next.prepend(scanningNotice());
-  if (token === renderToken) main.replaceWith(next);
-}
+// Draw the page of the URL (router.js: at once, from the first data there is,
+// then again as the server's partial replies come).
+function renderPage() { render(); }
 
 window.addEventListener('capcom-route', () => { drawSidebar(); renderPage(); });
 
+startRouter({
+  pages: PAGES,
+  route,
+  onNavigate: drawSidebar,
+  decorate: (next) => { if (statusData && statusData.scanning) next.prepend(scanningNotice()); },
+});
 drawSidebar();
 renderPage();
 // While serve's first scan runs, the totals are partial: say so, and redraw once

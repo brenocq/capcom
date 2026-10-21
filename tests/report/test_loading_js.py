@@ -76,3 +76,22 @@ console.log(JSON.stringify({ out, urls, seen }));
         "/api/spikes?days=30&job=j1",
     ]
     assert got["seen"] == [[None, 0.2, None], [{"count": 3}, 0.6, "chunks"]]
+
+
+def test_tween_mixed_moves_every_number_of_a_text() -> None:
+    got = _run(
+        "console.log(JSON.stringify(["
+        "m.tweenMixed('12 of 30 spikes', '40 of 30 spikes', 0.5),"
+        "m.tweenMixed('width:40.0%;background:var(--s1)', 'width:80.0%;background:var(--s1)', 1, true),"
+        "m.tweenMixed('M0 4.5L12 9', 'M0 8.5L20 9', 0, true),"
+        "m.tweenMixed('Oct 21, 14:30', 'Oct 21, 15:05', 0.5),"
+        "m.tweenMixed('3 spikes', '3 spikes in 2 projects', 0.5),"
+        "m.tweenMixed('$1,189 more', '$2,400 more', 0.5)]))"
+    )
+    assert isinstance(got, list)
+    assert got[0].endswith(" of 30 spikes") and 12 < int(got[0].split()[0]) < 40
+    assert got[1] == "width:80.0%;background:var(--s1)"
+    assert got[2] == "M0 4.5L12 9"
+    assert got[3] is None  # a clock time is swapped, not counted through
+    assert got[4] is None  # different words: swapped
+    assert got[5].startswith("$2,") and got[5].endswith(" more")

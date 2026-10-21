@@ -40,6 +40,42 @@ export function tweenStep(from, to, t) {
   return formatLike({ ...b, grouped: a.grouped || b.grouped }, v);
 }
 
+// Every number in a text, for texts that hold several ("12 of 30 spikes", an SVG
+// path's "M0 4.5L12 9", a style's "width:45.2%"): the pieces between the numbers
+// and the numbers. Thousands separators count as part of a number unless `plain`.
+const NUMS = /(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)/;
+const NUMS_PLAIN = /(\d+(?:\.\d+)?)/;
+
+export function splitNumbers(text, plain = false) {
+  const parts = String(text).split(plain ? NUMS_PLAIN : NUMS);
+  const texts = [], nums = [];
+  parts.forEach((p, i) => {
+    if (i % 2 === 0) { texts.push(p); return; }
+    const [int, frac] = p.split('.');
+    nums.push({ value: Number(int.replace(/,/g, '') + (frac ? '.' + frac : '')), decimals: frac ? frac.length : 0, grouped: int.includes(',') });
+  });
+  return { texts, nums };
+}
+
+// The text between `from` and `to` at time fraction t (0..1, eased) when the two
+// differ in their numbers only, else null (the caller swaps them). Clock times and
+// dates ("14:30", "2026-10-21") are not tweened: their digits do not count.
+export function tweenMixed(from, to, t, plain = false) {
+  if (from === to) return to;
+  const a = splitNumbers(from, plain), b = splitNumbers(to, plain);
+  if (!b.nums.length || a.nums.length !== b.nums.length) return null;
+  for (let i = 0; i < a.texts.length; i++) if (a.texts[i] !== b.texts[i]) return null;
+  for (let i = 1; i < b.texts.length - 1; i++) if (/^[:/-]$/.test(b.texts[i])) return null;
+  if (t >= 1) return to;
+  const e = easeOut(t);
+  let out = b.texts[0];
+  b.nums.forEach((n, i) => {
+    const v = a.nums[i].value + (n.value - a.nums[i].value) * e;
+    out += formatLike({ prefix: '', suffix: '', decimals: Math.max(n.decimals, a.nums[i].decimals ? n.decimals : 0), grouped: n.grouped || a.nums[i].grouped }, v) + b.texts[i + 1];
+  });
+  return out;
+}
+
 export const reducedMotion = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 // Tween an element's text from what it shows to `to` over TWEEN_MS with
@@ -72,7 +108,8 @@ const wait = (ms, signal) => new Promise((resolve, reject) => {
 export async function getProgressive(path, { signal, onPartial, fetchFn = fetch, pollMs = POLL_MS } = {}) {
   let url = '/api/' + path;
   for (;;) {
-    const r = await fetchFn(url, { headers: { Accept: 'application/json' }, signal });
+    // no-store: a browser holds a second request for a URL until the first one ends
+    const r = await fetchFn(url, { headers: { Accept: 'application/json' }, cache: 'no-store', signal });
     let body = null;
     try { body = await r.json(); } catch (e) { body = null; }
     if (r.status !== 202) {
