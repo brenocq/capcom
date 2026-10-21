@@ -10,13 +10,18 @@ import pytest
 from capcom.explain import explain
 from capcom.explain.fmt import clock
 from capcom.types import CauseKind, Confidence, EventKind, Explanation, Spike, SpikeKind
-from tests.explain.helpers import OPUS, SONNET, TABLE, World, at, cost, spike
-
-API = EventKind.API_REQUEST
+from tests.explain.helpers import OPUS, SONNET, TABLE, World, check_claims, cost, spike
 
 
 def run(w: World, *spikes: Spike) -> list[Explanation]:
-    return explain(w.index, TABLE, spikes)
+    for s in spikes:
+        check_claims(w, s)
+    out = explain(w.index, TABLE, spikes)
+    for s in spikes:
+        mine = [e for e in out if e.spike is s]
+        assert mine and sum(e.excess_usd for e in mine) <= s.excess_usd + 1e-12
+        assert all(e.summary for e in mine)
+    return out
 
 
 def labels(e: Explanation) -> list[str]:
@@ -42,13 +47,7 @@ def test_idle_past_one_hour_ttl() -> None:
     r1 = w.req(2, cache_read=200_000)
     r2 = w.req(80, cache_write_1h=205_000)
     for r in (r0, r1, r2):
-        w.event(
-            API,
-            (r.timestamp - at(0)).total_seconds() / 60,
-            request_id=r.request_id,
-            cache_ttl="1h",
-            shape_hash="h1",
-        )
+        w.api(r, cache_ttl="1h", shape_hash="h1")
     e = only(w, spike([r2], baseline=cost(r1)))
     assert e.cause is CauseKind.IDLE_REWRITE
     assert e.confidence is Confidence.CLEAR
@@ -149,10 +148,23 @@ def test_late_compaction_and_the_cap() -> None:
     assert has(first, "preTokens 968,686, postTokens 41,278")
     assert has(first, "4 turns above 400k, averaging 750k")
     assert has(first, "The next request wrote 41k tokens to the cache")
-    # context growth over the 550k hour before (0.40) takes only what is left
-    growth = [e for e in out if e.cause is CauseKind.CONTEXT_GROWTH]
-    assert growth and growth[0].excess_usd == pytest.approx(s.excess_usd - 0.70)
+    # the tokens above the 550k of the hour before are all above 400k, already claimed
+    # by the late compaction: context growth has nothing left to claim
+    assert all(e.cause is not CauseKind.CONTEXT_GROWTH for e in out)
     assert sum(e.excess_usd for e in out) <= s.excess_usd + 1e-12
+
+
+def test_growth_takes_only_what_the_compaction_left() -> None:
+    w = World()
+    for k in range(5):
+        w.req(k, cache_read=200_000)
+    heavy = [w.req(10 + k, cache_read=c) for k, c in enumerate((450_000, 500_000))]
+    w.event(EventKind.COMPACTION, 12, trigger="auto", pre_tokens=500_000, post_tokens=40_000)
+    out = run(w, spike(heavy, kind=SpikeKind.SLOPE_CHANGE))
+    by = {e.cause: e.excess_usd for e in out}
+    # above 400k: 50k + 100k; above the 200k before, the rest: 200k + 200k
+    assert by[CauseKind.COMPACTION] == pytest.approx(150_000 * 0.5 / 1e6)
+    assert by[CauseKind.CONTEXT_GROWTH] == pytest.approx(400_000 * 0.5 / 1e6)
 
 
 # --------------------------------------------------------------------------- rule 3
@@ -192,8 +204,8 @@ def test_shape_hash_change() -> None:
         EventKind.TOOL_SET, 0, source="api-request-shape", shape_hash="h1", names=("Read", "Bash")
     )
     r0 = w.req(0, cache_write_1h=100_000)
-    w.event(API, 1, request_id="x", cache_ttl="1h", shape_hash="h1")
     r1 = w.req(1, cache_read=100_000)
+    w.api(r1, cache_ttl="1h", shape_hash="h1")
     w.event(
         EventKind.TOOL_SET,
         2.5,
@@ -201,8 +213,8 @@ def test_shape_hash_change() -> None:
         shape_hash="h2",
         names=("Read", "Bash", "mcp__srv__one"),
     )
-    w.event(API, 3, request_id="y", cache_ttl="1h", shape_hash="h2")
     r2 = w.req(3, cache_write_1h=101_000)
+    w.api(r2, cache_ttl="1h", shape_hash="h2")
     e = only(w, spike([r2]))
     assert e.cause is CauseKind.TOOL_SET_CHANGE
     assert e.confidence is Confidence.CLEAR
@@ -407,19 +419,49 @@ def test_tool_heavy_turns_are_not_thinking_heavy() -> None:
 @pytest.mark.parametrize(("n", "conf"), [(8, Confidence.LIKELY), (12, Confidence.CLEAR)])
 def test_polling(n: int, conf: Confidence) -> None:
     w = World()
-    reqs = [w.req(k, cache_read=80_000, tools=[("Bash", "sleep")]) for k in range(n)]
-    e = only(w, spike(reqs, kind=SpikeKind.SLOPE_CHANGE))
+    reqs = [w.call(k, "Bash", "sleep", 2_000, cache_read=80_000 + 2_000 * k) for k in range(n)]
+    # the usual pace: the same turns rereading 80k each
+    e = only(w, spike(reqs, baseline=n * 80_000 * 0.5 / 1e6, kind=SpikeKind.SLOPE_CHANGE))
     assert e.cause is CauseKind.POLLING
     assert e.confidence is conf
-    assert e.excess_usd == pytest.approx((n - 1) * (80_000 * 0.5 + 100 * 25) / 1e6)
+    # the n - 1 repeats: their output, and their results reread by the later turns
+    rereads = (n - 1) * (n - 2) // 2
+    assert e.excess_usd == pytest.approx(((n - 1) * 100 * 25 + rereads * 2_000 * 0.5) / 1e6)
     assert e.title == f"The same Bash call {n} times in a row"
     assert has(e, f"{n} Bash (sleep) calls in a row")
-    assert has(e, "Each turn reread about 80k tokens of context")
+    assert has(e, "result tokens that later turns reread")
+
+
+def test_rereading_the_same_file_is_polling() -> None:
+    w = World()
+    reqs = [w.call(k, "Read", "/p/build.log", 3_000, cache_read=90_000) for k in range(6)]
+    e = only(w, spike(reqs, baseline=6 * 90_000 * 0.5 / 1e6, kind=SpikeKind.SLOPE_CHANGE))
+    assert e.cause is CauseKind.POLLING
+    assert "Read the file once" in e.advice
+
+
+@pytest.mark.parametrize(
+    ("tool", "target"),
+    [("Bash", "cd"), ("Bash", "python3"), ("Bash", "uv"), ("mcp__srv__exec", None)],
+)
+def test_ordinary_turns_are_not_polling(tool: str, target: str | None) -> None:
+    # the reviewer's probe: Bash turns that start with `cd` look alike by their first word
+    w = World()
+    reqs = [w.call(k, tool, target, 2_000, cache_read=200_000 + 2_000 * k) for k in range(8)]
+    out = run(w, spike(reqs, kind=SpikeKind.SLOPE_CHANGE))
+    assert all(e.cause is not CauseKind.POLLING for e in out)
+
+
+def test_different_files_are_not_polling() -> None:
+    w = World()
+    reqs = [w.call(k, "Read", f"/p/{k}.py", 3_000, cache_read=90_000) for k in range(6)]
+    out = run(w, spike(reqs, kind=SpikeKind.SLOPE_CHANGE))
+    assert all(e.cause is not CauseKind.POLLING for e in out)
 
 
 def test_four_repeats_are_not_polling() -> None:
     w = World()
-    reqs = [w.req(k, cache_read=80_000, tools=[("Bash", "sleep")]) for k in range(4)]
+    reqs = [w.call(k, "Bash", "sleep", 2_000, cache_read=80_000) for k in range(4)]
     reqs.append(w.req(5, cache_read=80_000, tools=[("Read", "/p/a")]))
     assert only(w, spike(reqs, kind=SpikeKind.SLOPE_CHANGE)).cause is CauseKind.UNEXPLAINED
 
@@ -448,7 +490,7 @@ def test_a_small_cause_is_only_the_closest() -> None:
     e = only(w, s)
     assert e.cause is CauseKind.UNEXPLAINED
     assert e.excess_usd == 10.0
-    assert has(e, "Closest: The same Bash call 5 times in a row, about $0.17")
+    assert has(e, "Closest: The same Bash call 5 times in a row, about $0.01")
     assert e.title == "Spend rose for 4 min"
 
 

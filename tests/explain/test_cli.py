@@ -18,7 +18,9 @@ def _world() -> tuple[World, list[Spike]]:
     w.req(0, cache_write_1h=200_000)
     w.req(2, cache_read=200_000)
     idle = w.req(80, cache_write_1h=205_000)
-    polls = [w.req(100 + k, cache_read=80_000, tools=[("Bash", "sleep")]) for k in range(6)]
+    polls = [
+        w.call(100 + k, "Bash", "sleep", 5_000, cache_read=80_000 + 5_000 * k) for k in range(6)
+    ]
     plain = w.req(200, cache_read=1_000, output=300)
     return w, [spike([idle]), spike(polls), spike([plain], baseline=0.001)]
 
@@ -54,6 +56,7 @@ def test_spikes_view(tmp_path: Path) -> None:
     assert text.index("Cache rebuilt after 78 min idle") < text.index("The same Bash call")
     assert "Idle past cache lifetime, clear cause: $1.90" in text
     assert "What to change:" in text
+    assert "Reading them would have cost $1.90 less." in text
     assert "(1 more spikes; raise --limit to see them)" in text
     summary = text[text.index("Excess by cause") :]
     assert "Idle past cache lifetime" in summary and "Unexplained" in summary

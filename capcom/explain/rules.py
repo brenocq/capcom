@@ -18,9 +18,16 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
 from capcom.cost.model import price_usage
-from capcom.cost.prices import canonical
+from capcom.cost.prices import canonical, lookup, price_at
 from capcom.explain import fmt
-from capcom.explain.data import ONE_HOUR, Member, SessionData, Thread, ttl_delta
+from capcom.explain.data import (
+    ONE_HOUR,
+    Member,
+    SessionData,
+    Thread,
+    api_request_for,
+    ttl_delta,
+)
 from capcom.types import (
     CauseKind,
     Confidence,
@@ -30,6 +37,7 @@ from capcom.types import (
     PriceTable,
     Request,
     Spike,
+    ToolCall,
     Usage,
 )
 
@@ -42,6 +50,7 @@ LONG_REPORT_TOKENS = 10_000  # an Agent report this big is "long" (rule 8)
 RESULT_LOOKBACK = timedelta(hours=1)  # results that may still weigh on a spike
 LATE_COMPACTION_TOKENS = 400_000  # a compaction from above this ran late (rule 2)
 COMPACTION_REACH = timedelta(minutes=10)  # a compaction just after the spike ends it
+TOOL_WAIT_REACH = timedelta(minutes=1)  # a tool result this close before a rewrite ends the pause
 GROWTH_MIN_CONTEXT = 100_000  # context growth only matters at this size (rule 6)
 GROWTH_RATIO = 1.5  # peak context over the hour-before median
 GROWTH_CLEAR_RATIO = 2.0
@@ -49,11 +58,16 @@ GROWTH_THRESHOLDS = (150_000, 200_000, 400_000)
 BASELINE_WINDOW = timedelta(hours=1)
 FAN_OUT_MIN = 4  # Agent calls in the window that make a fan-out (rule 7)
 FAN_OUT_LOOKBACK = timedelta(minutes=10)
+FAN_OUT_BURST = timedelta(minutes=5)  # FAN_OUT_MIN spawns within this make a burst
+FAN_OUT_START = timedelta(minutes=2)  # an unmatched spawn's agent starts within this
 THINKING_SHARE = 0.5  # thinking at least this share of the output (rule 9)
 OUTPUT_COST_SHARE = 0.5  # without logged thinking: output at least this share of cost
 MIN_HEAVY_OUTPUT = 2_000
 POLL_MIN = 5  # the same tool call this many times in a row (rule 10)
 POLL_CLEAR = 10
+POLL_TOOLS = frozenset({"BashOutput", "TaskOutput"})  # checks on a background task
+POLL_COMMANDS = frozenset({"sleep", "watch", "until", "while", "wait", "inotifywait"})
+POLL_WORDS = ("wait", "poll")  # e.g. a waitlog.sh script
 MAX_EVIDENCE = 6
 
 AGENT_TOOLS = frozenset({"Agent", "Task"})
@@ -71,75 +85,164 @@ class Candidate:
     title: str
     evidence: list[Evidence] = field(default_factory=list)
     advice: str = ""
+    summary: str = ""
 
 
 # --------------------------------------------------------------------------- pricing
 
 
+@dataclass(frozen=True, slots=True)
+class _Rates:
+    """USD per token (per search or fetch) of one request, at its own rate tier."""
+
+    input: float
+    cache_read: float
+    cache_write_5m: float
+    cache_write_1h: float
+    output: float
+    web_searches: float
+    web_fetches: float
+
+
 class Pricer:
-    """Request costs, memoized, and counterfactual costs of modified usages."""
+    """Request costs, and the value of a part of a request's usage.
+
+    A part is priced at the request's own per-token rates: when the whole request
+    is above a long-context threshold, the tokens a cause put there cost the
+    long-context rate, and taking them out never re-prices the rest of the request
+    at the base rate. The parts of one request add up to its cost."""
 
     def __init__(self, table: PriceTable) -> None:
         self.table = table
         self._costs: dict[str, float] = {}
+        self._rates: dict[str, _Rates] = {}
 
-    def cost(self, r: Request, usage: Usage | None = None) -> float:
-        if usage is None:
-            c = self._costs.get(r.message_id)
-            if c is None:
-                c = self._costs[r.message_id] = self.cost(r, r.usage)
-            return c
-        return price_usage(r.model, usage, self.table, r.speed, r.inference_geo, r.timestamp).total
+    def cost(self, r: Request) -> float:
+        c = self._costs.get(r.message_id)
+        if c is None:
+            c = self._costs[r.message_id] = price_usage(
+                r.model, r.usage, self.table, r.speed, r.inference_geo, r.timestamp
+            ).total
+        return c
 
-    def saving(self, r: Request, usage: Usage) -> float:
-        """What `r` would have cost less with `usage` instead of its own."""
-        return max(0.0, self.cost(r) - self.cost(r, usage))
+    def rates(self, r: Request) -> _Rates:
+        found = self._rates.get(r.message_id)
+        if found is not None:
+            return found
+        p = price_at(self.table, lookup(self.table, r.model)[0], r.timestamp)
+        lc = p.long_context
+        # a probe of n tokens lands in the same tier as the request
+        long = lc is not None and r.usage.context > lc.threshold_tokens
+        n = lc.threshold_tokens + 1 if lc is not None and long else 1
+
+        def per(u: Usage, part: str, k: int) -> float:
+            b = price_usage(r.model, u, self.table, r.speed, r.inference_geo, r.timestamp)
+            return float(getattr(b, part)) / k
+
+        found = self._rates[r.message_id] = _Rates(
+            input=per(Usage(input=n), "input", n),
+            cache_read=per(Usage(cache_read=n), "cache_read", n),
+            cache_write_5m=per(Usage(cache_write_5m=n), "cache_write", n),
+            cache_write_1h=per(Usage(cache_write_1h=n), "cache_write", n),
+            output=per(Usage(output=n), "output", n),
+            web_searches=per(Usage(web_searches=1), "web", 1),
+            web_fetches=per(Usage(web_fetches=1), "web", 1),
+        )
+        return found
+
+    def value(self, r: Request, part: Usage) -> float:
+        """What `part` of `r`'s usage cost, at `r`'s own rates."""
+        k = self.rates(r)
+        return (
+            part.input * k.input
+            + part.cache_read * k.cache_read
+            + part.cache_write_5m * k.cache_write_5m
+            + part.cache_write_1h * k.cache_write_1h
+            + part.output * k.output
+            + part.web_searches * k.web_searches
+            + part.web_fetches * k.web_fetches
+        )
+
+    def rewrite_value(self, r: Request, writes: Usage) -> float:
+        """What writing `writes` cost above reading them from the cache."""
+        return max(0.0, self.value(r, writes) - self.value(r, Usage(cache_read=writes.cache_write)))
 
     def same_model(self, a: str, b: str) -> bool:
         return canonical(self.table, a) == canonical(self.table, b)
 
 
-def _take_writes(u: Usage, n: int) -> tuple[int, int]:
-    """(1h, 5m) tokens making up `n` of the writes, in proportion."""
+USAGE_FIELDS = (
+    "input",
+    "cache_read",
+    "cache_write_5m",
+    "cache_write_1h",
+    "output",
+    "thinking",
+    "web_searches",
+    "web_fetches",
+)
+
+
+def _writes(u: Usage, n: int) -> Usage:
+    """`n` of the writes in `u`, 1-hour and 5-minute in proportion."""
     n = min(n, u.cache_write)
     if n <= 0:
-        return 0, 0
+        return Usage()
     n1 = min(u.cache_write_1h, round(n * u.cache_write_1h / u.cache_write))
     n5 = min(u.cache_write_5m, n - n1)
-    return n1, n5
+    return Usage(cache_write_1h=n1, cache_write_5m=n5)
 
 
-def write_as_read(u: Usage, n: int) -> Usage:
-    """`u` with `n` written tokens read from the cache instead."""
-    n1, n5 = _take_writes(u, n)
-    return replace(
-        u,
-        cache_write_1h=u.cache_write_1h - n1,
-        cache_write_5m=u.cache_write_5m - n5,
-        cache_read=u.cache_read + n1 + n5,
-    )
-
-
-def without(u: Usage, n: int, writes_first: bool) -> Usage:
-    """`u` with `n` prompt tokens gone: from the writes then the reads (the request
-    that first sent them), or the reads then the writes (later requests)."""
+def prompt_part(u: Usage, n: int, writes_first: bool) -> Usage:
+    """`n` prompt tokens of `u`: from the writes then the reads (the request that
+    first sent them), or the reads then the writes (later requests), then input."""
     left = max(0, n)
-    w1 = w5 = read = 0
+    w = Usage()
+    read = 0
     for part in ("writes", "reads") if writes_first else ("reads", "writes"):
         if part == "writes":
-            w1, w5 = _take_writes(u, left)
-            left -= w1 + w5
+            w = _writes(u, left)
+            left -= w.cache_write
         else:
             read = min(u.cache_read, left)
             left -= read
-    inp = min(u.input, left)
-    return replace(
-        u,
-        cache_write_1h=u.cache_write_1h - w1,
-        cache_write_5m=u.cache_write_5m - w5,
-        cache_read=u.cache_read - read,
-        input=u.input - inp,
-    )
+    return replace(w, cache_read=read, input=min(u.input, left))
+
+
+class Ledger:
+    """The tokens of each spike request that rules have claimed, so that no token
+    (and no dollar) is claimed twice. Each rule claims from what earlier rules left."""
+
+    def __init__(self, pricer: Pricer) -> None:
+        self.pricer = pricer
+        self._left: dict[str, Usage] = {}
+        self.claims: dict[str, list[tuple[CauseKind, Usage]]] = {}
+
+    def left(self, r: Request) -> Usage:
+        return self._left.get(r.message_id, r.usage)
+
+    def prompt_claimed(self, r: Request) -> int:
+        return r.usage.context - self.left(r).context
+
+    def claim(self, r: Request, part: Usage, cause: CauseKind) -> Usage:
+        """Claim `part` of `r` (cut to what is left) and return what was claimed."""
+        left = self.left(r)
+        got = {f: max(0, min(getattr(part, f), getattr(left, f))) for f in USAGE_FIELDS}
+        got["thinking"] = min(got["thinking"], got["output"])
+        taken = Usage(**got)
+        if any(got.values()):
+            rest = {f: getattr(left, f) - got[f] for f in USAGE_FIELDS}
+            rest["thinking"] = min(rest["thinking"], rest["output"])
+            self._left[r.message_id] = Usage(**rest)
+            self.claims.setdefault(r.message_id, []).append((cause, taken))
+        return taken
+
+    def take(self, r: Request, part: Usage, cause: CauseKind) -> float:
+        """Claim `part` of `r` and return what the claimed tokens cost."""
+        return self.pricer.value(r, self.claim(r, part, cause))
+
+    def take_prompt(self, r: Request, n: int, writes_first: bool, cause: CauseKind) -> float:
+        return self.take(r, prompt_part(self.left(r), n, writes_first), cause)
 
 
 # --------------------------------------------------------------------------- the spike
@@ -150,10 +253,11 @@ class SpikeView:
     spike: Spike
     members: list[Member]
     pricer: Pricer
-    # tokens of large results each request carries (message_id -> tokens), set by
-    # the result rules so context growth does not count them again
-    attributed: dict[str, int] = field(default_factory=dict)
+    ledger: Ledger = field(init=False)
     rewrites: list[Rewrite] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.ledger = Ledger(self.pricer)
 
     @property
     def requests(self) -> list[Request]:
@@ -243,6 +347,8 @@ class Rewrite:
     gap: timedelta = timedelta(0)
     lifetime: timedelta | None = None
     same_model: bool = True  # the price table prices both requests as one model
+    waited_on: str | None = None  # the tool call that ran through the pause, if any
+    ttl_change: tuple[str, str] | None = None  # cacheControl ttl before and after
 
 
 def rewritten_tokens(r: Request, prev: Request | None) -> int:
@@ -261,7 +367,7 @@ def rewritten_tokens(r: Request, prev: Request | None) -> int:
 
 
 def _shape_hash(thread: Thread, r: Request) -> str | None:
-    e = thread.nearest_event(EventKind.API_REQUEST, r.timestamp, timedelta(minutes=2))
+    e = api_request_for(thread, r)
     h = e.attrs.get("shape_hash") if e is not None else None
     return h if isinstance(h, str) and h else None
 
@@ -272,6 +378,60 @@ def _last_shape(thread: Thread, before: datetime) -> Event | None:
         if e.kind is EventKind.TOOL_SET and e.attrs.get("source") == SHAPE_SOURCE:
             found = e
     return found
+
+
+def _ttl(thread: Thread, r: Request) -> str | None:
+    e = api_request_for(thread, r)
+    ttl = e.attrs.get("cache_ttl") if e is not None else None
+    return ttl if isinstance(ttl, str) and ttl else None
+
+
+def _tool_wait(rw: Rewrite) -> tuple[Event, timedelta] | None:
+    """The tool result the pause before `rw` waited for: the last result of the
+    previous request's calls, when it came back past the cache lifetime and just
+    before the rewrite (the agent was running a tool, not idle)."""
+    p, r = rw.previous, rw.request
+    ids = {c.tool_use_id for c in p.tool_calls}
+    if not ids or rw.lifetime is None:
+        return None
+    results = [
+        e
+        for e in rw.member.thread.events_between(p.timestamp, r.timestamp, (EventKind.TOOL_RESULT,))
+        if e.attrs.get("tool_use_id") in ids
+    ]
+    if not results:
+        return None
+    last = results[-1]
+    ran = last.timestamp - p.timestamp
+    if ran <= rw.lifetime or r.timestamp - last.timestamp > TOOL_WAIT_REACH:
+        return None
+    return last, ran
+
+
+def _idle(rw: Rewrite, confidence: Confidence, how: str, wrote: Evidence) -> None:
+    m, p, r = rw.member, rw.previous, rw.request
+    lifetime = rw.lifetime or ONE_HOUR
+    rw.reason, rw.confidence = CauseKind.IDLE_REWRITE, confidence
+    rw.evidence = [
+        _ev(f"Previous {_who(m)} request at {fmt.clock(p.timestamp)}", m, p),
+        _ev(
+            f"Gap of {fmt.duration(rw.gap)}; cache lifetime {fmt.lifetime(lifetime)} ({how})",
+            m,
+            r,
+        ),
+    ]
+    wait = _tool_wait(rw)
+    if wait is not None:
+        e, ran = wait
+        call = next(
+            (c for c in p.tool_calls if c.tool_use_id == e.attrs.get("tool_use_id")),
+            p.tool_calls[0],
+        )
+        rw.waited_on = fmt.tool_label(call.name, call.target)
+        rw.evidence.append(
+            _ev(f"The {rw.waited_on} call ran for {fmt.duration(ran)} before its result", m, e=e)
+        )
+    rw.evidence.append(wrote)
 
 
 def _lifetime(sess: SessionData, th: Thread, p: Request) -> tuple[timedelta, str, bool]:
@@ -311,6 +471,14 @@ def classify(rw: Rewrite) -> None:
         rw.evidence = [*_compaction_lines(m, e), wrote]
         return
 
+    lifetime, how, known = _lifetime(m.session, th, p)
+    rw.lifetime = lifetime
+    expired = rw.gap > lifetime
+    # a pause past a known lifetime rewrites the cache whatever else changed in it
+    if expired and (known or rw.gap > ONE_HOUR):
+        _idle(rw, Confidence.CLEAR, how, wrote)
+        return
+
     if not rw.same_model:
         models = [e for e in evs if e.kind is EventKind.MODEL]
         rw.reason, rw.confidence = CauseKind.MODEL_SWITCH, Confidence.CLEAR
@@ -331,6 +499,21 @@ def classify(rw: Rewrite) -> None:
                 )
             )
         rw.evidence.append(wrote)
+        return
+
+    ttl_prev, ttl_now = _ttl(th, p), _ttl(th, r)
+    if ttl_prev and ttl_now and ttl_prev != ttl_now:
+        rw.reason, rw.confidence = CauseKind.TOOL_SET_CHANGE, Confidence.CLEAR
+        rw.ttl_change = (ttl_prev, ttl_now)
+        rw.evidence = [
+            _ev(
+                f"cacheControl ttl changed from {ttl_prev} to {ttl_now} between the requests "
+                f"at {fmt.clock(p.timestamp)} and {fmt.clock(r.timestamp)}",
+                m,
+                r,
+            ),
+            wrote,
+        ]
         return
 
     h_prev, h_now = _shape_hash(th, p), _shape_hash(th, r)
@@ -354,20 +537,8 @@ def classify(rw: Rewrite) -> None:
         rw.evidence.append(wrote)
         return
 
-    lifetime, how, known = _lifetime(m.session, th, p)
-    rw.lifetime = lifetime
-    if rw.gap > lifetime:
-        rw.reason = CauseKind.IDLE_REWRITE
-        rw.confidence = Confidence.CLEAR if known or rw.gap > ONE_HOUR else Confidence.LIKELY
-        rw.evidence = [
-            _ev(f"Previous {_who(m)} request at {fmt.clock(p.timestamp)}", m, p),
-            _ev(
-                f"Gap of {fmt.duration(rw.gap)}; cache lifetime {fmt.lifetime(lifetime)} ({how})",
-                m,
-                r,
-            ),
-            wrote,
-        ]
+    if expired:
+        _idle(rw, Confidence.LIKELY, how, wrote)
         return
     aways = [e for e in evs if e.kind is EventKind.AWAY]
     if aways:
@@ -403,6 +574,17 @@ def classify(rw: Rewrite) -> None:
             r,
         )
     ]
+    if r.usage.context < p.usage.context:
+        rw.evidence.append(
+            _ev(
+                f"The prompt went from {fmt.approx(p.usage.context)} to "
+                f"{fmt.approx(r.usage.context)} tokens and only its first "
+                f"{fmt.approx(r.usage.cache_read)} were read from the cache: something "
+                "early in the context changed",
+                m,
+                r,
+            )
+        )
 
 
 def _compaction_lines(m: Member, e: Event) -> list[Evidence]:
@@ -462,9 +644,14 @@ def find_rewrites(view: SpikeView) -> list[Rewrite]:
             n = rewritten_tokens(r, p)
             if p is None or n == 0:
                 continue
-            rw = Rewrite(m, r, p, n, view.pricer.saving(r, write_as_read(r.usage, n)))
+            rw = Rewrite(m, r, p, n, 0.0)
             rw.same_model = view.pricer.same_model(r.model, p.model)
             classify(rw)
+            writes = _writes(view.ledger.left(r), n)
+            if rw.reason is CauseKind.UNEXPLAINED:
+                rw.excess = view.pricer.rewrite_value(r, writes)  # not a cause: claims nothing
+            else:
+                rw.excess = view.pricer.rewrite_value(r, view.ledger.claim(r, writes, rw.reason))
             out.append(rw)
     return out
 
@@ -496,20 +683,49 @@ def rewrite_candidates(view: SpikeView) -> list[Candidate]:
         top = max(group, key=lambda rw: rw.excess)
         k = len(group)
         if reason is CauseKind.IDLE_REWRITE:
-            title = (
-                f"Cache rebuilt after {fmt.duration(top.gap)} idle"
-                if k == 1
-                else f"Cache rebuilt {k} times after idling"
-            )
             life = top.lifetime or ONE_HOUR
             pause = "an hour" if life >= ONE_HOUR else f"{fmt.lifetime(life)}"
-            advice = (
-                f"A pause longer than {pause} costs one full rewrite of the context. "
-                "Before a long break, compact or end the session with a handoff note."
-            )
+            waits = [rw for rw in group if rw.waited_on]
+            if len(waits) * 2 > k:
+                title = (
+                    f"Cache expired while {top.waited_on or 'a tool'} ran {fmt.duration(top.gap)}"
+                    if k == 1
+                    else f"Cache expired {k} times while tools ran"
+                )
+                advice = (
+                    f"A tool call that runs longer than {pause} comes back to an expired "
+                    "cache and rewrites the whole context. Run long jobs in the background "
+                    "and check on them with short calls, or wait in an agent with a small "
+                    "context."
+                )
+            else:
+                title = (
+                    f"Cache rebuilt after {fmt.duration(top.gap)} idle"
+                    if k == 1
+                    else f"Cache rebuilt {k} times after idling"
+                )
+                if top.member.thread.agent_id is not None:
+                    advice = (
+                        f"A subagent left waiting longer than {pause} rewrites its whole "
+                        "context when it resumes. Have it report and finish, and start a "
+                        "fresh agent for the next step."
+                    )
+                else:
+                    advice = (
+                        f"A pause longer than {pause} costs one full rewrite of the context. "
+                        "Before a long break, compact or end the session with a handoff note."
+                    )
         elif reason is CauseKind.MODEL_SWITCH:
             title = "Model switch rewrote the cache" + (f" {k} times" if k > 1 else "")
             advice = _REWRITE_ADVICE[reason]
+        elif reason is CauseKind.TOOL_SET_CHANGE and all(rw.ttl_change for rw in group):
+            a, b = top.ttl_change or ("", "")
+            title = f"Cache lifetime changed from {a} to {b}" + (f" {k} times" if k > 1 else "")
+            advice = (
+                "Entries cached with one lifetime are not read by a request asking for "
+                "another, so a change of the cache lifetime mid-session rewrites the whole "
+                "context. Keep one lifetime for the session."
+            )
         elif reason is CauseKind.TOOL_SET_CHANGE:
             title = "Tool or prompt change rewrote the cache" + (f" {k} times" if k > 1 else "")
             advice = _REWRITE_ADVICE[reason]
@@ -527,9 +743,43 @@ def rewrite_candidates(view: SpikeView) -> list[Candidate]:
                 title,
                 _cap(evidence),
                 advice,
+                _rewrite_summary(reason, group, excess),
             )
         )
     return out
+
+
+def _rewrite_summary(reason: CauseKind, group: list[Rewrite], excess: float) -> str:
+    top = max(group, key=lambda rw: rw.excess)
+    tokens = sum(rw.tokens for rw in group)
+    who = _who(top.member)
+    if len(group) == 1:
+        lead = f"The {who} request at {fmt.hm(top.request.timestamp)}"
+    else:
+        lead = f"{fmt.count_word(len(group), True)} requests"
+    if reason is CauseKind.IDLE_REWRITE:
+        life = fmt.lifetime(top.lifetime or ONE_HOUR)
+        while_ = f" while {top.waited_on} ran" if top.waited_on else ""
+        why = (
+            f"came {fmt.duration(top.gap)} after the previous one{while_}, past its cache "
+            f"lifetime of {life}"
+            if len(group) == 1
+            else f"came after pauses past the cache lifetime (the longest {fmt.duration(top.gap)}"
+            f"{while_})"
+        )
+    elif reason is CauseKind.COMPACTION:
+        why = "followed a compaction"
+    elif reason is CauseKind.MODEL_SWITCH:
+        why = f"switched from {top.previous.model} to {top.request.model}"
+    elif top.ttl_change:
+        a, b = top.ttl_change
+        why = f"asked for a {b} cache where the previous one asked for {a}"
+    else:
+        why = "followed a change of the tool list or the prompt"
+    return (
+        f"{lead} {why}, so {fmt.approx(tokens)} tokens the cache already held were "
+        f"written again. Reading them would have cost {fmt.usd(excess)} less."
+    )
 
 
 # --------------------------------------------------------------- rule 2: late compaction
@@ -550,8 +800,8 @@ def late_compaction(view: SpikeView) -> list[Candidate]:
                 continue
             heavy = [r for r in before if r.usage.context > LATE_COMPACTION_TOKENS]
             excess = sum(
-                view.pricer.saving(
-                    r, without(r.usage, r.usage.context - LATE_COMPACTION_TOKENS, False)
+                view.ledger.take_prompt(
+                    r, r.usage.context - LATE_COMPACTION_TOKENS, False, CauseKind.COMPACTION
                 )
                 for r in heavy
             )
@@ -587,6 +837,11 @@ def late_compaction(view: SpikeView) -> list[Candidate]:
                     "Compact or hand off near 400k tokens. Past that, each turn costs about "
                     "twice what it did, and the work rarely needs the oldest half of the "
                     "context.",
+                    f"The {_who(m)} compacted at {fmt.approx(pre)} tokens, after "
+                    f"{len(heavy)} turns above {fmt.approx(LATE_COMPACTION_TOKENS)} "
+                    f"(about {fmt.approx(mean)} each). The context above "
+                    f"{fmt.approx(LATE_COMPACTION_TOKENS)} cost {fmt.usd(excess)} on those "
+                    "turns.",
                 )
             )
     return out
@@ -631,11 +886,11 @@ def _results(view: SpikeView, agent: bool) -> list[_Result]:
             )
             end = nxt[0].timestamp if nxt else datetime.max.replace(tzinfo=e.timestamp.tzinfo)
             later = [r for r in th.requests_between(e.timestamp, end) if r.timestamp > e.timestamp]
+            cause = CauseKind.LONG_REPORT if agent else CauseKind.LARGE_TOOL_RESULT
             excess = 0.0
             for i, r in enumerate(later):
                 if r.message_id in ids:
-                    excess += view.pricer.saving(r, without(r.usage, n, writes_first=i == 0))
-                    view.attributed[r.message_id] = view.attributed.get(r.message_id, 0) + n
+                    excess += view.ledger.take_prompt(r, n, i == 0, cause)
             out.append(
                 _Result(
                     m, e, n, excess, later[0] if later else None, max(0, len(later) - 1), bool(nxt)
@@ -698,14 +953,29 @@ def large_results(view: SpikeView) -> list[Candidate]:
         f"({fmt.approx(sum(r.tokens for r in found))} tokens)"
     )
     tool = _str(a.get("tool"))
+    excess = sum(r.excess for r in found)
+    label = fmt.tool_label(tool, _str(a.get("target")))
+    if len(found) == 1:
+        summary = (
+            f"{label} returned about {fmt.approx(top.tokens)} tokens at "
+            f"{fmt.hm(top.event.timestamp)}. Writing it to the cache and rereading it on "
+            f"{top.rereads} later requests cost {fmt.usd(excess)}."
+        )
+    else:
+        summary = (
+            f"{len(found)} tool results above {fmt.approx(LARGE_RESULT_TOKENS)} tokens, the "
+            f"largest from {label}, were written to the cache and reread by later "
+            f"requests, for {fmt.usd(excess)}."
+        )
     return [
         Candidate(
             CauseKind.LARGE_TOOL_RESULT,
             Confidence.LIKELY,
-            sum(r.excess for r in found),
+            excess,
             title,
             _cap(evidence),
             _result_advice(tool, a.get("is_image") is True),
+            summary,
         )
     ]
 
@@ -730,15 +1000,20 @@ def long_reports(view: SpikeView) -> list[Candidate]:
         if len(found) == 1
         else f"{len(found)} long subagent reports stayed in context"
     )
+    excess = sum(r.excess for r in found)
+    reports = "report" if len(found) == 1 else f"{len(found)} reports"
     return [
         Candidate(
             CauseKind.LONG_REPORT,
             Confidence.LIKELY,
-            sum(r.excess for r in found),
+            excess,
             title,
             _cap(evidence),
             "Ask subagents for a short report and to put the details in a file the parent "
             "reads only when it needs them.",
+            f"The subagent {reports} ({fmt.approx(sum(r.tokens for r in found))} tokens) "
+            f"stayed in the parent's context and were reread by its later requests, for "
+            f"{fmt.usd(excess)}.",
         )
     ]
 
@@ -766,9 +1041,9 @@ def context_growth(view: SpikeView) -> list[Candidate]:
             continue
         excess = 0.0
         for r in m.requests:
-            extra = r.usage.context - ref - view.attributed.get(r.message_id, 0)
+            extra = r.usage.context - ref - view.ledger.prompt_claimed(r)
             if extra > 0:
-                excess += view.pricer.saving(r, without(r.usage, extra, writes_first=False))
+                excess += view.ledger.take_prompt(r, extra, False, CauseKind.CONTEXT_GROWTH)
         if excess > 0:
             grown.append((m, ref, peak, excess))
     if not grown:
@@ -821,6 +1096,20 @@ def context_growth(view: SpikeView) -> list[Candidate]:
     if not any(rw.reason is CauseKind.COMPACTION for rw in view.rewrites):
         evidence.append(_ev("No compaction in the window", grown[0][0]))
     conf = Confidence.CLEAR if ratio >= GROWTH_CLEAR_RATIO else Confidence.LIKELY
+    turns = sum(len(g[0].requests) for g in grown)
+    if len(grown) == 1:
+        m, ref, peak, _ = grown[0]
+        summary = (
+            f"The {_who(m)} context grew from {fmt.approx(ref)} to {fmt.approx(peak)} tokens "
+            f"over {turns} requests, and each one reread all of it. The context above the "
+            f"hour before cost {fmt.usd(excess)}."
+        )
+    else:
+        summary = (
+            f"{len(grown)} agents ran with growing contexts over {turns} requests, each "
+            f"rereading all of it. The context above each agent's hour before cost "
+            f"{fmt.usd(excess)}."
+        )
     return [
         Candidate(
             CauseKind.CONTEXT_GROWTH,
@@ -830,6 +1119,7 @@ def context_growth(view: SpikeView) -> list[Candidate]:
             _cap(evidence),
             "One task per agent. Hand off, /clear or compact before about 200k tokens: past "
             "that, every turn rereads all of it.",
+            summary,
         )
     ]
 
@@ -837,34 +1127,71 @@ def context_growth(view: SpikeView) -> list[Candidate]:
 # --------------------------------------------------------------------------- rule 7: fan-out
 
 
+def burst(spawns: list[tuple[Thread, Event]]) -> list[tuple[Thread, Event]]:
+    """The spawns (in time order) that fall in a window of FAN_OUT_BURST holding at
+    least FAN_OUT_MIN of them."""
+    keep: set[int] = set()
+    j = 0
+    for i, (_, e) in enumerate(spawns):
+        while e.timestamp - spawns[j][1].timestamp > FAN_OUT_BURST:
+            j += 1
+        if i - j + 1 >= FAN_OUT_MIN:
+            keep.update(range(j, i + 1))
+    return [spawns[k] for k in sorted(keep)]
+
+
+def _spawned(sess: SessionData, spawns: list[tuple[Thread, Event]]) -> set[str]:
+    """The agents of `spawns`: by the spawn's tool_use_id, else the first agent with
+    no known spawn whose first request follows the spawn within FAN_OUT_START."""
+    agents: set[str] = set()
+    unmapped: list[Event] = []
+    for _, e in spawns:
+        tid = e.attrs.get("tool_use_id")
+        if isinstance(tid, str) and tid in sess.agent_by_tool_use:
+            agents.add(sess.agent_by_tool_use[tid])
+        else:
+            unmapped.append(e)
+    for e in unmapped:
+        starts = sorted(
+            (th.requests[0].timestamp, aid)
+            for aid, th in sess.threads.items()
+            if aid is not None
+            and aid not in agents
+            and not (aid in sess.agents and sess.agents[aid].tool_use_id)
+            and th.requests
+            and e.timestamp <= th.requests[0].timestamp <= e.timestamp + FAN_OUT_START
+        )
+        if starts:
+            agents.add(starts[0][1])
+    return agents
+
+
 def fan_out(view: SpikeView) -> list[Candidate]:
     out = []
     sessions = {m.session.session_id: m.session for m in view.members}
     lo = view.spike.start - FAN_OUT_LOOKBACK
     for sess in sessions.values():
-        spawns: list[tuple[Thread, Event]] = []
+        found: list[tuple[Thread, Event]] = []
         for th in sess.threads.values():
-            spawns.extend(
+            found.extend(
                 (th, e) for e in th.events_between(lo, view.window_end, (EventKind.SPAWN,))
             )
-        if len(spawns) < FAN_OUT_MIN:
+        found.sort(key=lambda x: x[1].timestamp)
+        spawns = burst(found)
+        if not spawns:
             continue
-        spawns.sort(key=lambda x: x[1].timestamp)
         t_first, t_last = spawns[0][1].timestamp, spawns[-1][1].timestamp
-        agents = {
-            sess.agent_by_tool_use[tid]
-            for _, e in spawns
-            if isinstance(tid := e.attrs.get("tool_use_id"), str) and tid in sess.agent_by_tool_use
-        }
-        agents |= {
-            aid
-            for aid, th in sess.threads.items()
-            if aid is not None
-            and th.requests
-            and t_first <= th.requests[0].timestamp < view.window_end
-        }
+        agents = _spawned(sess, spawns)
         members = [m for m in view.members if m.session is sess and m.thread.agent_id in agents]
-        excess = sum(view.pricer.cost(r) for m in members for r in m.requests)
+        # a spike of one agent rose against that agent's own pace: of its requests the
+        # fan-out explains only the first, the one that wrote its prefix
+        own = view.spike.agent_id is not None
+        excess = sum(
+            view.ledger.take(r, view.ledger.left(r), CauseKind.FAN_OUT)
+            for m in members
+            for r in m.requests
+            if not own or r is m.thread.requests[0]
+        )
         if excess <= 0:
             continue
         m0 = next((m for m in view.members if m.session is sess), members[0])
@@ -901,6 +1228,7 @@ def fan_out(view: SpikeView) -> list[Candidate]:
         if agents:
             evidence.append(_ev(f"{small} of them made two tool calls or fewer", m0))
         conf = Confidence.CLEAR if excess >= 0.5 * view.cost else Confidence.LIKELY
+        kinds = ", ".join(f"{v} {k}" for k, v in types.most_common(3))
         out.append(
             Candidate(
                 CauseKind.FAN_OUT,
@@ -910,6 +1238,10 @@ def fan_out(view: SpikeView) -> list[Candidate]:
                 _cap(evidence),
                 "Do one-command lookups in the parent and batch related questions into one "
                 "agent. Give scouts a narrower tool list so their prefix is smaller.",
+                f"{n} Agent calls {when} from {fmt.hm(t_first)} ({kinds}) started "
+                f"{len(members)} subagent{'s' if len(members) != 1 else ''} active in the "
+                f"spike. Each wrote its own prefix to a cache, and "
+                f"{'their' if not own else 'its first'} requests here cost {fmt.usd(excess)}.",
             )
         )
     return out
@@ -919,8 +1251,8 @@ def fan_out(view: SpikeView) -> list[Candidate]:
 
 
 def thinking_heavy(view: SpikeView) -> list[Candidate]:
-    logged: list[tuple[Member, Request, float]] = []
-    unlogged: list[tuple[Member, Request, float]] = []
+    logged: list[tuple[Member, Request, Usage]] = []
+    unlogged: list[tuple[Member, Request, Usage]] = []
     for m in view.members:
         outputs = [r.usage.output for r in m.thread.requests]
         typical = int(statistics.median(outputs)) if outputs else 0
@@ -930,20 +1262,19 @@ def thinking_heavy(view: SpikeView) -> list[Candidate]:
                 continue
             if u.thinking > 0:
                 if u.thinking >= THINKING_SHARE * u.output:
-                    x = view.pricer.saving(r, replace(u, output=u.output - u.thinking, thinking=0))
-                    logged.append((m, r, x))
+                    logged.append((m, r, Usage(output=u.thinking, thinking=u.thinking)))
             elif (
                 not r.output_estimated
                 and u.output >= MIN_HEAVY_OUTPUT
                 and u.output > typical
-                and view.pricer.cost(r, Usage(output=u.output))
+                and view.pricer.value(r, Usage(output=u.output))
                 >= OUTPUT_COST_SHARE * view.pricer.cost(r)
             ):
-                x = view.pricer.saving(r, replace(u, output=typical))
-                unlogged.append((m, r, x))
-    if not logged and not unlogged:
+                unlogged.append((m, r, Usage(output=u.output - typical)))
+    chosen = logged or unlogged
+    turns = [(m, r, view.ledger.take(r, part, CauseKind.THINKING_HEAVY)) for m, r, part in chosen]
+    if not turns:
         return []
-    turns = logged or unlogged
     excess = sum(x for *_, x in turns)
     if excess <= 0:
         return []
@@ -976,6 +1307,12 @@ def thinking_heavy(view: SpikeView) -> list[Candidate]:
     if efforts:
         lines.append(_ev(f"Effort {efforts.most_common(1)[0][0]} on these turns", m0))
     lines.append(_ev("One tool call or fewer per turn", m0))
+    what = (
+        f"{fmt.approx(sum(r.usage.thinking for _, r, _ in turns))} thinking tokens"
+        if logged
+        else f"{fmt.approx(out_tokens)} output tokens"
+    )
+    effort = f" at effort {efforts.most_common(1)[0][0]}" if efforts else ""
     return [
         Candidate(
             CauseKind.THINKING_HEAVY,
@@ -985,11 +1322,74 @@ def thinking_heavy(view: SpikeView) -> list[Candidate]:
             lines,
             "Lower the effort for routine work; keep high effort for hard design or "
             "debugging turns.",
+            f"{fmt.count_word(len(turns), True)} turns{effort} with one tool call or fewer "
+            f"wrote {what}, for {fmt.usd(excess)} of output.",
         )
     ]
 
 
 # --------------------------------------------------------------------------- rule 10: polling
+
+
+def poll_key(c: ToolCall) -> tuple[str, str] | None:
+    """What makes a repeat of `c` a real repeat: the same Read path, a sleep, watch or
+    wait-like command, or a background-output check. None for every other call: a
+    Bash target is only the command's first word, so `cd`, `bash`, `python` and the
+    like say nothing about what ran, and a call with no target says nothing at all."""
+    if c.name in POLL_TOOLS:
+        return c.name, c.target or ""
+    if not c.target:
+        return None
+    if c.name == "Read":
+        return c.name, c.target
+    if c.name == "Bash":
+        word = c.target.rsplit("/", 1)[-1].lower()
+        if word in POLL_COMMANDS or any(w in word for w in POLL_WORDS):
+            return c.name, c.target
+    return None
+
+
+def _signature(r: Request) -> tuple[tuple[str, str], ...]:
+    keys = [poll_key(c) for c in r.tool_calls]
+    if not keys or any(k is None for k in keys):
+        return ()
+    return tuple(sorted({k for k in keys if k is not None}))
+
+
+def _results_of(th: Thread, r: Request) -> list[tuple[Event, int]]:
+    """The tool results of `r`'s calls, with their size in tokens."""
+    ids = {c.tool_use_id for c in r.tool_calls}
+    nxt = th.requests_between(r.timestamp + timedelta(microseconds=1), r.timestamp + ONE_HOUR)
+    end = nxt[0].timestamp if nxt else r.timestamp + ONE_HOUR
+    return [
+        (e, _int(e.attrs.get("size_tokens")))
+        for e in th.events_between(r.timestamp, end, (EventKind.TOOL_RESULT,))
+        if e.attrs.get("tool_use_id") in ids
+    ]
+
+
+def _poll_excess(view: SpikeView, m: Member, run: list[Request]) -> tuple[float, int, int]:
+    """(dollars, output tokens, result tokens) the repeats of `run` added: their own
+    output, and their results as every later spike request of the thread reread them
+    (until a compaction)."""
+    th = m.thread
+    ids = {r.message_id for r in m.requests}
+    x = 0.0
+    out_tokens = res_tokens = 0
+    for q in run[1:]:
+        if q.message_id in ids:
+            out_tokens += q.usage.output
+            x += view.ledger.take(q, Usage(output=q.usage.output), CauseKind.POLLING)
+        for e, n in _results_of(th, q):
+            if n <= 0:
+                continue
+            res_tokens += n
+            comps = th.events_between(e.timestamp, view.window_end, (EventKind.COMPACTION,))
+            end = comps[0].timestamp if comps else view.window_end
+            later = [r for r in m.requests if e.timestamp < r.timestamp < end]
+            for i, r in enumerate(later):
+                x += view.ledger.take_prompt(r, n, i == 0, CauseKind.POLLING)
+    return x, out_tokens, res_tokens
 
 
 def polling(view: SpikeView) -> list[Candidate]:
@@ -998,28 +1398,27 @@ def polling(view: SpikeView) -> list[Candidate]:
         run: list[Request] = []
         sig: tuple[tuple[str, str], ...] = ()
         for r in m.requests:
-            s = tuple(sorted({(c.name, c.target or "") for c in r.tool_calls}))
+            s = _signature(r)
             if s and s == sig:
                 run.append(r)
                 continue
-            if len(run) >= POLL_MIN:
+            if len(run) >= POLL_MIN and sig:
                 runs.append((m, run))
             run, sig = [r], s
         if len(run) >= POLL_MIN and sig:
             runs.append((m, run))
     found = []
     for m, run in runs:
-        x = sum(view.pricer.cost(r) for r in run[1:])
+        x, out_tokens, res_tokens = _poll_excess(view, m, run)
         if x > 0:
-            found.append((m, run, x))
+            found.append((m, run, x, out_tokens, res_tokens))
     if not found:
         return []
     found.sort(key=lambda f: -f[2])
-    m, run, _ = found[0]
+    m, run, _, out_tokens, res_tokens = found[0]
     calls = sum(len(r.tool_calls) for r in run)
     first = run[0].tool_calls[0]
     label = fmt.tool_label(first.name, first.target)
-    ctx = statistics.median(r.usage.context for r in run)
     evidence = [
         _ev(
             f"{calls} {label} calls in a row, {fmt.hm(run[0].timestamp)} to "
@@ -1027,9 +1426,14 @@ def polling(view: SpikeView) -> list[Candidate]:
             m,
             run[0],
         ),
-        _ev(f"Each turn reread about {fmt.approx(ctx)} tokens of context", m, run[-1]),
+        _ev(
+            f"The repeats wrote {fmt.approx(out_tokens)} output tokens and added "
+            f"{fmt.approx(res_tokens)} result tokens that later turns reread",
+            m,
+            run[-1],
+        ),
     ]
-    for m2, run2, _ in found[1:3]:
+    for m2, run2, *_ in found[1:3]:
         c2 = run2[0].tool_calls[0]
         evidence.append(
             _ev(
@@ -1037,6 +1441,7 @@ def polling(view: SpikeView) -> list[Candidate]:
             )
         )
     longest = max(len(f[1]) for f in found)
+    excess = sum(f[2] for f in found)
     advice = (
         "Read the file once and keep the part you need instead of rereading it."
         if first.name == "Read"
@@ -1047,25 +1452,31 @@ def polling(view: SpikeView) -> list[Candidate]:
         Candidate(
             CauseKind.POLLING,
             Confidence.CLEAR if longest >= POLL_CLEAR else Confidence.LIKELY,
-            sum(f[2] for f in found),
+            excess,
             f"The same {first.name} call {calls} times in a row",
             evidence,
             advice,
+            f"The {_who(m)} made {calls} {label} calls in a row from "
+            f"{fmt.hm(run[0].timestamp)}. The repeats and the rereads of their results "
+            f"cost {fmt.usd(excess)}.",
         )
     ]
 
 
 # --------------------------------------------------------------------------- all rules
 
+# In claiming order: each rule prices only the tokens the rules before it left (the
+# rewrites claim theirs in `find_rewrites`, before any rule), and context growth, the
+# cause without a single event, takes the rest.
 RULES: tuple[Callable[[SpikeView], list[Candidate]], ...] = (
     rewrite_candidates,
     late_compaction,
     large_results,
     long_reports,
-    context_growth,  # after the result rules: it leaves out the tokens they claimed
     fan_out,
     thinking_heavy,
     polling,
+    context_growth,
 )
 
 
@@ -1088,6 +1499,7 @@ def merge(cands: list[Candidate]) -> list[Candidate]:
                 group[0].title,
                 _cap([e for c in group for e in c.evidence]),
                 group[0].advice,
+                group[0].summary,
             )
         )
     return out

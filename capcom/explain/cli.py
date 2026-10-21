@@ -74,6 +74,8 @@ def format_spikes(
             lines.append(f"     {label}, {conf}: {usd(e.excess_usd)}")
             if e is not exps[0]:
                 lines.append(f"       {e.title}")
+            if e.summary:
+                lines.append(f"       {e.summary}")
             lines.extend(f"       - {ev.label}" for ev in e.evidence)
             if e.advice:
                 lines.append(f"       What to change: {e.advice}")

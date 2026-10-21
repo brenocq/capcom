@@ -4,12 +4,15 @@ builder that places requests and events by minute."""
 from __future__ import annotations
 
 import itertools
+import uuid
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from capcom.cost.model import price
+from capcom.explain.data import SessionCache
+from capcom.explain.rules import USAGE_FIELDS, Pricer, SpikeView, candidates
 from capcom.types import (
     AgentInfo,
     AttrValue,
@@ -19,6 +22,7 @@ from capcom.types import (
     EventKind,
     FileState,
     LogFile,
+    LongContextPrice,
     Price,
     PriceTable,
     Request,
@@ -32,6 +36,7 @@ from capcom.types import (
 T0 = datetime(2026, 10, 20, 9, 0, tzinfo=UTC)
 OPUS = "claude-opus-5-5"
 SONNET = "claude-sonnet-5-5"
+LONG = "claude-sonnet-4-5"  # priced higher, the whole request, above 200k tokens
 M = 1_000_000
 
 # USD per million tokens, round on purpose
@@ -44,6 +49,17 @@ TABLE = PriceTable(
         ),
         SONNET: Price(
             SONNET, input=3, output=15, cache_write_5m=3.75, cache_write_1h=6, cache_read=0.3
+        ),
+        LONG: Price(
+            LONG,
+            input=3,
+            output=15,
+            cache_write_5m=3.75,
+            cache_write_1h=6,
+            cache_read=0.3,
+            long_context=LongContextPrice(
+                200_000, input=6, output=22.5, cache_write_5m=7.5, cache_write_1h=12, cache_read=0.6
+            ),
         ),
     },
 )
@@ -144,7 +160,7 @@ class World:
             timestamp=at(minutes),
             model=model,
             usage=Usage(**usage),
-            request_id=f"req_{i}",
+            request_id=f"req_011C{i:020d}",
             effort=effort,
             tool_calls=tuple(
                 ToolCall(f"toolu_{i}_{k}", name, target) for k, (name, target) in enumerate(tools)
@@ -164,6 +180,43 @@ class World:
         e = Event(kind, session, agent, at(minutes), f"ev_{next(_ids)}", attrs)
         self.index.evs.append(e)
         return e
+
+    def api(self, r: Request, seconds_before: float = 5.0, **attrs: AttrValue) -> Event:
+        """The `api-request` record that sent `r`, logged `seconds_before` its reply. Its
+        request_id is the record's own uuid, as in the real logs."""
+        attrs.setdefault("model", r.model)
+        attrs.setdefault("query_source", "agent:custom" if r.agent_id else "repl_main_thread")
+        minutes = (r.timestamp - T0).total_seconds() / 60 - seconds_before / 60
+        return self.event(
+            EventKind.API_REQUEST,
+            minutes,
+            session=r.session_id,
+            agent=r.agent_id,
+            request_id=str(uuid.uuid4()),
+            **attrs,
+        )
+
+    def call(
+        self,
+        minutes: float,
+        tool: str,
+        target: str | None,
+        result_tokens: int,
+        agent: str | None = None,
+        **usage: int,
+    ) -> Request:
+        """A request making one tool call, and the call's result a few seconds later."""
+        r = self.req(minutes, agent=agent, tools=[(tool, target)], **usage)
+        self.event(
+            EventKind.TOOL_RESULT,
+            minutes + 0.05,
+            agent=agent,
+            tool_use_id=r.tool_calls[0].tool_use_id,
+            tool=tool,
+            target=target,
+            size_tokens=result_tokens,
+        )
+        return r
 
     def agent(self, agent_id: str, agent_type: str, tool_use_id: str, session: str = "s1") -> None:
         self.index.agent_infos.append(
@@ -193,3 +246,15 @@ def spike(
         agent_id=agent,
         message_ids=tuple(r.message_id for r in reqs),
     )
+
+
+def check_claims(w: World, s: Spike) -> None:
+    """No token of a request is claimed twice, so the raw excesses of all causes add
+    up to at most what the spike's requests cost."""
+    view = SpikeView(s, SessionCache(w.index, [s]).members(s), Pricer(TABLE))
+    found = candidates(view) if view.members else []
+    for r in view.requests:
+        for f in USAGE_FIELDS:
+            taken = sum(getattr(u, f) for _, u in view.ledger.claims.get(r.message_id, []))
+            assert 0 <= taken <= getattr(r.usage, f), (r.message_id, f)
+    assert sum(c.excess for c in found) <= view.cost + 1e-12

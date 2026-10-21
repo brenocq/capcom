@@ -8,6 +8,7 @@ call, and dropped when no later spike needs it.
 from __future__ import annotations
 
 import bisect
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -16,8 +17,37 @@ from capcom.types import AgentInfo, Event, EventKind, Index, Request, Spike
 
 FIVE_MINUTES = timedelta(minutes=5)
 ONE_HOUR = timedelta(hours=1)
-# How far from a request an `api-request` record may be and still describe it.
-API_REQUEST_REACH = timedelta(minutes=2)
+# How long before a reply its `api-request` record may be (the 99.9th percentile on
+# real logs is about 3 minutes, the time a long reply takes to start).
+API_REQUEST_REACH = timedelta(minutes=5)
+_DATE_SUFFIX = re.compile(r"-\d{8}$")
+
+
+def _base_model(model: str) -> str:
+    return _DATE_SUFFIX.sub("", model)
+
+
+def api_request_for(thread: Thread, r: Request) -> Event | None:
+    """The `api-request` record that sent `r`: the latest one of its thread at or
+    before the reply, within API_REQUEST_REACH, for the same model and from the same
+    kind of query (`agent:*` on a subagent, anything else on the main thread).
+
+    The record's own `request_id` is the record's uuid, never the reply's
+    `requestId`, so the pick goes by time; the next turn's record, logged right
+    after the reply, never describes it."""
+    agent = thread.agent_id is not None
+    found: Event | None = None
+    for e in thread.events_between(
+        r.timestamp - API_REQUEST_REACH, r.timestamp, (EventKind.API_REQUEST,)
+    ):
+        model = e.attrs.get("model")
+        if isinstance(model, str) and model and _base_model(model) != _base_model(r.model):
+            continue
+        source = e.attrs.get("query_source")
+        if isinstance(source, str) and source and source.startswith("agent:") != agent:
+            continue
+        found = e
+    return found
 
 
 def ttl_delta(ttl: str | None) -> timedelta | None:
@@ -81,16 +111,6 @@ class Thread:
         wanted = None if kinds is None else frozenset(kinds)
         return [e for e in self.events[lo:hi] if wanted is None or e.kind in wanted]
 
-    def nearest_event(self, kind: EventKind, t: datetime, reach: timedelta) -> Event | None:
-        """The event of `kind` closest to `t`, at most `reach` away (earlier wins a tie)."""
-        best: Event | None = None
-        best_gap: timedelta | None = None
-        for e in self.events_between(t - reach - timedelta(microseconds=1), t + reach, (kind,)):
-            gap = abs(e.timestamp - t)
-            if best_gap is None or gap < best_gap:
-                best, best_gap = e, gap
-        return best
-
 
 @dataclass
 class SessionData:
@@ -117,17 +137,7 @@ class SessionData:
         """How long the cache written by `r` lives, and the `cache_ttl` that says so
         (None when it is a fallback: 5 minutes, or 1 hour on a main thread whose
         session shows 1-hour writes)."""
-        ev = None
-        if r.request_id:
-            for e in thread.events_between(
-                r.timestamp - 2 * API_REQUEST_REACH,
-                r.timestamp + API_REQUEST_REACH,
-                (EventKind.API_REQUEST,),
-            ):
-                if e.attrs.get("request_id") == r.request_id:
-                    ev = e
-        if ev is None:
-            ev = thread.nearest_event(EventKind.API_REQUEST, r.timestamp, API_REQUEST_REACH)
+        ev = api_request_for(thread, r)
         ttl = ev.attrs.get("cache_ttl") if ev is not None else None
         delta = ttl_delta(ttl) if isinstance(ttl, str) else None
         if delta is not None:

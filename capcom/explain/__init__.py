@@ -82,7 +82,16 @@ def _explain_one(view: SpikeView) -> list[Explanation]:
             continue
         left -= share
         out.append(
-            Explanation(spike, c.cause, c.confidence, share, c.title, tuple(c.evidence), c.advice)
+            Explanation(
+                spike,
+                c.cause,
+                c.confidence,
+                share,
+                c.title,
+                tuple(c.evidence),
+                c.advice,
+                c.summary,
+            )
         )
     if total > 0 and left > REMAINDER_SHARE * total:
         out.append(
@@ -102,6 +111,9 @@ def _explain_one(view: SpikeView) -> list[Explanation]:
                     ),
                 ),
                 _NOTHING_TO_CHANGE,
+                f"The causes above account for {fmt.usd(total - left)} of the "
+                f"{fmt.usd(total)} above the usual pace; no rule fits the other "
+                f"{fmt.usd(left)}.",
             )
         )
     return out
@@ -131,6 +143,16 @@ def _unexplained(view: SpikeView, found: list[Candidate]) -> Explanation:
     closest = max((c for c in found if c.excess > 0), key=lambda c: c.excess, default=None)
     if closest is not None:
         evidence.append(ev(f"Closest: {closest.title}, about {fmt.usd(closest.excess)}"))
+    n = len(view.requests)
+    summary = (
+        f"{fmt.count_word(n, True)} request{'s' if n != 1 else ''} spent "
+        f"{fmt.usd(spike.excess_usd)} above the usual pace and no rule fits"
+        + (
+            f"; the closest, {closest.cause.value}, accounts for {fmt.usd(closest.excess)}."
+            if closest
+            else "."
+        )
+    )
     return Explanation(
         spike,
         CauseKind.UNEXPLAINED,
@@ -139,4 +161,5 @@ def _unexplained(view: SpikeView, found: list[Candidate]) -> Explanation:
         title,
         tuple(evidence),
         _NOTHING_TO_CHANGE,
+        summary,
     )
