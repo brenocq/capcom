@@ -27,10 +27,10 @@ Tables (schema version in `schema_version`):
 
 Version 2 lacked cost_states.ts, version 3 cost_states.next_ts and shared_replies,
 version 4 filled next_ts from the earliest time of the next batch, and version 5 lacked
-requests.reported_cost (OpenClaw's own cost estimate): a writable open
-migrates them in place (the index keeps history the logs may have lost); up to version
-5 it queues the files with cost-states, and every file of their sessions, for a reread
-(5 -> 6 only adds the column).
+requests.reported_cost (OpenClaw's own cost estimate), version 6
+cost_states.total_duration_ms: a writable open migrates them in place (the index keeps
+history the logs may have lost); except for 5 -> 6, which only adds the column, it
+queues the files with cost-states, and every file of their sessions, for a reread.
 
 Times are stored as integer microseconds since the Unix epoch, UTC.
 """
@@ -65,7 +65,7 @@ from capcom.types import (
     Usage,
 )
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _US = timedelta(microseconds=1)
@@ -186,6 +186,7 @@ CREATE TABLE IF NOT EXISTS cost_states (
     has_unknown_model_cost INTEGER,
     ts INTEGER,
     next_ts INTEGER,
+    total_duration_ms INTEGER,
     PRIMARY KEY (file, pos)
 );
 CREATE INDEX IF NOT EXISTS cost_states_session ON cost_states (session_id, main, pos);
@@ -241,7 +242,8 @@ _UPSERT_AGENT = _upsert_part("agent_parts", "agent_id", _AGENT_FIELDS)
 
 _INSERT_COST = (
     "INSERT OR REPLACE INTO cost_states (file, pos, session_id, main, total_cost_usd, models, "
-    "start_time_ms, has_unknown_model_cost, ts, next_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    "start_time_ms, has_unknown_model_cost, ts, next_ts, total_duration_ms) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
 _UPSERT_FILE = (
@@ -518,6 +520,7 @@ class SqliteIndex:
                         None
                         if r.next_timestamp is None
                         else _aware("next_timestamp", r.next_timestamp),
+                        r.total_duration_ms,
                     )
                 )
             else:
@@ -686,30 +689,28 @@ class SqliteIndex:
     def last_cost_states(self) -> Iterator[CostState]:
         """The last cost-state of each session: the highest offset in the session's
         main log, or in its other files when the main log has none."""
-        for session, pos, total, models, start_ms, unknown, ts, next_ts in self._con.execute(
-            "SELECT session_id, pos, total_cost_usd, models, start_time_ms, "
-            "has_unknown_model_cost, ts, next_ts FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY "
+        for row in self._con.execute(
+            f"SELECT {_COST_COLS} FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY "
             "session_id ORDER BY main DESC, pos DESC, file) AS rank FROM cost_states) "
             "WHERE rank = 1 ORDER BY session_id"
         ):
-            loaded = (
-                {
-                    m: ModelUsage(**dict(zip(_MODEL_FIELDS, v, strict=False)))
-                    for m, v in json.loads(models).items()
-                }
-                if models
-                else {}
-            )
-            yield CostState(
-                session,
-                pos,
-                total,
-                loaded,
-                start_ms,
-                _bool_opt(unknown),
-                _dt_opt(ts),
-                _dt_opt(next_ts),
-            )
+            yield _cost_state(row)
+
+    def cost_states(self, session_id: str) -> Iterator[CostState]:
+        """Every cost-state of the file that holds the session's last one (its main
+        log, or another file when the main log has none), in file order."""
+        row = self._con.execute(
+            "SELECT file FROM cost_states WHERE session_id = ? "
+            "ORDER BY main DESC, pos DESC, file LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return
+        for r in self._con.execute(
+            f"SELECT {_COST_COLS} FROM cost_states WHERE session_id = ? AND file = ? ORDER BY pos",
+            (session_id, row[0]),
+        ):
+            yield _cost_state(r)
 
     def process_starts(self, session_id: str | None = None) -> dict[str, list[int]]:
         """The distinct process start times (cost-state `startTime`, epoch ms) of
@@ -739,6 +740,35 @@ class SqliteIndex:
             f"WHERE {' AND '.join(['s.session_id = ?', 'r.session_id != ?', *where])}"
         )
         return int(self._con.execute(sql, [session_id, session_id, *args]).fetchone()[0])
+
+
+_COST_COLS = (
+    "session_id, pos, total_cost_usd, models, start_time_ms, has_unknown_model_cost, ts, "
+    "next_ts, total_duration_ms"
+)
+
+
+def _cost_state(row: tuple[Any, ...]) -> CostState:
+    session, pos, total, models, start_ms, unknown, ts, next_ts, duration = row
+    loaded = (
+        {
+            m: ModelUsage(**dict(zip(_MODEL_FIELDS, v, strict=False)))
+            for m, v in json.loads(models).items()
+        }
+        if models
+        else {}
+    )
+    return CostState(
+        session,
+        pos,
+        total,
+        loaded,
+        start_ms,
+        _bool_opt(unknown),
+        _dt_opt(ts),
+        _dt_opt(next_ts),
+        duration,
+    )
 
 
 def _session_row(file: str, s: SessionInfo, seq: int) -> tuple[Any, ...]:
@@ -844,6 +874,25 @@ def _migrate_5_to_6(con: sqlite3.Connection) -> None:
     con.execute("COMMIT")
 
 
+def _migrate_6_to_7(con: sqlite3.Connection) -> None:
+    """Add cost_states.total_duration_ms (cost-state's totalDuration, for comparing
+    per process step) and queue the sessions with cost-states for a reread, as
+    4 -> 5 does, so the column is filled. One transaction."""
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        if con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 6:
+            cols = {r[1] for r in con.execute("PRAGMA table_info(cost_states)")}
+            if "total_duration_ms" not in cols:
+                con.execute("ALTER TABLE cost_states ADD COLUMN total_duration_ms INTEGER")
+            _queue_cost_sessions(con)
+            con.execute("DELETE FROM schema_version")
+            con.execute("INSERT INTO schema_version (version) VALUES (7)")
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
+    con.execute("COMMIT")
+
+
 def open_index(path: Path, readonly: bool = False) -> SqliteIndex:
     """Open the index at `path` (normally `config.index_path`).
 
@@ -879,6 +928,8 @@ def open_index(path: Path, readonly: bool = False) -> SqliteIndex:
                     _migrate_4_to_5(con)
                 if con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 5:
                     _migrate_5_to_6(con)
+                if con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 6:
+                    _migrate_6_to_7(con)
         row = con.execute("SELECT MAX(version) FROM schema_version").fetchone()
         version = row[0] if row else None
         if version != SCHEMA_VERSION:

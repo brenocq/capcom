@@ -212,6 +212,22 @@ def test_last_cost_states(ix: SqliteIndex) -> None:
     assert {c.session_id: c.total_cost_usd for c in ix.last_cost_states()}["s1"] == 3.0
 
 
+def test_cost_states_of_a_session(ix: SqliteIndex) -> None:
+    put(
+        ix,
+        A,
+        CostState("s1", 500, 1.0, start_time_ms=7, total_duration_ms=3_600_000),
+        CostState("s1", 100, 0.2, total_duration_ms=60_000),
+    )
+    put(ix, B, CostState("s1", 50, 9.0))  # another file of the session: not its last
+    put(ix, C, CostState("s2", 50, 0.1))
+    got = list(ix.cost_states("s1"))
+    assert [(c.offset, c.total_duration_ms) for c in got] == [(100, 60_000), (500, 3_600_000)]
+    assert got[1] == next(c for c in ix.last_cost_states() if c.session_id == "s1")
+    assert [c.offset for c in ix.cost_states("s2")] == [50]
+    assert list(ix.cost_states("nope")) == []
+
+
 def test_cost_state_timestamp_roundtrip(ix: SqliteIndex) -> None:
     put(ix, A, CostState("s1", 10, 1.0, timestamp=at(7.25)))
     put(ix, C, CostState("s2", 10, 1.0))
