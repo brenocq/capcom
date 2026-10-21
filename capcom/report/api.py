@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import importlib
 import math
 import statistics
 from collections.abc import Mapping, Sequence
@@ -106,8 +105,8 @@ class Context:
     state_dir: Path | None = None  # where the usage samples are; None: no samples
     scanning: bool = False  # serve's first scan is still running: totals may be partial
     changes_path: Path | None = None  # the marks (changes.jsonl); None: capcom.changes' own
-    # capcom.changes' daily facts for this index generation, shared across requests
-    facts_cache: dict[Any, Any] | None = None
+    day_cache: Path | None = None  # capcom.changes' finished days; None: not kept
+    agent_dirs: Sequence[Path] | None = None  # noticed()'s definitions; None: its own
 
     def local(self, t: datetime) -> datetime:
         return t.astimezone(self.tz)
@@ -1436,14 +1435,10 @@ def _open_marks(ctx: Context) -> tuple[dict[str, Any], Any]:
         return {}, lambda kind: None
     label = didit.labeler(ctx)
     named = getattr(backend, "measure_name", None)
-    table: Any = None
-    if named is None and getattr(backend, "__name__", "") == "capcom.changes":
-        with contextlib.suppress(ImportError, AttributeError):  # its table of measures
-            table = importlib.import_module("capcom.changes.measures").MEASURES
 
     def measure_name(kind: str) -> str | None:
         with contextlib.suppress(Exception):
-            name = named(kind) if callable(named) else table[kind].label if table else None
+            name = named(kind) if callable(named) else None
             return name if isinstance(name, str) else None
         return None
 

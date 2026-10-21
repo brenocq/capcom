@@ -40,7 +40,7 @@ import threading
 import traceback
 import webbrowser
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, tzinfo
 from http import HTTPStatus
@@ -94,6 +94,7 @@ CACHE_BYTES = 32 * 1024 * 1024  # encoded replies kept, all endpoints together
 CACHE_TTL = 300.0  # seconds: "today", "last hour" and "running" move with the clock
 UNCACHED = {"status", "live"}  # cheap, and about the current minute
 MARKED = {"checks", "changes"}  # replies that show marks: keyed on the marks file too
+DAY_CACHE = "changes-days.sqlite"  # in the cache folder: the file `capcom changes` keeps
 
 
 class ApiCache:
@@ -270,39 +271,9 @@ class Site:
     read_only: bool = False  # True: no POST /api/changes, no buttons that write
     token: str = field(default_factory=lambda: secrets.token_urlsafe(32))  # per launch
     write_lock: threading.Lock = field(default_factory=threading.Lock)
-    facts: FactsHolder = field(default_factory=lambda: FactsHolder())
+    day_cache: Path | None = None  # capcom.changes' finished days; None: not kept
+    agent_dirs: Sequence[Path] | None = None  # where noticed() reads; None: its own
     request_timeout: float = 30.0  # seconds a client may take to send its request
-
-
-class FactsHolder:
-    """capcom.changes' cache of daily facts, kept for one index generation: measuring
-    every mark reads each day of the logs once, and the next request at the same
-    generation reads none. A new generation starts an empty cache. Partial days (the
-    current one, cut at the request's clock) are dropped on each use, so only whole
-    days stay. Thread-safe."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._gen: tuple[int, ...] | None = None
-        self._facts: dict[Any, Any] = {}
-
-    def get(self, gen: tuple[int, ...]) -> dict[Any, Any]:
-        with self._lock:
-            if gen != self._gen:
-                self._gen, self._facts = gen, {}
-            for key in list(self._facts):
-                if not _whole_day(key):
-                    self._facts.pop(key, None)
-            return self._facts
-
-
-def _whole_day(key: Any) -> bool:
-    """A facts key (since, until) that starts and ends at a local midnight."""
-    try:
-        since, until = key
-        return bool(since.time() == until.time() == datetime.min.time())
-    except (TypeError, ValueError, AttributeError):
-        return False
 
 
 class Scanner:
@@ -609,12 +580,8 @@ class Handler(BaseHTTPRequestHandler):
             state_dir=site.state_dir,
             scanning=site.scanner is not None and site.scanner.first_scan,
             changes_path=site.changes_path,
-            facts_cache=site.facts.get(
-                generation(
-                    site.index_path,
-                    site.cache.watch(site.index_path) if site.cache is not None else None,
-                )
-            ),
+            day_cache=site.day_cache,
+            agent_dirs=site.agent_dirs,
         )
 
     def _page(self, path: str) -> None:
@@ -753,6 +720,7 @@ def run_serve(
         state_dir=config.state_dir,
         scanner=scanner,
         read_only=read_only,
+        day_cache=config.cache_dir / DAY_CACHE,
     )
     try:
         server = make_server(site, port)

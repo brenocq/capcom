@@ -455,8 +455,9 @@ finding's own rate over the 4 weeks before that date and from the day after, wee
 the only file capcom writes besides its cache; its size and modification time are
 part of the cache key of `checks` and `changes` (the replies that show marks), so a
 mark shows on Checks and here at once and leaves every other reply cached. The
-measures share one cache of daily facts per index generation, kept by the server, so
-only the first `changes` request after a scan reads the logs' days. All dates are
+measures keep each finished day in `changes-days.sqlite` in the cache folder, the
+file `capcom changes` keeps too, so a request reads from the index only the days not
+measured before (and today). All dates are
 `YYYY-MM-DD` local dates; `marked_at` and `since` are ISO 8601 times. 501
 (`module` "changes") while `capcom.changes` is missing.
 
@@ -473,12 +474,23 @@ Result = Mark + {days_since, measure, before, after, before_range: [low, high] |
 `what` is "suggested" (the finding's own change) or "other"; `source` "user" or
 "noticed"; `note` is the user's own words, at most 500 characters, which the pages
 render as text. `title` and `expected_usd_per_week` are the finding's when it was
-marked. `verdict` is `working` (the after rate sits below the before weeks' range),
-`no_effect` (inside it), `worse` (above it), `too_early` (too few days or requests
-since; `verdict_due` says when) or `no_data` (the pages say "Can't tell"). `measured_usd_per_week` is positive for
-a saving: (before − after) × the after workload × the unit's average price in the
-before window, API-equivalent. `quality` holds the signals to judge a model change
-by (turns per spawn, tool errors per 100 calls); empty otherwise.
+marked. `measure` names what is counted (such as "Tool-wait rewrites per 1,000
+requests"; "(no measure)" for a kind capcom cannot measure yet). The verdict compares
+rates, so a busier week does not count: `working` / `worse` when the after days' rate
+is below / above the before days' by a permutation test over days at 95 % and by more
+than the before days' usual swing; `no_effect` otherwise; `too_early` under 7 days, or
+too few requests in scope since the date (`verdict_due`: when to look again, projected
+from the pace of requests since; null when none came since); `no_data` (the pages say
+"Can't tell") without a measure, with too little in scope before the date, for work
+that only started after it, or when the requests in scope per week changed 4-fold.
+`reason` is that sentence with its numbers. `before_range` is the lowest and highest
+before week (weeks with a small share of the usual workload left out).
+`measured_usd_per_week` is given for working (positive, a saving) and worse
+(negative), null otherwise: (before − after) × the after weeks' workload × what one
+counted unit cost in the before window, API-equivalent. `evidence` holds the counts
+behind the measure, `quality` the signals to judge a model change by (requests per
+spawn, tool errors per 100 calls); empty otherwise. `window.before_from` is the first
+before week's start, null without weeks.
 
 #### `GET /api/changes`
 
@@ -497,8 +509,9 @@ is the marks file.
 #### `GET /api/changes/<id>`
 
 One `Result` with `weeks: [{week_start, value, requests, after}]`: the before weeks
-and the weeks from the day after the date, `value` null for a week without requests in
-scope. 404 for an unknown id.
+(up to 4, clipped where the logs begin) and the weeks from the day after the date,
+each starting on the applied weekday, `value` null for a week without requests in
+scope; empty for a kind without a measure. 404 for an unknown id.
 
 #### `GET /api/changes/noticed?days=14`
 
@@ -507,6 +520,8 @@ saving_usd_per_week}]}`: changes capcom saw in a file it already reads (an agent
 definition's frontmatter, `detail` such as "model: sonnet", modified at `since`) that
 answer a finding of the Checks window (`days`: 7, 14 or 30), without an open mark yet.
 The page asks the user to confirm each; "Not this" is remembered in the browser only.
+The reply is cached like the others, so a definition edited since shows within 5
+minutes, or after a scan or a mark.
 
 `/api/status` also carries `changes`: how many marks are open (null without
 `capcom.changes`), the sidebar's count.
@@ -535,7 +550,8 @@ thread):
 
 A mark's `kind` and `scope` must name a finding of Checks over `days` (7, 14 or 30;
 14 by default) without an open mark (409 `already_marked`: one open mark per
-finding, so re-marking is changing the date, or unmarking first); its title and
+finding, so re-marking is changing the date, or unmarking first; also when `capcom
+mark` wrote one meanwhile and `capcom.changes` refuses the second); its title and
 saving are taken from that finding (from the cached Checks reply of that window when
 there is one), not from the request. The finding is looked up before the write lock
 is taken; under it, only the marks are read again and written. `applied_on` cannot be after today nor

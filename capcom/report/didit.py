@@ -3,9 +3,10 @@ as applied, each measured by capcom.changes before and after its date, the chang
 capcom noticed, and the one write the website makes (`write`, behind the POST guard in
 server.py).
 
-capcom.changes is reached through `Analysis.changes()`, so the API runs, and is tested,
-with a stand-in. A mark's note is the user's own words: it is sent back as text and the
-pages render it with textContent.
+capcom.changes is reached through `Analysis.changes()` (a stand-in can take its place
+in tests). The measures keep finished days in the same day cache as `capcom changes`
+(`Context.day_cache`). A mark's note is the user's own words: it is sent back as text
+and the pages render it with textContent.
 """
 
 from __future__ import annotations
@@ -145,15 +146,9 @@ def route(ctx: Context, arg: str, query: Mapping[str, str]) -> dict[str, Any]:
     return one(ctx, arg)
 
 
-def summary(ctx: Context) -> dict[str, Any]:
-    """Every mark measured, newest first, with the counts by verdict and the measured
-    saving against the expected one over the changes that have a verdict."""
-    backend = _backend(ctx)
-    label = labeler(ctx)
-    today = ctx.today()
-    marks = sorted(_marks(ctx), key=lambda m: (m.applied_on, m.id), reverse=True)
-    cache = ctx.facts_cache  # the daily facts, shared by every mark and request
-    results = [backend.measure(ctx.index, ctx.table, m, ctx.now, cache=cache) for m in marks]
+def tally(results: Sequence[ChangeResult]) -> dict[str, Any]:
+    """The counts by verdict, the measured saving against the expected one over the
+    changes that have a verdict, and the next day a verdict is due."""
     counts = {v.value: 0 for v in Verdict}
     for r in results:
         counts[r.verdict.value] += 1
@@ -165,7 +160,6 @@ def summary(ctx: Context) -> dict[str, Any]:
     m_sum, e_sum = sum(measured), sum(expected)
     due = [r.verdict_due for r in results if r.verdict == Verdict.TOO_EARLY and r.verdict_due]
     return {
-        "marks": len(marks),
         "counts": counts,
         "with_verdict": {
             "changes": len(given),
@@ -174,9 +168,25 @@ def summary(ctx: Context) -> dict[str, Any]:
             "share": _num(m_sum / e_sum, 4) if measured and e_sum > 0 else None,
         },
         "next_verdict": min(due).isoformat() if due else None,
-        "changes": [result_json(r, label, today) for r in results],
-        "path": str(ctx.changes_path or backend.store_path()),
     }
+
+
+def summary(ctx: Context) -> dict[str, Any]:
+    """Every mark measured (one pass over the days they need), newest first, with
+    their `tally`."""
+    backend = _backend(ctx)
+    label = labeler(ctx)
+    today = ctx.today()
+    marks = sorted(_marks(ctx), key=lambda m: (m.applied_on, m.id), reverse=True)
+    results = backend.measure_all(ctx.index, ctx.table, marks, ctx.now, day_cache=ctx.day_cache)
+    return (
+        {"marks": len(marks)}
+        | tally(results)
+        | {
+            "changes": [result_json(r, label, today) for r in results],
+            "path": str(ctx.changes_path or backend.store_path()),
+        }
+    )
 
 
 def one(ctx: Context, raw: str) -> dict[str, Any]:
@@ -186,7 +196,7 @@ def one(ctx: Context, raw: str) -> dict[str, Any]:
     mark = next((m for m in _marks(ctx) if m.id == wanted), None)
     if mark is None:
         raise ApiError(404, "not_found", "no such change")
-    r = _backend(ctx).measure(ctx.index, ctx.table, mark, ctx.now, cache=ctx.facts_cache)
+    r = _backend(ctx).measure(ctx.index, ctx.table, mark, ctx.now, day_cache=ctx.day_cache)
     return result_json(r, labeler(ctx), ctx.today(), weeks=True)
 
 
@@ -206,7 +216,10 @@ def noticed(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     label = labeler(ctx)
     rows = []
     since = ctx.midnight(days - 1)
-    seen = _backend(ctx).noticed(ctx.index, ctx.table, findings, ctx.now, since=since, marks=marks)
+    dirs = {} if ctx.agent_dirs is None else {"agent_dirs": ctx.agent_dirs}
+    seen = _backend(ctx).noticed(
+        ctx.index, ctx.table, findings, ctx.now, since=since, marks=marks, **dirs
+    )
     for n in seen:
         fid = finding_id(n.kind, n.scope)
         if fid in marked:
@@ -249,6 +262,10 @@ FIELDS = {
     "edit": ({"action", "id"}, {"applied_on", "note"}),
     "unmark": ({"action", "id"}, set()),
 }
+
+
+def _already() -> ApiError:
+    return ApiError(409, "already_marked", "this finding is already marked as applied")
 
 
 def _bad(message: str) -> ApiError:
@@ -391,16 +408,23 @@ def write(
     with held:
         # one open mark per finding: re-marking is Change the date, or Unmark first
         if finding_id(kind, scope) in open_by_finding(_marks(ctx)):
-            raise ApiError(409, "already_marked", "this finding is already marked as applied")
-        made = backend.mark(
-            kind,
-            scope,
-            day,
-            found[2],
-            what=what,
-            note=note,
-            expected_usd_per_week=found[3],
-            source=source,
-            path=ctx.changes_path,
-        )
+            raise _already()
+        try:
+            made = backend.mark(
+                kind,
+                scope,
+                day,
+                found[2],
+                what=what,
+                note=note,
+                expected_usd_per_week=found[3],
+                source=source,
+                path=ctx.changes_path,
+            )
+        except ValueError:
+            # capcom.changes refuses a second open mark too: one written meanwhile by
+            # `capcom mark`, between the read above and its own
+            if finding_id(kind, scope) in open_by_finding(_marks(ctx)):
+                raise _already() from None
+            raise
     return {"mark": mark_json(made, label)}
