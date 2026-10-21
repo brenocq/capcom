@@ -286,12 +286,21 @@ def finding_overlaps(f: Finding) -> tuple[str, ...]:
     return tuple(raw) if isinstance(raw, tuple | list) else ()
 
 
+# Findings saving less than this are not listed nor counted (the CLI says how many).
+MIN_LISTED_USD_PER_WEEK = 0.10
+
+
+def _judged(f: Finding) -> bool:
+    return bool(f.metrics.get("judgement_call"))
+
+
 def counted_findings(findings: Sequence[Finding], dirs: Collection[str]) -> list[bool]:
     """Which findings a total may add: largest first, each that counts dollars none
     counted so far does. Two project folders (in `dirs`) are apart; a scope of "all"
     or an agent type may cover any folder. A judgement call (metrics
     "judgement_call", such as a cheaper model for an agent) is never counted: its
-    saving would shrink every other one on the same requests."""
+    saving would shrink every other one on the same requests. Nor is a finding
+    under MIN_LISTED_USD_PER_WEEK."""
 
     def same_place(a: str, b: str) -> bool:
         return a == b or a not in dirs or b not in dirs
@@ -299,7 +308,7 @@ def counted_findings(findings: Sequence[Finding], dirs: Collection[str]) -> list
     kept: list[tuple[str, str]] = []  # (kind, scope) of the findings counted so far
     counted: list[bool] = []
     for f in findings:
-        if f.metrics.get("judgement_call"):
+        if _judged(f) or f.saving_usd_per_week < MIN_LISTED_USD_PER_WEEK:
             counted.append(False)
             continue
         over = finding_overlaps(f)
@@ -318,8 +327,9 @@ def savings_total(findings: Sequence[Finding], dirs: Collection[str]) -> dict[st
     flags = counted_findings(findings, dirs)
     picked = [f for f, ok in zip(findings, flags, strict=True) if ok]
     usd = sum(f.saving_usd_per_week for f in picked)
-    judged = [f for f in findings if f.metrics.get("judgement_call")]
-    n, of = len(picked), len(findings) - len(judged)
+    listed = [f for f in findings if f.saving_usd_per_week >= MIN_LISTED_USD_PER_WEEK]
+    judged = [f for f in listed if _judged(f)]
+    n, of = len(picked), len(listed) - len(judged)
     them = "finding that doesn't" if n == 1 else "findings that don't"
     text = f"up to ${usd:,.2f}/week across {n} {them} overlap"
     if n < of:
@@ -333,12 +343,26 @@ def savings_total(findings: Sequence[Finding], dirs: Collection[str]) -> dict[st
     return {
         "usd_per_week": round(usd, 6),
         "findings": n,
-        "of": len(findings),
-        "all": n == len(findings),
+        "of": of,
+        "all": n == of,
         "text": text,
-        # only when there are any, so the API is unchanged without them
+        # only when there are any, so the API is unchanged without them; the
+        # website lists them apart from the total
         **(
-            {"judgement_calls": {"usd_per_week": round(judged_usd, 6), "findings": len(judged)}}
+            {
+                "judgement_calls": {
+                    "usd_per_week": round(judged_usd, 6),
+                    "findings": len(judged),
+                    "items": [
+                        {
+                            "kind": f.kind,
+                            "scope": f.scope,
+                            "usd_per_week": round(f.saving_usd_per_week, 6),
+                        }
+                        for f in judged
+                    ],
+                }
+            }
             if judged
             else {}
         ),

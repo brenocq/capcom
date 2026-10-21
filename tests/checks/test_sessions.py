@@ -49,10 +49,12 @@ def _with_spans(idx: SortedIndex, spans: dict[str, timedelta]) -> SortedIndex:
 
 
 def _long_session(compactions: int, trigger: str = "manual"):  # type: ignore[no-untyped-def]
-    """s1: 200 turns at 120k, open for 10 days; s2: a fresh session at 40k."""
-    reqs = run(200, cache_read=120_000) + run(20, start=300, session="s2", cache_read=40_000)
+    """s1: 200 turns at 120k over three days, open for 10 days; s2: a fresh session
+    of the same project at 40k."""
+    reqs = run(200, step=21.6, cache_read=120_000)
+    reqs += run(20, start=5_000, session="s2", cache_read=40_000)
     evs = [
-        ev(EventKind.COMPACTION, 50 * (i + 1) - 0.5, pre_tokens=120_000, trigger=trigger)
+        ev(EventKind.COMPACTION, 1_000 * (i + 1) + 0.5, pre_tokens=120_000, trigger=trigger)
         for i in range(compactions)
     ]
     spans = {"s1": timedelta(days=10), "s2": timedelta(hours=1)}
@@ -60,15 +62,19 @@ def _long_session(compactions: int, trigger: str = "manual"):  # type: ignore[no
 
 
 def test_a_session_open_for_days_with_compactions_never_ended() -> None:
-    f = only(_checks(_long_session(3)), "session_never_ended")
-    # a fresh session here holds 40k (rounded up to the 50k bucket edge): each turn
-    # rereads 70k more than that, less one handoff for the one day it was used
+    idx = _long_session(3)
+    f = only(_checks(idx), "session_never_ended")
+    # a fresh session of the project holds 40k (rounded up to the 50k bucket edge):
+    # each turn rereads 70k more, less a fresh start writing 50k on each day of use
+    days = {r.timestamp.astimezone().date() for r in idx.reqs if r.session_id == "s1"}
+    assert len(days) >= 3
     assert f.metrics["fresh_context"] == 50_000
-    assert f.saving_usd_per_week == pytest.approx(200 * 70_000 * READ_RATE - HANDOFF)
+    assert f.saving_usd_per_week == pytest.approx(
+        200 * 70_000 * READ_RATE - len(days) * 50_000 * 5 / 1e6
+    )
     assert f.metrics["sessions"] == 1 and f.metrics["longest_days"] == 10
     assert "handoff note" in f.advice
     assert f.evidence[0].session_id == "s1"
-    assert "long_running_agents" not in f.metrics["overlaps"]
 
 
 def test_two_manual_compactions_are_not_enough_but_two_automatic_ones_are() -> None:
@@ -88,8 +94,10 @@ def test_never_ended_counts_only_below_the_long_context_line() -> None:
     idx = _with_spans(index(reqs, evs), {"s1": timedelta(days=10), "s2": timedelta(hours=1)})
     found = _checks(idx)
     f = only(found, "session_never_ended")
-    assert f.saving_usd_per_week == pytest.approx(200 * 100_000 * READ_RATE - HANDOFF)
-    assert "long_running_agents" in kinds(found)  # the part past 150k
+    assert f.saving_usd_per_week == pytest.approx(200 * 100_000 * READ_RATE - 50_000 * 5 / 1e6)
+    # the part past 150k is long-running too: another way to the same rereads
+    assert "long_running_agents" in kinds(found)
+    assert "long_running_agents" in f.metrics["overlaps"]
 
 
 # --------------------------------------------------------------------------- heartbeat
@@ -112,8 +120,9 @@ def test_a_heartbeat_that_resumes_a_growing_session_is_flagged() -> None:
     reqs, idx = _heartbeat()
     found = _checks(idx)
     f = only(found, "heartbeat_growing_session")
-    # a fresh run carries the smallest resumed context, 48k: rounded up to 50k
-    expected = sum(max(0, r.usage.context - 50_000) for r in reqs) * READ_RATE
+    # a fresh run carries the smallest resumed context, 48k; each run of 3 turns
+    # carries in what it started with above that
+    expected = sum(max(0, r.usage.context - 48_000) for r in reqs) * READ_RATE
     assert f.saving_usd_per_week == pytest.approx(expected)
     assert f.metrics["resumes"] == 24 and f.metrics["interval_minutes"] == pytest.approx(30)
     assert "fresh" in f.advice and "/clear" in f.advice
@@ -219,3 +228,41 @@ def test_a_heartbeat_past_the_line_is_counted_once_as_a_heartbeat() -> None:
     expected = sum(max(0, r.usage.context - 60_000) for r in reqs) * READ_RATE
     assert f.saving_usd_per_week == pytest.approx(expected)
     assert "long_running_agents" not in kinds(found)
+
+
+def test_a_heartbeat_run_is_charged_only_for_the_history_it_starts_with() -> None:
+    # each run starts 4k bigger than the last and grows 5k, then 10k, within itself:
+    # a fresh run would grow the same way
+    reqs: list[Request] = []
+    starts = []
+    for i in range(25):
+        start = 40_000 + 4_000 * (i + 1)
+        starts.append(start)
+        for j in range(3):
+            reqs += run(1, start=i * 30 + j, session="s3", cache_read=start + 5_000 * j)
+    idx = _with_spans(index(reqs), {"s3": timedelta(days=12)})
+    f = only(_checks(idx), "heartbeat_growing_session")
+    fresh = 48_000
+    assert f.saving_usd_per_week == pytest.approx(
+        sum(3 * max(0, s - fresh) for s in starts) * READ_RATE
+    )
+
+
+def test_a_slow_cadence_is_not_a_heartbeat_whatever_the_window() -> None:
+    _, idx = _heartbeat(every=360)  # 25 runs, 4 a day over six days
+    assert "heartbeat_growing_session" not in kinds(_checks(idx))
+
+
+def test_a_pause_through_which_a_subagent_worked_is_not_a_resume() -> None:
+    reqs, _ = _heartbeat()
+    # in every gap a subagent of the session works until just before the next run
+    reqs += [
+        r
+        for i in range(25)
+        for r in run(1, start=i * 30 + 27, session="s3", agent=f"b{i}", cache_read=1_000)
+    ]
+    idx = _with_spans(
+        index(reqs, agents=[agent(f"b{i}", "coder", "s3") for i in range(25)]),
+        {"s3": timedelta(days=12)},
+    )
+    assert "heartbeat_growing_session" not in kinds(_checks(idx))

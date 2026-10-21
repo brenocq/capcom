@@ -11,7 +11,7 @@ from capcom.checks import rollup
 from capcom.checks.cli import run_checks_view
 from capcom.config import Config
 from capcom.types import Finding
-from tests.checks.helpers import index, run
+from tests.checks.helpers import began, index, run
 from tests.cost.fakes import at
 
 
@@ -56,7 +56,7 @@ def test_the_view_prints_the_rollup_first_and_counts_small_findings(tmp_path: Pa
     )
     out = io.StringIO()
     config = Config(tmp_path / "claude", tmp_path / "openclaw", tmp_path / "cache")
-    run_checks_view(config, 7, 10, index=index(reqs), out=out, now=at(60 * 24))
+    run_checks_view(config, 7, 10, index=began(index(reqs)), out=out, now=at(60 * 24))
     text = out.getvalue()
     head = text.index("By kind")
     assert (
@@ -75,7 +75,9 @@ def test_a_judgement_call_is_listed_but_kept_out_of_the_total(tmp_path: Path) ->
     reqs = run(100, cache_read=200_000) + subs
     out = io.StringIO()
     config = Config(tmp_path / "claude", tmp_path / "openclaw", tmp_path / "cache")
-    run_checks_view(config, 7, 10, index=index(reqs, agents=agents), out=out, now=at(60 * 24))
+    run_checks_view(
+        config, 7, 10, index=began(index(reqs, agents=agents)), out=out, now=at(60 * 24)
+    )
     text = out.getvalue()
     assert "The coder agent runs on Opus" in text
     assert "+ a judgement call: not added to the total" in text
@@ -91,5 +93,30 @@ def test_the_website_total_leaves_judgement_calls_out_and_names_them() -> None:
     assert counted_findings([mix, long], {"-p-a"}) == [False, True]
     total = savings_total([mix, long], {"-p-a"})
     assert total is not None and total["usd_per_week"] == pytest.approx(10.0)
-    assert total["judgement_calls"] == {"usd_per_week": 50.0, "findings": 1}
+    assert total["judgement_calls"]["usd_per_week"] == 50.0
+    assert total["judgement_calls"]["items"] == [
+        {"kind": "model_mix", "scope": "coder", "usd_per_week": 50.0}
+    ]
+    # "of" leaves the judgement call out: every counted finding is all of them
+    assert total["of"] == 1 and total["all"] is True
     assert "judgement calls on quality (1" in total["text"] and "$50.00/week more" in total["text"]
+
+
+def test_the_website_total_applies_the_listing_floor() -> None:
+    from capcom.report.tally import counted_findings, savings_total
+
+    tiny = _f("model_switches", "-p-b", 0.05)
+    long = _f("long_running_agents", "-p-a", 10.0)
+    assert counted_findings([long, tiny], {"-p-a", "-p-b"}) == [True, False]
+    total = savings_total([long, tiny], {"-p-a", "-p-b"})
+    assert total is not None and total["of"] == 1 and total["all"] is True
+
+
+def test_judgement_calls_come_last_in_the_rollup_and_say_so() -> None:
+    from capcom.checks.cli import format_rollup
+
+    mix = Finding("model_mix", "T", "coder", "", 50.0, "", metrics={"judgement_call": True})
+    text = format_rollup([mix, _f("long_running_agents", "-p-a", 10.0)])
+    lines = [line for line in text.splitlines() if line.startswith("  ") and "up to" in line]
+    assert lines[0].startswith("  Long-running agents")
+    assert lines[-1].endswith("(judgement call, not in the total)")

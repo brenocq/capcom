@@ -22,6 +22,7 @@ from tests.checks.helpers import (
     UNTIL,
     SortedIndex,
     agent,
+    began,
     ev,
     index,
     kinds,
@@ -64,7 +65,7 @@ LONG_SAVING = 100 * 200_000 * READ_RATE - 100_000 * WRITE_RATE - 99 * 100_000 * 
 def test_a_long_thread_saves_what_a_handed_off_agent_would_not_read() -> None:
     # 200k on every turn: a fresh agent restarts at 100k (its files and state back),
     # the handoff writes that once, the next turns read it
-    f = only(_checks(index(run(100, cache_read=200_000))), "long_running_agents")
+    f = only(_checks(began(index(run(100, cache_read=200_000)))), "long_running_agents")
     assert f.saving_usd_per_week == pytest.approx(LONG_SAVING)
     assert f.metrics["turns"] == 100 and f.metrics["handoffs"] == 1
     assert "restarts at about 100.0k tokens" in f.summary
@@ -73,7 +74,15 @@ def test_a_long_thread_saves_what_a_handed_off_agent_would_not_read() -> None:
 
 
 def test_a_short_stay_past_the_line_does_not_pay_for_the_restart() -> None:
-    assert "long_running_agents" not in kinds(_checks(index(run(10, cache_read=200_000))))
+    idx = began(index(run(10, cache_read=200_000)))
+    assert "long_running_agents" not in kinds(_checks(idx))
+
+
+def test_a_thread_older_than_the_window_is_taken_halfway_through_a_cycle() -> None:
+    # no handoff to pay at the window's start: its agent reads 125k, not 200k
+    f = only(_checks(index(run(10, cache_read=200_000))), "long_running_agents")
+    assert f.saving_usd_per_week == pytest.approx(10 * 75_000 * READ_RATE)
+    assert f.metrics["handoffs"] == 0
 
 
 def test_a_growing_thread_restarts_at_100k_and_grows_the_same_way() -> None:
@@ -384,7 +393,7 @@ def test_findings_are_ranked_by_weekly_saving() -> None:
 def test_logs_that_begin_inside_the_window_set_its_pace() -> None:
     reqs = run(100, start=60 * 24 * 5.5, cache_read=200_000)  # logs begin 1.5 days before the end
     f = only(
-        run_checks(SortedIndex(reqs=reqs), TABLE, SINCE, UNTIL, agent_dirs=[]),
+        run_checks(began(SortedIndex(reqs=reqs)), TABLE, SINCE, UNTIL, agent_dirs=[]),
         "long_running_agents",
     )
     span = UNTIL - reqs[0].timestamp
@@ -467,3 +476,25 @@ def test_the_view_says_so_when_the_index_is_empty(tmp_path: Path) -> None:
     out = io.StringIO()
     assert run_checks_view(config, days=0, limit=5, index=index([]), out=out, now=at(60)) == 0
     assert "no findings" in out.getvalue() or "no requests" in out.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("first", "began_in_window", "restart"),
+    [
+        (140_000, True, 100_000),  # its own start, capped at 100k
+        (60_000, True, 60_000),  # its own start
+        (60_000, False, 100_000),  # a mid-life context of an older session
+    ],
+)
+def test_the_restart_point_does_not_depend_on_the_window(
+    first: int, began_in_window: bool, restart: int
+) -> None:
+    from capcom.types import SessionInfo
+
+    contexts = [first] + [first + 1_000 * i for i in range(1, 300)]
+    reqs = [r for i, c in enumerate(contexts) for r in run(1, start=1 + i, cache_read=c)]
+    idx = index(reqs)
+    began = SINCE + timedelta(seconds=1) if began_in_window else SINCE - timedelta(days=20)
+    idx.infos = [SessionInfo("s1", reqs[0].project_dir, first_seen=began, last_seen=UNTIL)]
+    f = only(_checks(idx), "long_running_agents")
+    assert f.saving_usd_per_week == pytest.approx(_simulated(contexts, restart))

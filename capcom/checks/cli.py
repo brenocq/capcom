@@ -11,11 +11,11 @@ from typing import TextIO
 from capcom.config import Config
 from capcom.cost.prices import load_prices
 from capcom.cost.top import window_start
+from capcom.report.tally import MIN_LISTED_USD_PER_WEEK  # the website's floor too
 from capcom.timeline.groups import TEMPORARY_LABEL, ProjectNames
 from capcom.types import Finding, Index
 
 WIDTH = 88
-MIN_LISTED_USD_PER_WEEK = 0.10  # smaller findings are counted in a line, not listed
 ROLLUP_SCOPES = 4  # scopes named on a roll-up line
 
 
@@ -212,8 +212,10 @@ def format_rollup(
 
     known = dirs if dirs is not None else set(names.paths) if names is not None else set()
     lines = ["By kind, across scopes (kinds may overlap; see the total at the end):"]
-    for r in rollup(findings):
-        lines.append(f"  {r.headline}")
+    judged = {f.kind for f in findings if f.metrics.get("judgement_call")}
+    for r in sorted(rollup(findings), key=lambda r: r.kind in judged):  # judgement calls last
+        note = " (judgement call, not in the total)" if r.kind in judged else ""
+        lines.append(f"  {r.headline}{note}")
         if len(r.scopes) > 1:
             parts = [
                 f"{_scope_label(s.scope, names, known)} {s.share:.0%}"

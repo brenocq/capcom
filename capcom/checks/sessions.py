@@ -107,14 +107,16 @@ def fresh_context(facts: Facts, project: str | None = None, default: int | None 
 def heartbeat_growing_session(facts: Facts) -> list[Finding]:
     """A main thread resumed on a regular cadence (a heartbeat, a scheduled job)
     whose context keeps growing: each run rereads the history of all the runs
-    before it. Saving, over the thread's requests in the window:
+    before it. Saving, over the thread's runs in the window (a run starts at a
+    resume, or at its first request in the window):
 
-        band_usd(fresh run, no upper end)
+        sum over runs of (context at the run's start - fresh)+ x its requests' read prices
 
-    every reread above what a fresh run carries: the smaller of the smallest
-    context at a resume and the project's fresh-session context (fresh_context;
-    the window may start when the session is already big), rounded up to a bucket.
-    A fresh run needs no handoff. These sessions are left out of
+    the history each run carried in: a fresh run would grow within the run too, so
+    only its starting excess counts. `fresh` is the smaller of the smallest context
+    at a resume and the project's fresh-session context (fresh_context; the window
+    may start when the session is already big). A fresh run needs no handoff.
+    These sessions are left out of
     `long_running_agents` and `late_compactions`, so their dollars count once."""
     per_project: dict[str, list[tuple[Thread, timedelta, int, int, float]]] = defaultdict(list)
     for t in _main_threads(facts):
@@ -123,7 +125,7 @@ def heartbeat_growing_session(facts: Facts) -> list[Finding]:
             continue
         group = _group(t.project)
         fresh = min(beat[1], fresh_context(facts, group, default=beat[1]))
-        usd = band_usd(t, _ceil_bucket(fresh), None)
+        usd = sum(max(0.0, start - fresh) * rates for start, rates in t.runs)
         per_project[group].append((t, beat[0], fresh, beat[2], usd))
     out: list[Finding] = []
     for project, found in per_project.items():
@@ -178,12 +180,14 @@ def session_never_ended(facts: Facts) -> list[Finding]:
     ones (each one ran when the context reached the top of the model's window).
     Heartbeat sessions are left to `heartbeat_growing_session`. Saving, per session:
 
-        band_usd(fresh_context, LONG_CONTEXT) - active days x HANDOFF_TOKENS x write price
+        band_usd(fresh, LONG_CONTEXT) - active days x fresh x write price
 
-    floored at zero: the rereads above what a fresh session typically carries (the
-    part past LONG_CONTEXT is in `long_running_agents`), less a fresh start
-    with a handoff note on each day it was used."""
-    typical = fresh_context(facts)
+    floored at zero: the rereads above what a fresh session of its project
+    typically carries (fresh_context of the project, else of all projects; the part
+    past LONG_CONTEXT is in `long_running_agents`, which this overlaps), less a
+    fresh start each day it was used, writing that context once."""
+    overall = fresh_context(facts)
+    typicals: dict[str, int] = {}
     per_project: dict[str, list[tuple[Thread, int, int, float]]] = defaultdict(list)
     for t in _main_threads(facts):
         if _span(facts, t) <= NEVER_ENDED_SPAN or heartbeat(t) is not None:
@@ -192,8 +196,10 @@ def session_never_ended(facts: Facts) -> list[Finding]:
         auto = sum(1 for c in found_comps if c.trigger == "auto")
         if len(found_comps) < NEVER_ENDED_COMPACTIONS and auto < NEVER_ENDED_AUTO:
             continue
-        usd = _net(band_usd(t, typical), len(t.days) * t.handoff_usd)
-        per_project[_group(t.project)].append((t, len(found_comps), auto, usd))
+        group = _group(t.project)
+        typical = typicals.setdefault(group, fresh_context(facts, group, default=overall))
+        usd = _net(band_usd(t, typical), len(t.days) * typical * t.write_rate)
+        per_project[group].append((t, len(found_comps), auto, usd))
     out: list[Finding] = []
     for project, found in per_project.items():
         found.sort(key=lambda x: -x[3])
@@ -210,8 +216,8 @@ def session_never_ended(facts: Facts) -> list[Finding]:
                 f"{len(found)} session(s) stayed open for up to {longest.days} days, with "
                 f"{comps} compaction(s) in this window; each turn rereads a context a "
                 f"fresh session would not carry (a fresh one here typically holds about "
-                f"{_k(typical)} tokens). The saving counts the rereads between that and "
-                f"{_k(LONG_CONTEXT)}, net of a handoff on each day of use."
+                f"{_k(typicals[project])} tokens). The saving counts the rereads between that and "
+                f"{_k(LONG_CONTEXT)}, net of a fresh start on each day of use."
             ),
             advice=(
                 "End the session with a handoff note (what is done, what is next, the "
@@ -231,7 +237,7 @@ def session_never_ended(facts: Facts) -> list[Finding]:
                 "sessions": len(found),
                 "longest_days": longest.days,
                 "compactions": comps,
-                "fresh_context": typical,
+                "fresh_context": typicals[project],
             },
         )
         if f:

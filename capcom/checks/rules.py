@@ -1021,9 +1021,10 @@ def long_running_agents(facts: Facts) -> list[Finding]:
 
     floored at zero. The simulated agent follows the thread's own requests: it
     grows by the same per-request increments, and each time it passes
-    LONG_CONTEXT a fresh agent takes over at max(the thread's first context,
-    RESTART_CONTEXT): conservative, since an agent that continues the work needs its
-    files and state back. Its first request writes that context to the cache
+    LONG_CONTEXT a fresh agent takes over at the thread's first context when its
+    session began in the window, at most RESTART_CONTEXT (an agent that continues
+    the work needs its files and state back), else at RESTART_CONTEXT. Its first
+    request writes that context to the cache
     (5-minute lifetime for a subagent, the thread's own otherwise) instead of
     reading it. Prices are
     the read price of each request (a rewrite's premium is left to the rewrite

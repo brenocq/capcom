@@ -142,7 +142,10 @@ class Thread:
     hist: dict[int, list[float]] = field(default_factory=dict)
     resumes: list[tuple[datetime, int]] = field(default_factory=list)  # (time, context)
     days: set[str] = field(default_factory=set)  # main threads: local days with requests
-    handoff_usd: float = 0.0  # HANDOFF_TOKENS at the thread's latest write price
+    write_rate: float = 0.0  # main threads: USD per token written, at the latest price
+    # main threads: each run (from the first request or a resume): [context at its
+    # start, sum of its requests' read rates]
+    runs: list[list[float]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -239,6 +242,7 @@ class Facts:
     type_calls: dict[tuple[str, str], set[str]] = field(default_factory=dict)
     model_mix: dict[tuple[str, str], ModelMix] = field(default_factory=dict)
     session_span: dict[str, timedelta] = field(default_factory=dict)  # first to last seen
+    session_first: dict[str, datetime] = field(default_factory=dict)  # first seen
 
     @property
     def weeks(self) -> float:
@@ -617,9 +621,34 @@ class _Pass:
         b[1] += rate
         b[2] += ctx * rate
         t.days.add(r.timestamp.astimezone().date().isoformat())
-        t.handoff_usd = HANDOFF_TOKENS * self.write_rate(r, t.write_1h)
-        if t.last is not None and r.timestamp - t.last >= RESUME_GAP:
+        t.write_rate = self.write_rate(r, t.write_1h)
+        if t.last is None:
+            t.runs.append([ctx, 0.0])
+        elif self.resumed_by_user(t, r):
             t.resumes.append((r.timestamp, ctx))
+            t.runs.append([ctx, 0.0])
+        if t.runs:
+            t.runs[-1][1] += rate
+
+    def resumed_by_user(self, t: Thread, r: Request) -> bool:
+        """Whether main-thread request `r` starts a new run: a pause of RESUME_GAP or
+        more through which nothing ran, as explain names an idle gap (no tool call
+        of its own nor subagent of its session working past RESUME_GAP)."""
+        assert t.last is not None
+        gap = r.timestamp - t.last
+        if gap < RESUME_GAP:
+            return False
+        waits: list[tuple[timedelta, timedelta]] = []
+        if t.result_at is not None and t.result_call is not None:
+            waits.append((t.result_at - t.last, r.timestamp - t.result_at))
+        bg = self.sub_last.get(r.session_id)
+        if bg is not None and bg > t.last:
+            waits.append((bg - t.last, r.timestamp - bg))
+        ran, after = max(waits, default=(None, None), key=lambda w: w[0] or timedelta(0))
+        return (
+            expiry_kind(gap, RESUME_GAP - timedelta(microseconds=1), ran, after, False, False)
+            == IDLE_EXPIRY
+        )
 
     def model_mix(self, r: Request, cost: float, project: str) -> None:
         if r.agent_id is None:
@@ -651,10 +680,17 @@ class _Pass:
         price `rate`), the formulas of long_running_agents and late_compactions."""
         f = self.f
         if t.start is None:
-            # conservative: a fresh agent that continues the work needs its files and
-            # state back, so it restarts at RESTART_CONTEXT at least
-            first = ctx if ctx <= LONG_CONTEXT else 0
-            t.start = max(first, RESTART_CONTEXT)
+            # the thread's own first context when its session began in the window
+            # (else this is a mid-life context), at most RESTART_CONTEXT: a fresh
+            # agent that continues the work needs its files and state back
+            began = f.session_first.get(t.session_id)
+            known = began is not None and began >= f.since
+            t.start = min(ctx, RESTART_CONTEXT) if known else RESTART_CONTEXT
+            if not known:
+                # a thread older than the window: its simulated agent handed off
+                # before the window (not charged here), and is taken halfway through
+                # a cycle, so that where the window starts does not reset it
+                t.sim = float(min(ctx, (RESTART_CONTEXT + LONG_CONTEXT) // 2))
         step = ctx - t.prev_ctx if t.prev_ctx is not None else 0
         t.prev_ctx = ctx
         tk = (t.session_id, t.agent_id)
@@ -819,6 +855,9 @@ class _Pass:
         first = next(iter(self.index.requests()), None)
         f.logs_start = first.timestamp if first else None
         f.agents = {a.agent_id: a for a in self.index.agents()}
+        for s in self.index.sessions():
+            if s.first_seen is not None:
+                f.session_first[s.session_id] = s.first_seen
         for a in f.agents.values():
             if a.tool_use_id and a.agent_type:
                 f.spawn_types.setdefault(a.tool_use_id, a.agent_type)
@@ -871,7 +910,10 @@ def _tagged(
         yield rec.timestamp, order, seq, rec
 
 
-HEARTBEAT_RESUMES = 20  # resumes (pauses of RESUME_GAP or more) in the window
+# resumes (idle pauses of RESUME_GAP or more) per day over the thread's active span,
+# a rate so that detection does not depend on the window's length
+HEARTBEAT_PER_DAY = 6
+HEARTBEAT_MIN_RESUMES = 10  # and this many, to judge the cadence
 HEARTBEAT_STEADY = 0.7  # this share of the intervals between resumes ...
 HEARTBEAT_TOLERANCE = 0.25  # ... within this much of their median
 HEARTBEAT_GROWTH = 1.5  # the median resumed context over the smallest one ...
@@ -880,12 +922,16 @@ HEARTBEAT_GROWTH_TOKENS = 20_000  # ... and at least this much more
 
 def heartbeat(t: Thread) -> tuple[timedelta, int, int] | None:
     """(the interval, the smallest context at a resume, the median one) when main
-    thread `t` was resumed on a steady cadence (HEARTBEAT_RESUMES or more, most of
-    the intervals within HEARTBEAT_TOLERANCE of their median) and its runs carry
+    thread `t` was resumed on a steady cadence (HEARTBEAT_PER_DAY or more over its
+    active span in the window, HEARTBEAT_MIN_RESUMES at least, most of the
+    intervals within HEARTBEAT_TOLERANCE of their median) and its runs carry
     the history of the earlier ones: the median resumed context is HEARTBEAT_GROWTH
     times the smallest (what a fresh run carries) or more. Compactions may cut it
     back on the way: the median, not the last runs, is what the runs carried."""
-    if len(t.resumes) < HEARTBEAT_RESUMES:
+    if len(t.resumes) < HEARTBEAT_MIN_RESUMES or t.first is None or t.last is None:
+        return None
+    days = max((t.last - t.first) / timedelta(days=1), 1 / 24)
+    if len(t.resumes) / days < HEARTBEAT_PER_DAY:
         return None
     times = [when for when, _ in t.resumes]
     gaps = [(b - a).total_seconds() for a, b in pairwise(times)]
