@@ -549,6 +549,7 @@ class Explanation:
     title: str  # short generated headline, e.g. "Cache rebuilt after 74 minutes idle"
     evidence: tuple[Evidence, ...] = ()
     advice: str = ""
+    summary: str = ""  # one or two generated sentences for the page's body (no log text)
 
 
 # --------------------------------------------------------------------------- checks
