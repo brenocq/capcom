@@ -1,10 +1,16 @@
 """`capcom serve`: the local website.
 
-Standard library only. The server binds to 127.0.0.1, answers GET only, sends no
-CORS headers, and refuses requests whose Host header is not this machine (so a web
-page cannot reach it through DNS rebinding). Each API request opens the index
-read-only and closes it when done. Pages are static files from `static/`; the API
-is in `api.py` and documented in `API.md`.
+Standard library only. The server binds to 127.0.0.1, sends no CORS headers, and
+refuses requests whose Host header is not this machine (so a web page cannot reach it
+through DNS rebinding). Each API request opens the index read-only and closes it when
+done. Pages are static files from `static/`; the API is in `api.py` and `didit.py`,
+documented in `API.md`.
+
+Everything is GET but one write: `POST /api/changes`, which marks a finding as applied
+(or edits or unmarks a mark) in capcom.changes' own file. It needs the per-launch
+token the pages carry in a meta tag, an Origin (or Referer) of this server, a JSON
+body of at most 4 KB, and a body that passes `didit.write`'s schema; `--read-only`
+turns it off (405).
 
 API replies are cached per index generation (`ApiCache`): the key holds the index
 files' sizes and modification times and the index's `PRAGMA data_version` on a held
@@ -22,10 +28,12 @@ never overlap.
 from __future__ import annotations
 
 import contextlib
+import hmac
 import importlib
 import io
 import json
 import os
+import secrets
 import sqlite3
 import sys
 import threading
@@ -45,15 +53,18 @@ from capcom.config import Config
 from capcom.cost.prices import load_prices
 from capcom.limits.cli import adopt_samples
 from capcom.limits.model import samples_path
-from capcom.report import api
+from capcom.report import api, didit
 from capcom.report.analysis import Analysis, Unavailable, default_analysis
 from capcom.store.index import open_index
 from capcom.types import PriceTable
 
 HOST = "127.0.0.1"
 STATIC = Path(__file__).parent / "static"
-PAGES = {"", "spend", "sessions", "session", "day", "spikes", "checks", "limits"}
+PAGES = {"", "spend", "sessions", "session", "day", "spikes", "checks", "changes", "limits"}
 WITH_ARG = {"session", "day"}  # pages and endpoints that take one path segment
+MAY_ARG = {"changes"}  # pages and endpoints with or without one
+MAX_BODY = 4096  # bytes: the one POST's JSON body
+TOKEN_HEADER = "X-Capcom-Token"
 TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -204,6 +215,17 @@ def generation(index_path: Path, watch: DataVersion | None = None) -> tuple[int,
     return tuple(out)
 
 
+def _changes_stamp(site: Site) -> tuple[int, int]:
+    """Size and modification time of the marks (changes.jsonl): a mark changes Checks
+    and Did it work? without a scan."""
+    try:
+        path = site.changes_path or Path(site.analysis.changes().store_path())
+        st = os.stat(path)
+    except (OSError, Unavailable):
+        return (-1, -1)
+    return (st.st_size, st.st_mtime_ns)
+
+
 def _limits_stamp(state_dir: Path | None) -> tuple[int, int]:
     """Size and modification time of the usage samples."""
     if state_dir is None:
@@ -225,6 +247,7 @@ PARAMS: dict[str, tuple[str, ...]] = {
     "spikes": ("days", "spike", "project", "cause"),
     "checks": ("days",),
     "limits": ("days",),
+    "changes": ("days",),
 }
 
 
@@ -242,6 +265,10 @@ class Site:
     state_dir: Path | None = None  # where the usage samples are; None: no samples
     scanner: Scanner | None = None
     cache: ApiCache | None = field(default_factory=ApiCache)  # None: no caching
+    changes_path: Path | None = None  # the marks; None: capcom.changes' own file
+    read_only: bool = False  # True: no POST /api/changes, no buttons that write
+    token: str = field(default_factory=lambda: secrets.token_urlsafe(32))  # per launch
+    write_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 class Scanner:
@@ -404,11 +431,116 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _not_allowed
+    do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _not_allowed
+
+    def _same_origin(self) -> bool:
+        """The request comes from a page of this server: its Origin, or its Referer
+        when a browser sends no Origin, is http://127.0.0.1:<port> or localhost."""
+        port = getattr(self.server, "server_port", 0)
+        own = {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
+        origin = self.headers.get("Origin")
+        if origin is not None:
+            return origin.lower() in own
+        referer = self.headers.get("Referer")
+        if not referer:
+            return False
+        parts = urlsplit(referer)
+        return f"{parts.scheme}://{parts.netloc}".lower() in own
+
+    def do_POST(self) -> None:
+        try:
+            self._post()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception:
+            print("capcom serve: error while answering a request:", file=sys.stderr)
+            traceback.print_exc()
+            with contextlib.suppress(OSError):
+                self._send(HTTPStatus.INTERNAL_SERVER_ERROR, b"internal error", "text/plain")
+
+    def _post(self) -> None:
+        """The one write: POST /api/changes (see the module's docstring)."""
+        if not self._host_ok():
+            self._send(HTTPStatus.FORBIDDEN, b"forbidden host", "text/plain")
+            return
+        if unquote(urlsplit(self.path).path).rstrip("/") != "/api/changes":
+            self._not_allowed()
+            return
+        site = self.site
+        if site.read_only:
+            self._not_allowed()
+            return
+        if not self._same_origin():
+            self._error(HTTPStatus.FORBIDDEN, "cross_origin", "Only capcom's own pages can write.")
+            return
+        token = self.headers.get(TOKEN_HEADER) or ""
+        if not hmac.compare_digest(token.encode(), site.token.encode()):
+            self._error(HTTPStatus.FORBIDDEN, "bad_token", "Reload the page and try again.")
+            return
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            self._error(
+                HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "bad_type", "The body must be application/json."
+            )
+            return
+        raw_length = self.headers.get("Content-Length")
+        if self.headers.get("Transfer-Encoding") or raw_length is None:
+            self._error(HTTPStatus.LENGTH_REQUIRED, "no_length", "Content-Length is required.")
+            return
+        try:
+            length = int(raw_length)
+        except ValueError:
+            length = -1
+        if length < 0 or length > MAX_BODY:
+            self._error(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "too_large", f"At most {MAX_BODY} bytes."
+            )
+            return
+        try:
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            self._error(HTTPStatus.BAD_REQUEST, "bad_json", "The body is not JSON.")
+            return
+        try:
+            index = _open(site)
+        except IndexMissing as err:
+            self._error(HTTPStatus.SERVICE_UNAVAILABLE, "no_index", str(err))
+            return
+        try:
+            with site.write_lock:
+                payload = didit.write(self._context(index, site.clock()), body)
+            self._json(HTTPStatus.OK, payload)
+        except api.ApiError as err:
+            self._error(err.status, err.code, err.message)
+        except Unavailable:
+            self._error(HTTPStatus.NOT_IMPLEMENTED, "unavailable", "capcom.changes is missing.")
+        except ValueError as err:  # capcom.changes refused it
+            self._error(HTTPStatus.BAD_REQUEST, "bad_request", str(err))
+        except sqlite3.Error:
+            self._error(
+                HTTPStatus.SERVICE_UNAVAILABLE, "index_busy", "The index could not be read."
+            )
+        finally:
+            index.close()
+
+    def _context(self, index: Any, now: datetime) -> api.Context:
+        site = self.site
+        return api.Context(
+            index=index,
+            table=site.table,
+            analysis=site.analysis,
+            now=now,
+            tz=site.tz,
+            index_path=site.index_path,
+            openclaw_root=site.openclaw_root,
+            state_dir=site.state_dir,
+            scanning=site.scanner is not None and site.scanner.first_scan,
+            changes_path=site.changes_path,
+        )
 
     def _page(self, path: str) -> None:
         parts = path.strip("/").split("/")
-        if parts[0] not in PAGES or len(parts) > (2 if parts[0] in WITH_ARG else 1):
+        if parts[0] not in PAGES or len(parts) > (2 if parts[0] in WITH_ARG | MAY_ARG else 1):
             self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
             return
         try:
@@ -418,7 +550,16 @@ class Handler(BaseHTTPRequestHandler):
             page = NO_INDEX_PAGE.format(reason=err, action=SCANNING if scanning else RUN_SCAN)
             self._send(HTTPStatus.SERVICE_UNAVAILABLE, page.encode(), TYPES[".html"])
             return
-        self._static("index.html")
+        self._send(HTTPStatus.OK, self._index_html(), TYPES[".html"])
+
+    def _index_html(self) -> bytes:
+        """index.html with this launch's write token (and read-only flag) in meta tags:
+        another site's page cannot read it, so it cannot write."""
+        html = (STATIC / "index.html").read_text(encoding="utf-8")
+        metas = f'<meta name="capcom-token" content="{self.site.token}">\n'
+        if self.site.read_only:
+            metas += '<meta name="capcom-read-only" content="1">\n'
+        return html.replace("</head>", metas + "</head>", 1).encode()
 
     def _static(self, name: str) -> None:
         root = STATIC.resolve()
@@ -437,7 +578,10 @@ class Handler(BaseHTTPRequestHandler):
     def _api(self, route: str, query: dict[str, str]) -> None:
         parts = route.strip("/").split("/")
         name = parts[0]
-        if name not in ENDPOINTS or len(parts) != (2 if name in WITH_ARG else 1):
+        if name in MAY_ARG and len(parts) == 2 and not parts[1]:
+            parts = parts[:1]
+        sizes = {1, 2} if name in MAY_ARG else {2} if name in WITH_ARG else {1}
+        if name not in ENDPOINTS or len(parts) not in sizes:
             self._error(HTTPStatus.NOT_FOUND, "not_found", "no such endpoint")
             return
         site = self.site
@@ -446,6 +590,7 @@ class Handler(BaseHTTPRequestHandler):
         if site.cache is not None and name not in UNCACHED:
             gen = generation(site.index_path, site.cache.watch(site.index_path))
             gen += _limits_stamp(site.state_dir)  # the recorder writes without a scan
+            gen += _changes_stamp(site)  # so does a mark
             today = now.astimezone(site.tz).date().isoformat()  # the windows start at midnight
             args = tuple((k, query[k]) for k in PARAMS.get(name, ()) if k in query)
             key = (gen, today, name, tuple(parts[1:]), args)
@@ -463,17 +608,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         try:
-            ctx = api.Context(
-                index=index,
-                table=self.site.table,
-                analysis=self.site.analysis,
-                now=now,
-                tz=self.site.tz,
-                index_path=self.site.index_path,
-                openclaw_root=self.site.openclaw_root,
-                state_dir=self.site.state_dir,
-                scanning=self.site.scanner is not None and self.site.scanner.first_scan,
-            )
+            ctx = self._context(index, now)
             payload = ENDPOINTS[name](ctx, parts[1] if len(parts) == 2 else "", query)
             body = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode()
             if key is not None and site.cache is not None and not ctx.scanning:
@@ -509,6 +644,7 @@ ENDPOINTS: dict[str, Endpoint] = {
     "spikes": lambda c, _, q: api.spikes(c, q),
     "checks": lambda c, _, q: api.checks(c, q),
     "limits": lambda c, _, q: api.limits(c, q),
+    "changes": lambda c, arg, q: didit.route(c, arg, q),
 }
 
 
@@ -526,7 +662,9 @@ def make_server(site: Site, port: int) -> ThreadingHTTPServer:
     return _Server((HOST, port), handler)
 
 
-def run_serve(config: Config, port: int, open_browser: bool, scan: bool = True) -> int:
+def run_serve(
+    config: Config, port: int, open_browser: bool, scan: bool = True, read_only: bool = False
+) -> int:
     adopt_samples(config)
     scanner = None
     if scan:
@@ -538,6 +676,7 @@ def run_serve(config: Config, port: int, open_browser: bool, scan: bool = True) 
         openclaw_root=config.openclaw_root,
         state_dir=config.state_dir,
         scanner=scanner,
+        read_only=read_only,
     )
     try:
         server = make_server(site, port)
@@ -546,6 +685,7 @@ def run_serve(config: Config, port: int, open_browser: bool, scan: bool = True) 
         return 1
     url = f"http://{HOST}:{server.server_address[1]}/"
     fresh = "rescanning every minute" if scanner else "no background scan"
+    fresh += ", read-only" if read_only else ""
     print(f"capcom: serving {url} (local only, {fresh}; Ctrl+C to stop)", flush=True)
     if scanner is not None:
         scanner.start()
