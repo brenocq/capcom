@@ -8,6 +8,7 @@ import { renderSession } from './session.js';
 import { renderSessions } from './sessions.js';
 import { renderSpikes } from './spikes.js';
 import { renderChecks } from './checks.js';
+import { renderLimits } from './limits.js';
 
 const ICON = {
   overview: 'M3 12h4l3-8 4 16 3-8h4',
@@ -15,6 +16,7 @@ const ICON = {
   sessions: 'M4 6h16M4 12h10M4 18h13',
   spikes: 'M3 18l5-5 4 3 8-10',
   checks: 'M9 11l3 3 8-8M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9',
+  limits: 'M4 18l4-8 4 5 4-9v12M3 20h18',
 };
 const NAV = [
   ['overview', '/', 'Overview'],
@@ -22,6 +24,7 @@ const NAV = [
   ['sessions', '/sessions', 'Sessions'],
   ['spikes', '/spikes', 'Spikes'],
   ['checks', '/checks', 'Checks'],
+  ['limits', '/limits', 'Limits'],
 ];
 
 function icon(d, size = 16) {
@@ -135,6 +138,7 @@ const PAGES = {
   session: renderSession,
   spikes: renderSpikes,
   checks: renderChecks,
+  limits: renderLimits,
 };
 
 let renderToken = 0;

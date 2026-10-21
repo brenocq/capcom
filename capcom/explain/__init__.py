@@ -43,10 +43,13 @@ KEEP_CLEAR_USD = 0.50  # ... or be CLEAR and account for at least this many doll
 KEEP_CLEAR_SHARE = 0.03  # ... and at least this share of the spike's excess
 TINY_REST_USD = 0.05  # an uncovered rest under both of these is folded into a cause
 TINY_REST_SHARE = 0.02
+_LAST = {CauseKind.CONTEXT_GROWTH: 1, CauseKind.PARALLEL_SUBAGENTS: 2}
 _RANK = {Confidence.CLEAR: 0, Confidence.LIKELY: 1, Confidence.UNEXPLAINED: 2}
 _REWRITE_CAUSES = frozenset(
     {
         CauseKind.IDLE_REWRITE,
+        CauseKind.TOOL_WAIT_EXPIRY,
+        CauseKind.LATE_RESUME_EXPIRY,
         CauseKind.COMPACTION,
         CauseKind.MODEL_SWITCH,
         CauseKind.TOOL_SET_CHANGE,
@@ -80,8 +83,9 @@ def _explain_one(view: SpikeView) -> list[Explanation]:
     if not kept:
         return [_unexplained(view, found)]
     # event causes first (clear before likely, then by dollars); context growth, the
-    # cause without a single event, takes what they leave
-    kept.sort(key=lambda c: (c.cause is CauseKind.CONTEXT_GROWTH, _RANK[c.confidence], -c.excess))
+    # cause without a single event, takes what they leave, and the parallel subagents'
+    # own work what is left after that
+    kept.sort(key=lambda c: (_LAST.get(c.cause, 0), _RANK[c.confidence], -c.excess))
     shares: list[tuple[Candidate, float]] = []
     left = total
     for c in kept:
@@ -140,6 +144,7 @@ def _explain_one(view: SpikeView) -> list[Explanation]:
                 + (
                     " It includes the new subagents' own work, apart from their prefixes."
                     if any(e.cause is CauseKind.FAN_OUT for e in out)
+                    and not any(e.cause is CauseKind.PARALLEL_SUBAGENTS for e in out)
                     else ""
                 ),
             )
@@ -196,7 +201,8 @@ def _unexplained(view: SpikeView, found: list[Candidate]) -> Explanation:
         f"{fmt.count_word(n, True)} request{'s' if n != 1 else ''} spent "
         f"{fmt.usd(spike.excess_usd)} above the usual pace and no rule fits"
         + (
-            f"; the closest, {closest.cause.value}, accounts for {fmt.usd(closest.excess)}."
+            f"; the closest, {CAUSE_LABELS[closest.cause].lower()}, accounts for "
+            f"{fmt.usd(closest.excess)}."
             if closest
             else "."
         )

@@ -165,11 +165,12 @@ def test_a_long_tool_call_is_not_a_break() -> None:
     w.index.evs[-1] = replace(w.index.evs[-1], timestamp=at(11))
     r = w.req(11.05, agent="a1", cache_write_5m=200_000)
     e = run(w, spike([r], agent="a1"))[0]
-    assert e.cause is CauseKind.IDLE_REWRITE
-    assert e.title == "Cache expired while Bash (for) ran 10 min"
-    assert any("The Bash (for) call ran for 10 min" in ev.label for ev in e.evidence)
-    assert "background" in e.advice
-    assert "while Bash (for) ran" in e.summary
+    assert e.cause is CauseKind.TOOL_WAIT_EXPIRY
+    assert e.title == "Cache expired while Bash ran 10 min"
+    assert any("The Bash call ran for 10 min" in ev.label for ev in e.evidence)
+    assert "background" in e.advice and "idle" not in e.advice
+    assert "permission" not in e.advice  # a subagent: no prompt to approve
+    assert "its Bash call had run past the cache lifetime" in e.summary
     assert p.tool_calls
 
 

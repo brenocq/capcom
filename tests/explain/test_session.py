@@ -225,10 +225,14 @@ def test_parallel_verifiers_are_charged_their_prefixes_only() -> None:
     assert e.excess_usd < 0.25 * sum(cost(r) for r in [*firsts, *work])
     assert has(e, "0 of them made two tool calls or fewer")
     assert "in the parent" not in e.advice and "fewer of them at once" in e.advice
-    # the agents' own work goes to the other rules or to the unexplained rest, and every
-    # dollar of the excess is in one explanation
+    # the agents' own work goes to the other rules, then to the parallel work, and
+    # every dollar of the excess is in one explanation
     assert sum(x.excess_usd for x in out) == pytest.approx(s.excess_usd)
-    assert set(found) == {CauseKind.FAN_OUT, CauseKind.CONTEXT_GROWTH, CauseKind.UNEXPLAINED}
+    assert set(found) == {
+        CauseKind.FAN_OUT,
+        CauseKind.CONTEXT_GROWTH,
+        CauseKind.PARALLEL_SUBAGENTS,
+    }
 
 
 def test_spikes_view_totals_by_cause_add_up() -> None:
@@ -271,7 +275,11 @@ def test_small_fan_out_shows_beside_growth_and_the_rest() -> None:
     assert fan.excess_usd == pytest.approx(sum(prefix(r) for r in firsts))
     assert fan.excess_usd < 0.1 * s.excess_usd
     assert fan.confidence is Confidence.CLEAR
-    assert set(found) == {CauseKind.FAN_OUT, CauseKind.CONTEXT_GROWTH, CauseKind.UNEXPLAINED}
+    assert set(found) == {
+        CauseKind.FAN_OUT,
+        CauseKind.CONTEXT_GROWTH,
+        CauseKind.PARALLEL_SUBAGENTS,
+    }
     assert sum(e.excess_usd for e in out) == pytest.approx(s.excess_usd)
 
 

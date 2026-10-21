@@ -74,14 +74,19 @@ def test_idle_past_one_hour_ttl() -> None:
     assert "hour" in e.advice
 
 
-def test_idle_subagent_known_from_its_5m_writes() -> None:
+def test_finished_subagent_resumed_late_known_from_its_5m_writes() -> None:
     w = World()
     w.agent("a1", "scout", "tu_x")
     w.req(0, agent="a1", cache_write_5m=50_000)
     w.req(1, agent="a1", cache_read=50_000, cache_write_5m=1_000)
+    w.req(11.5, cache_read=10_000, tools=[("SendMessage", None)])  # the lead writes to it
     r2 = w.req(12, agent="a1", cache_write_5m=52_000)
     e = only(w, spike([r2], agent="a1"))
-    assert e.cause is CauseKind.IDLE_REWRITE
+    # no tool call pending: the subagent had finished and its lead resumed it late
+    assert e.cause is CauseKind.LATE_RESUME_EXPIRY
+    assert e.title == "Subagent resumed after the cache expired (11 min later)"
+    assert "fresh agent" in e.advice and "break" not in e.advice
+    assert has(e, "The scout subagent had ended its turn at")
     assert e.confidence is Confidence.CLEAR
     assert e.excess_usd == pytest.approx(51_000 * (6.25 - 0.5) / 1e6)
     assert has(e, "cache lifetime 5 minutes (the previous request wrote 5-minute entries)")
@@ -99,16 +104,27 @@ def test_idle_on_the_fallback_lifetime_is_likely() -> None:
     assert has(e, "cache lifetime 5 minutes (assumed: no cacheControl record)")
 
 
-def test_away_summary_before_a_rewrite() -> None:
+def test_an_away_summary_on_an_assumed_lifetime_is_likely_idle() -> None:
     w = World()
     w.req(0, cache_write_1h=100_000)
-    w.req(1, cache_read=100_000)
+    w.req(1, cache_read=100_000)  # wrote nothing: its lifetime is assumed
     away = w.event(EventKind.AWAY, 15)
     r2 = w.req(20, cache_write_1h=100_000)
     e = only(w, spike([r2]))
     assert e.cause is CauseKind.IDLE_REWRITE
     assert e.confidence is Confidence.LIKELY
     assert any(ev.event_key == away.key for ev in e.evidence)
+
+
+def test_an_away_summary_within_a_known_lifetime_is_not_an_expiry() -> None:
+    w = World()
+    p = w.req(0, cache_write_1h=100_000)
+    w.api(p, cache_ttl="1h")
+    w.event(EventKind.AWAY, 15)
+    r2 = w.req(20, cache_write_1h=100_000)  # 20 minutes into a 1-hour cache
+    w.api(r2, cache_ttl="1h")
+    e = only(w, spike([r2]))
+    assert e.cause is CauseKind.UNEXPLAINED
 
 
 def test_gap_within_the_lifetime_is_not_idle() -> None:
@@ -380,7 +396,8 @@ def test_context_growth() -> None:
     assert e.excess_usd == pytest.approx(1_050_000 * 0.5 / 1e6)
     assert e.title == "Context grew from 50k to 350k tokens"
     assert has(e, f"Crossed 150k at {clock(reqs[1].timestamp)}")
-    assert has(e, f"Crossed 200k at {clock(reqs[2].timestamp)}")
+    assert not any("200k" in ev.label for ev in e.evidence)  # one threshold family
+    assert "150k" in e.advice
     assert not has(e, "Crossed 400k")
     assert has(e, "No compaction in the window")
 

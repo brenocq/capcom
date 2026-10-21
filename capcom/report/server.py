@@ -50,7 +50,7 @@ from capcom.types import PriceTable
 
 HOST = "127.0.0.1"
 STATIC = Path(__file__).parent / "static"
-PAGES = {"", "spend", "sessions", "session", "spikes", "checks"}
+PAGES = {"", "spend", "sessions", "session", "spikes", "checks", "limits"}
 TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -201,6 +201,15 @@ def generation(index_path: Path, watch: DataVersion | None = None) -> tuple[int,
     return tuple(out)
 
 
+def _limits_stamp(index_path: Path) -> tuple[int, int]:
+    """Size and modification time of the usage samples next to the index."""
+    try:
+        st = os.stat(index_path.with_name("limits.jsonl"))
+    except OSError:
+        return (-1, -1)
+    return (st.st_size, st.st_mtime_ns)
+
+
 # the query parameters each endpoint reads: the cache key holds only these
 PARAMS: dict[str, tuple[str, ...]] = {
     "overview": (),
@@ -209,6 +218,7 @@ PARAMS: dict[str, tuple[str, ...]] = {
     "session": (),
     "spikes": ("days", "spike", "project"),
     "checks": ("days",),
+    "limits": ("days",),
 }
 
 
@@ -428,6 +438,7 @@ class Handler(BaseHTTPRequestHandler):
         now = site.clock()
         if site.cache is not None and name not in UNCACHED:
             gen = generation(site.index_path, site.cache.watch(site.index_path))
+            gen += _limits_stamp(site.index_path)  # the recorder writes without a scan
             today = now.astimezone(site.tz).date().isoformat()  # the windows start at midnight
             args = tuple((k, query[k]) for k in PARAMS.get(name, ()) if k in query)
             key = (gen, today, name, tuple(parts[1:]), args)
@@ -488,6 +499,7 @@ ENDPOINTS: dict[str, Endpoint] = {
     "live": lambda c, _, q: api.live(c),
     "spikes": lambda c, _, q: api.spikes(c, q),
     "checks": lambda c, _, q: api.checks(c, q),
+    "limits": lambda c, _, q: api.limits(c, q),
 }
 
 

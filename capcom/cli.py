@@ -56,6 +56,12 @@ def _checks(args: argparse.Namespace) -> int:
     return run_checks_view(load_config(), days=args.days, limit=args.limit)
 
 
+def _limits(args: argparse.Namespace) -> int:
+    from capcom.limits.cli import run_limits
+
+    return run_limits(load_config(), seed=args.seed, dry_run=args.dry_run, install=args.install)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="capcom", description=__doc__)
     parser.add_argument("--version", action="version", version=f"capcom {__version__}")
@@ -94,10 +100,38 @@ def build_parser() -> argparse.ArgumentParser:
     checks.add_argument("--days", type=int, default=14, help="window, in days (0: all)")
     checks.add_argument("--limit", type=int, default=20)
     checks.set_defaults(func=_checks)
+
+    limits = sub.add_parser(
+        "limits", help="the 5-hour and weekly usage windows: now, forecast, what spent them"
+    )
+    limits.add_argument(
+        "--seed", action="store_true", help="add the rate-limit errors in the index as samples"
+    )
+    limits.add_argument(
+        "--dry-run", action="store_true", help="with --seed: show the samples, write nothing"
+    )
+    limits.add_argument(
+        "--install",
+        action="store_true",
+        help="print the status line change that starts recording (writes nothing)",
+    )
+    limits.set_defaults(func=_limits)
+
+    rec = sub.add_parser(
+        "record-limits",
+        help="status line wrapper: pass stdin through and record the usage windows",
+    )
+    rec.add_argument("--line", action="store_true", help="print a short line instead of stdin")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["record-limits"]:
+        # on the status line's path: no argument parsing, no other imports
+        from capcom.limits.record import run
+
+        return run(argv[1:])
     args = build_parser().parse_args(argv)
     result: int = args.func(args)
     return result
