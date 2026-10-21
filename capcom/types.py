@@ -252,6 +252,9 @@ class CostState:
     models: Mapping[str, ModelUsage] = field(default_factory=dict, hash=False)
     start_time_ms: int | None = None
     has_unknown_model_cost: bool | None = None
+    # The record has no time of its own: the time of the last timestamped record
+    # before it in the same file (None when there is none).
+    timestamp: datetime | None = None
 
 
 Record = Request | Event | AgentInfo | SessionInfo | CostState
@@ -310,6 +313,9 @@ class PriceTable:
     web_fetch_per_1k: float = 0.0
     # inference_geo -> multiplier on every token category (e.g. {"us": 1.1})
     geo_multipliers: Mapping[str, float] = field(default_factory=dict, hash=False)
+    # Older prices per model: (valid_until, price) pairs, newest first. A request
+    # before `valid_until` (exclusive) uses that price; `models` holds today's.
+    previous: Mapping[str, tuple[tuple[date, Price], ...]] = field(default_factory=dict, hash=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,6 +343,11 @@ class Calibration:
     capcom_usd: float
     claude_code_usd: float
     per_model: Mapping[str, tuple[float, float]] = field(default_factory=dict, hash=False)
+    # False when cost-state counts calls the logs lack (away summaries, compactions,
+    # WebFetch/WebSearch side calls, a resume) or capcom estimated output; `reasons`
+    # names them. The 2 % target applies to comparable sessions only.
+    comparable: bool = True
+    reasons: tuple[str, ...] = ()
 
     @property
     def spread(self) -> float:
