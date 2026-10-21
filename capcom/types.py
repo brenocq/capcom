@@ -493,6 +493,9 @@ class Spike:
     session_id: str | None = None
     agent_id: str | None = None
     message_ids: tuple[str, ...] = ()  # the requests that make it up, in time order
+    # "thread": one agent thread (agent_id None = the main thread); "session": all
+    # threads of the session together, which is where subagent fan-out shows.
+    scope: str = "thread"
 
     @property
     def excess_usd(self) -> float:
