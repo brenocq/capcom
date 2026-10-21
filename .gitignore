@@ -16,3 +16,5 @@ build/
 out/
 *.sqlite
 *.sqlite-*
+# README media, built by .github/scripts/build_all.py and published on the assets branch
+.github/assets/
