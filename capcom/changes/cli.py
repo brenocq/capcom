@@ -27,7 +27,7 @@ VERDICTS = {
     Verdict.NO_EFFECT: "no clear effect",
     Verdict.WORSE: "worse",
     Verdict.TOO_EARLY: "too early",
-    Verdict.NO_DATA: "no data",
+    Verdict.NO_DATA: "can't tell",
 }
 
 

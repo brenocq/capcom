@@ -22,7 +22,12 @@ def mark_of(kind: str, scope: str = PROJECT, on: date = A) -> ChangeMark:
 
 
 def day(
-    d: date, n: int, episodes: int, kind: str = "tool", project: str = PROJECT
+    d: date,
+    n: int,
+    episodes: int,
+    kind: str = "tool",
+    project: str = PROJECT,
+    agent: str | None = None,
 ) -> tuple[list[Request], list[Event]]:
     """`n` plain requests on day `d`, then `episodes` rewrites of `kind`: "tool" (a
     Bash call whose result comes back after 20 minutes) or "idle" (a 30-minute
@@ -32,12 +37,20 @@ def day(
     reqs: list[Request] = []
     evs: list[Event] = []
     for _ in range(n):
-        reqs.append(req(session=sid, when=t, project=project, cache_read=50_000, output=100))
+        reqs.append(
+            req(session=sid, agent=agent, when=t, project=project, cache_read=50_000, output=100)
+        )
         t += timedelta(minutes=1)
     for _ in range(episodes):
         tools = ("Bash",) if kind == "tool" else ()
         first = req(
-            session=sid, when=t, project=project, tools=tools, cache_read=50_000, output=100
+            session=sid,
+            agent=agent,
+            when=t,
+            project=project,
+            tools=tools,
+            cache_read=50_000,
+            output=100,
         )
         reqs.append(first)
         if kind == "tool":
@@ -45,24 +58,31 @@ def day(
                 Event(
                     EventKind.TOOL_RESULT,
                     sid,
-                    None,
+                    agent,
                     t + timedelta(minutes=20),
                     f"ev{next(_n)}",
                     {"tool_use_id": first.tool_calls[0].tool_use_id, "tool": "Bash"},
                 )
             )
         t += timedelta(minutes=21 if kind == "tool" else 30)
-        reqs.append(req(session=sid, when=t, project=project, cache_write_5m=50_000, output=100))
+        reqs.append(
+            req(
+                session=sid, agent=agent, when=t, project=project, cache_write_5m=50_000, output=100
+            )
+        )
         t += timedelta(minutes=1)
     return reqs, evs
 
 
-def build(days: Mapping[date, tuple[int, int]], kind: str = "tool") -> SortedIndex:
-    """An index of `days` (date -> (plain requests, episodes))."""
+def build(
+    days: Mapping[date, tuple[int, int]], kind: str = "tool", agent: str | None = None
+) -> SortedIndex:
+    """An index of `days` (date -> (plain requests, episodes)), on the main thread
+    or in subagent `agent`."""
     reqs: list[Request] = []
     evs: list[Event] = []
     for d, (n, e) in sorted(days.items()):
-        r, v = day(d, n, e, kind)
+        r, v = day(d, n, e, kind, agent=agent)
         reqs += r
         evs += v
     return SortedIndex(reqs=reqs, evs=evs)

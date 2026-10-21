@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from random import Random
 
 import pytest
 
-from capcom.changes import measure
+from capcom.changes import measure, measure_name
 from capcom.changes.measure import local_midnight
 from capcom.checks import run_checks
 from capcom.cost.prices import load_prices
@@ -118,12 +119,51 @@ def test_a_kind_without_a_measure_is_no_data_with_a_reason() -> None:
 
 
 def test_the_before_window_is_clipped_to_where_the_logs_begin() -> None:
-    days = {**span(A - timedelta(days=10), A, 40, 3), **after(40, 0)}
+    days = {**span(A - timedelta(days=17), A, 40, 3), **after(40, 0)}
     r = _measure(days)
     befores = [p for p in r.weeks if not p.after]
-    assert len(befores) == 2  # the first one partial: not in the range, but measured
+    assert len(befores) == 3  # the first one partial: charted, not in the range
+    assert befores[0].week_start == A - timedelta(days=21)
     assert r.verdict is Verdict.WORKING
     assert r.requests_per_week_before == pytest.approx(46 * 7, rel=0.01)
+
+
+def test_fewer_than_two_before_weeks_with_enough_requests_cannot_tell() -> None:
+    r = _measure({**span(A - timedelta(days=10), A, 40, 3), **after(40, 0)})
+    assert r.verdict is Verdict.NO_DATA
+    assert r.reason.startswith("Can't tell: only 1 of the weeks before Sep 30")
+
+
+def test_work_that_only_started_after_the_date_cannot_tell() -> None:
+    # no subagent before, a subagent waiting on long Bash calls after
+    idx = build({**before(40, 3)}, kind="idle")
+    more = build(after(40, 3), kind="tool", agent="a1")
+    idx.reqs += more.reqs
+    idx.evs += more.evs
+    r = measure(idx, TABLE, mark_of("subagent_cache_expiry"), now_after())
+    assert r.verdict is Verdict.NO_DATA
+    assert "only started after the date" in r.reason
+
+
+def test_a_workload_four_times_larger_cannot_tell() -> None:
+    r = _measure({**before(40, 3), **after(200, 0)})
+    assert r.verdict is Verdict.NO_DATA
+    assert "changed too much to compare" in r.reason
+
+
+def test_noisy_days_at_the_same_rate_are_no_clear_effect() -> None:
+    rnd = Random(7)
+    days = {d: (40, rnd.randint(0, 6)) for d in [*before(), *after(40, 0)]}
+    r = _measure(days)
+    assert r.verdict is Verdict.NO_EFFECT
+    assert "no clear effect" in r.reason
+
+
+def test_measure_names_and_human_dates() -> None:
+    assert measure_name("subagent_cache_expiry") == "Tool-wait rewrites per 1,000 requests"
+    assert measure_name("one_command_subagents") is None
+    r = _measure({**before(40, 3), **after(40, 0)})
+    assert "since Oct 1" in r.reason and "2026-" not in r.reason
 
 
 def test_idle_rewrites_are_measured_on_their_own() -> None:
@@ -149,3 +189,13 @@ def test_a_rewrite_new_since_the_date_is_worse_and_priced_from_the_after_weeks()
     assert r.verdict is Verdict.WORSE
     assert r.before == 0
     assert r.measured_usd_per_week is not None and r.measured_usd_per_week < 0
+
+
+def test_a_measure_already_moving_before_the_date_cannot_tell() -> None:
+    weeks = {}
+    for k, e in zip((4, 3, 2, 1), (0, 1, 3, 4), strict=True):
+        start = A - timedelta(days=7 * k)
+        weeks |= span(start, start + timedelta(days=7), 40, e)
+    r = _measure({**weeks, **after(40, 6)})
+    assert r.verdict is Verdict.NO_DATA
+    assert "already moving before the date" in r.reason

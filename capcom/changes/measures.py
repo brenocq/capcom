@@ -88,6 +88,9 @@ class Measure:
     median: bool = False  # the value is the median of the samples, not count / base
     fmt: str = "{:,.1f}"
     quality: tuple[Row, ...] = ()  # model changes: signals to judge quality by
+    # the work the habit rides on, in words (its count: the tally's "habit" sum, else
+    # the requests in scope): near zero before and present after, nothing to compare
+    habit: str = "requests in scope"
 
     def value(self, t: Tally) -> float | None:
         if self.median:
@@ -126,11 +129,15 @@ def _requests(threads: Iterable[Thread]) -> int:
 # --------------------------------------------------------------------------- per kind
 
 
-def _rewrites(pick: Callable[[Facts], Mapping[str, Rewrite]]) -> Callable[..., Tally]:
+def _rewrites(
+    pick: Callable[[Facts], Mapping[str, Rewrite]], habit: Callable[[Thread], float]
+) -> Callable[..., Tally]:
     def tally(facts: Facts, scope: str, index: Index) -> Tally:
         out = Tally()
-        out.requests = _requests(_project_threads(facts, scope))
+        threads = _project_threads(facts, scope)
+        out.requests = _requests(threads)
         out.base = out.requests
+        out.add("habit", sum(habit(t) for t in threads))
         for project, rw in pick(facts).items():
             if scope != "all" and _group(project) != scope:
                 continue
@@ -384,13 +391,31 @@ _REWRITE_ROWS: tuple[Row, ...] = (
 )
 
 
+def _sub_calls(t: Thread) -> float:
+    return t.tool_calls if t.agent_id is not None else 0
+
+
+def _sub_requests(t: Thread) -> float:
+    return t.requests if t.agent_id is not None else 0
+
+
+def _main_requests(t: Thread) -> float:
+    return t.requests if t.agent_id is None else 0
+
+
 def _rewrite_measure(
-    label: str, pick: Callable[[Facts], Mapping[str, Rewrite]], pause: str
+    label: str,
+    pick: Callable[[Facts], Mapping[str, Rewrite]],
+    pause: str,
+    habit: Callable[[Thread], float],
+    habit_label: str,
 ) -> Measure:
     rows = (*_REWRITE_ROWS, (f"Longest {pause} (min)", _largest("longest_min")))
     if pause == "wait":
         rows = (*rows, ("Top tool waited on, rewrites per week", _top_cause))
-    return Measure(label, "per 1,000 requests", 1000, _rewrites(pick), rows)
+    return Measure(
+        label, "per 1,000 requests", 1000, _rewrites(pick, habit), rows, habit=habit_label
+    )
 
 
 def _prefix(label: str, match: Callable[[Facts, str, ItemKey], bool], what: str) -> Measure:
@@ -413,18 +438,33 @@ def _is_mcp(facts: Facts, scope: str, key: ItemKey) -> bool:
 
 
 TOOL_WAIT = _rewrite_measure(
-    "Tool-wait rewrites per 1,000 requests", lambda f: f.tool_waits, "wait"
+    "Tool-wait rewrites per 1,000 requests",
+    lambda f: f.tool_waits,
+    "wait",
+    _sub_calls,
+    "subagent tool calls",
 )
 LATE_RESUME = _rewrite_measure(
-    "Late-resume rewrites per 1,000 requests", lambda f: f.resumes, "pause"
+    "Late-resume rewrites per 1,000 requests",
+    lambda f: f.resumes,
+    "pause",
+    _sub_requests,
+    "subagent requests",
 )
-IDLE = _rewrite_measure("Idle rewrites per 1,000 requests", lambda f: f.idle, "pause")
+IDLE = _rewrite_measure(
+    "Idle rewrites per 1,000 requests",
+    lambda f: f.idle,
+    "pause",
+    _main_requests,
+    "main-thread requests",
+)
 SWITCH = Measure(
     "Model-switch rewrites per 1,000 requests",
     "per 1,000 requests",
     1000,
-    _rewrites(lambda f: f.switches),
+    _rewrites(lambda f: f.switches, _main_requests),
     _REWRITE_ROWS,
+    habit="main-thread requests",
 )
 
 MEASURES: dict[str, Measure] = {
@@ -496,6 +536,7 @@ MEASURES: dict[str, Measure] = {
             ("Model with the most spend", _main_model),
         ),
         fmt="{:,.4f}",
+        habit="requests of this agent type",
         quality=(
             (
                 "Requests per spawn",

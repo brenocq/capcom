@@ -13,8 +13,17 @@ verdict.
 
 from __future__ import annotations
 
-from capcom.changes.measure import measure
+from capcom.changes.measure import measure, measure_name
 from capcom.changes.noticed import noticed
 from capcom.changes.store import edit, load, mark, store_path, unmark
 
-__all__ = ["edit", "load", "mark", "measure", "noticed", "store_path", "unmark"]
+__all__ = [
+    "edit",
+    "load",
+    "mark",
+    "measure",
+    "measure_name",
+    "noticed",
+    "store_path",
+    "unmark",
+]
