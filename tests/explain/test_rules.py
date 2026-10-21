@@ -1,0 +1,492 @@
+"""Each cause on a synthetic session built to show it, with its expected excess, and
+the negative cases that must not raise a cause."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+
+import pytest
+
+from capcom.explain import explain
+from capcom.explain.fmt import clock
+from capcom.types import CauseKind, Confidence, EventKind, Explanation, Spike, SpikeKind
+from tests.explain.helpers import OPUS, SONNET, TABLE, World, at, cost, spike
+
+API = EventKind.API_REQUEST
+
+
+def run(w: World, *spikes: Spike) -> list[Explanation]:
+    return explain(w.index, TABLE, spikes)
+
+
+def labels(e: Explanation) -> list[str]:
+    return [ev.label for ev in e.evidence]
+
+
+def has(e: Explanation, text: str) -> bool:
+    return any(text in label for label in labels(e))
+
+
+def only(w: World, s: Spike) -> Explanation:
+    out = run(w, s)
+    assert len(out) == 1, [(x.cause, x.excess_usd) for x in out]
+    return out[0]
+
+
+# --------------------------------------------------------------------------- rule 1
+
+
+def test_idle_past_one_hour_ttl() -> None:
+    w = World()
+    r0 = w.req(0, cache_write_1h=200_000)
+    r1 = w.req(2, cache_read=200_000)
+    r2 = w.req(80, cache_write_1h=205_000)
+    for r in (r0, r1, r2):
+        w.event(
+            API,
+            (r.timestamp - at(0)).total_seconds() / 60,
+            request_id=r.request_id,
+            cache_ttl="1h",
+            shape_hash="h1",
+        )
+    e = only(w, spike([r2], baseline=cost(r1)))
+    assert e.cause is CauseKind.IDLE_REWRITE
+    assert e.confidence is Confidence.CLEAR
+    # 200k tokens the previous request had cached, written at $10/M instead of read at $0.5/M
+    assert e.excess_usd == pytest.approx(200_000 * 9.5 / 1e6)
+    assert e.title == "Cache rebuilt after 78 min idle"
+    assert has(e, "Gap of 78 min; cache lifetime 1 h (cacheControl ttl 1h)")
+    assert has(e, f"Previous main-thread request at {clock(r1.timestamp)}")
+    assert has(e, f"The request at {clock(r2.timestamp)} wrote 205,000 tokens to the cache")
+    assert e.evidence[-1].message_id == r2.message_id
+    assert "hour" in e.advice
+
+
+def test_idle_subagent_known_from_its_5m_writes() -> None:
+    w = World()
+    w.agent("a1", "scout", "tu_x")
+    w.req(0, agent="a1", cache_write_5m=50_000)
+    w.req(1, agent="a1", cache_read=50_000, cache_write_5m=1_000)
+    r2 = w.req(12, agent="a1", cache_write_5m=52_000)
+    e = only(w, spike([r2], agent="a1"))
+    assert e.cause is CauseKind.IDLE_REWRITE
+    assert e.confidence is Confidence.CLEAR
+    assert e.excess_usd == pytest.approx(51_000 * (6.25 - 0.5) / 1e6)
+    assert has(e, "cache lifetime 5 minutes (the previous request wrote 5-minute entries)")
+    assert has(e, "Previous scout subagent request")
+
+
+def test_idle_on_the_fallback_lifetime_is_likely() -> None:
+    w = World()
+    w.req(0, cache_write_5m=60_000)
+    w.req(1, cache_read=60_000)  # reads only: its own writes say nothing
+    r2 = w.req(30, cache_write_5m=60_000)
+    e = only(w, spike([r2]))
+    assert e.cause is CauseKind.IDLE_REWRITE
+    assert e.confidence is Confidence.LIKELY
+    assert has(e, "cache lifetime 5 minutes (assumed: no cacheControl record)")
+
+
+def test_away_summary_before_a_rewrite() -> None:
+    w = World()
+    w.req(0, cache_write_1h=100_000)
+    w.req(1, cache_read=100_000)
+    away = w.event(EventKind.AWAY, 15)
+    r2 = w.req(20, cache_write_1h=100_000)
+    e = only(w, spike([r2]))
+    assert e.cause is CauseKind.IDLE_REWRITE
+    assert e.confidence is Confidence.LIKELY
+    assert any(ev.event_key == away.key for ev in e.evidence)
+
+
+def test_gap_within_the_lifetime_is_not_idle() -> None:
+    w = World()
+    w.req(0, cache_write_1h=100_000)
+    w.req(1, cache_read=100_000)
+    r2 = w.req(30, cache_write_1h=100_000)  # 29 min, the session writes 1-hour entries
+    s = spike([r2], baseline=0.1)
+    e = only(w, s)
+    assert e.cause is CauseKind.UNEXPLAINED
+    assert e.confidence is Confidence.UNEXPLAINED
+    assert e.excess_usd == pytest.approx(s.excess_usd)
+    assert has(e, "with no pause, compaction, model or tool change before it")
+
+
+# --------------------------------------------------------------------------- rule 2
+
+
+def test_rewrite_after_compaction() -> None:
+    w = World()
+    w.req(0, cache_write_1h=300_000)
+    w.req(1, cache_read=300_000)
+    comp = w.event(EventKind.COMPACTION, 2, trigger="auto", pre_tokens=300_000, post_tokens=40_000)
+    r2 = w.req(3, cache_write_1h=40_000)
+    e = only(w, spike([r2]))
+    assert e.cause is CauseKind.COMPACTION
+    assert e.confidence is Confidence.CLEAR
+    assert e.excess_usd == pytest.approx(40_000 * 9.5 / 1e6)
+    assert e.title == "Cache rewritten after a compaction"
+    assert has(e, f"compact_boundary at {clock(comp.timestamp)}, trigger auto")
+
+
+def test_late_compaction_and_the_cap() -> None:
+    w = World()
+    for k in range(5):
+        w.req(k, cache_read=550_000)
+    heavy = [
+        w.req(10 + k, cache_read=c) for k, c in enumerate((600_000, 700_000, 800_000, 900_000))
+    ]
+    w.event(EventKind.COMPACTION, 14, trigger="auto", pre_tokens=968_686, post_tokens=41_278)
+    w.req(15, cache_write_1h=41_278)
+    s = spike(heavy, baseline=0.5, kind=SpikeKind.SLOPE_CHANGE)
+    out = run(w, s)
+    first = out[0]
+    assert first.cause is CauseKind.COMPACTION
+    assert first.confidence is Confidence.CLEAR
+    # the turns above 400k: 200k + 300k + 400k + 500k extra reads at $0.5/M
+    assert first.excess_usd == pytest.approx(0.70)
+    assert first.title == "Compaction ran late, at 969k tokens"
+    assert has(first, "preTokens 968,686, postTokens 41,278")
+    assert has(first, "4 turns above 400k, averaging 750k")
+    assert has(first, "The next request wrote 41k tokens to the cache")
+    # context growth over the 550k hour before (0.40) takes only what is left
+    growth = [e for e in out if e.cause is CauseKind.CONTEXT_GROWTH]
+    assert growth and growth[0].excess_usd == pytest.approx(s.excess_usd - 0.70)
+    assert sum(e.excess_usd for e in out) <= s.excess_usd + 1e-12
+
+
+# --------------------------------------------------------------------------- rule 3
+
+
+def test_model_switch() -> None:
+    w = World()
+    w.req(0, cache_write_5m=200_000)
+    r1 = w.req(1, cache_read=200_000)
+    model = w.event(EventKind.MODEL, 2.5, model=SONNET)
+    r2 = w.req(3, model=SONNET, cache_write_5m=200_000)
+    e = only(w, spike([r2]))
+    assert e.cause is CauseKind.MODEL_SWITCH
+    assert e.confidence is Confidence.CLEAR
+    assert e.excess_usd == pytest.approx(200_000 * (3.75 - 0.3) / 1e6)
+    assert e.title == "Model switch rewrote the cache"
+    assert has(e, f"message.model changed from {OPUS} to {SONNET} at {clock(r2.timestamp)}")
+    assert any(ev.event_key == model.key for ev in e.evidence)
+    assert r1.model == OPUS
+
+
+def test_same_model_no_switch() -> None:
+    w = World()
+    w.req(0, cache_write_5m=200_000)
+    w.req(1, cache_read=200_000)
+    r2 = w.req(3, model="claude-opus-5-5-20261001", cache_read=200_000, output=200)
+    e = only(w, spike([r2]))
+    assert e.cause is CauseKind.UNEXPLAINED
+
+
+# --------------------------------------------------------------------------- rule 4
+
+
+def test_shape_hash_change() -> None:
+    w = World()
+    w.event(
+        EventKind.TOOL_SET, 0, source="api-request-shape", shape_hash="h1", names=("Read", "Bash")
+    )
+    r0 = w.req(0, cache_write_1h=100_000)
+    w.event(API, 1, request_id="x", cache_ttl="1h", shape_hash="h1")
+    r1 = w.req(1, cache_read=100_000)
+    w.event(
+        EventKind.TOOL_SET,
+        2.5,
+        source="api-request-shape",
+        shape_hash="h2",
+        names=("Read", "Bash", "mcp__srv__one"),
+    )
+    w.event(API, 3, request_id="y", cache_ttl="1h", shape_hash="h2")
+    r2 = w.req(3, cache_write_1h=101_000)
+    e = only(w, spike([r2]))
+    assert e.cause is CauseKind.TOOL_SET_CHANGE
+    assert e.confidence is Confidence.CLEAR
+    assert e.excess_usd == pytest.approx(100_000 * 9.5 / 1e6)
+    assert has(e, "shapeHash changed between the requests at")
+    assert has(e, "added mcp__srv__one")
+    assert r0.usage.context == r1.usage.context
+
+
+def test_tool_delta_attachment_is_likely() -> None:
+    w = World()
+    w.req(0, cache_write_1h=100_000)
+    w.req(1, cache_read=100_000)
+    w.event(
+        EventKind.TOOL_SET, 2, source="deferred_tools_delta", added=("mcp__srv__one",), removed=()
+    )
+    r2 = w.req(3, cache_write_1h=100_000)
+    e = only(w, spike([r2]))
+    assert e.cause is CauseKind.TOOL_SET_CHANGE
+    assert e.confidence is Confidence.LIKELY
+    assert has(e, "deferred_tools_delta at")
+    assert has(e, "added mcp__srv__one")
+
+
+def test_initial_skill_listing_is_not_a_change() -> None:
+    w = World()
+    w.req(0, cache_write_1h=100_000)
+    w.req(1, cache_read=100_000)
+    w.event(EventKind.TOOL_SET, 2, source="skill_listing", names=("a",), is_initial=True)
+    r2 = w.req(3, cache_write_1h=100_000)
+    assert only(w, spike([r2])).cause is CauseKind.UNEXPLAINED
+
+
+# --------------------------------------------------------------------------- rules 5 and 8
+
+
+def _big_read(w: World, compaction_at: float | None = None) -> list:  # type: ignore[type-arg]
+    w.req(0, cache_write_5m=50_000, tools=[("Read", "/home/user/proj/big.json")])
+    w.event(
+        EventKind.TOOL_RESULT,
+        0.5,
+        tool="Read",
+        target="/home/user/proj/big.json",
+        size_tokens=100_000,
+        chars=400_000,
+    )
+    if compaction_at is not None:
+        w.event(EventKind.COMPACTION, compaction_at, trigger="auto")
+    reqs = [w.req(1, cache_read=50_000, cache_write_5m=100_000)]
+    reqs += [w.req(2 + k, cache_read=150_000) for k in range(4)]
+    return reqs
+
+
+def test_large_tool_result() -> None:
+    w = World()
+    reqs = _big_read(w)
+    e = only(w, spike(reqs, kind=SpikeKind.SLOPE_CHANGE))
+    assert e.cause is CauseKind.LARGE_TOOL_RESULT
+    assert e.confidence is Confidence.LIKELY
+    # written once at $6.25/M, then reread by 4 requests at $0.5/M
+    assert e.excess_usd == pytest.approx(100_000 * 6.25 / 1e6 + 4 * 100_000 * 0.5 / 1e6)
+    assert e.title == "A 100k-token tool result stayed in context"
+    assert has(e, "Read of /home/user/proj/big.json returned about 100k tokens (estimated")
+    assert has(e, f"Written to the cache at {clock(reqs[0].timestamp)}")
+    assert has(e, "Reread by 4 later requests so far")
+    assert "offset and limit" in e.advice
+
+
+def test_large_tool_result_until_compaction() -> None:
+    w = World()
+    reqs = _big_read(w, compaction_at=3.5)
+    e = run(w, spike(reqs, kind=SpikeKind.SLOPE_CHANGE))[0]
+    assert e.cause is CauseKind.LARGE_TOOL_RESULT
+    assert e.excess_usd == pytest.approx(100_000 * 6.25 / 1e6 + 2 * 100_000 * 0.5 / 1e6)
+    assert has(e, "Reread by 2 later requests until the compaction")
+
+
+def test_small_tool_result_is_not_large() -> None:
+    w = World()
+    w.req(0, cache_write_5m=50_000, tools=[("Read", "/p/a.py")])
+    w.event(EventKind.TOOL_RESULT, 0.5, tool="Read", target="/p/a.py", size_tokens=15_000)
+    reqs = [w.req(1, cache_read=50_000, cache_write_5m=15_000)]
+    reqs += [w.req(2 + k, cache_read=65_000) for k in range(4)]
+    e = only(w, spike(reqs, kind=SpikeKind.SLOPE_CHANGE))
+    assert e.cause is CauseKind.UNEXPLAINED
+    assert has(e, "No tool result above 20k tokens")
+
+
+def test_long_subagent_report() -> None:
+    w = World()
+    w.req(0, cache_write_5m=20_000, tools=[("Agent", "scout")])
+    w.event(EventKind.TOOL_RESULT, 1, tool="Agent", target="scout", size_tokens=30_000)
+    reqs = [w.req(2, cache_read=20_000, cache_write_5m=30_000)]
+    reqs += [w.req(3 + k, cache_read=50_000) for k in range(2)]
+    e = only(w, spike(reqs, kind=SpikeKind.SLOPE_CHANGE))
+    assert e.cause is CauseKind.LONG_REPORT
+    assert e.confidence is Confidence.LIKELY
+    assert e.excess_usd == pytest.approx(30_000 * 6.25 / 1e6 + 2 * 30_000 * 0.5 / 1e6)
+    assert has(e, "scout subagent reported about 30k tokens")
+
+
+# --------------------------------------------------------------------------- rule 6
+
+
+def test_context_growth() -> None:
+    w = World()
+    for m in (0, 10, 20):
+        w.req(m, cache_read=50_000)
+    reqs = [
+        w.req(61 + k, cache_read=c)
+        for k, c in enumerate((100_000, 150_000, 200_000, 250_000, 300_000, 350_000))
+    ]
+    e = only(w, spike(reqs, baseline=0.1, kind=SpikeKind.SLOPE_CHANGE))
+    assert e.cause is CauseKind.CONTEXT_GROWTH
+    assert e.confidence is Confidence.CLEAR
+    assert e.excess_usd == pytest.approx(1_050_000 * 0.5 / 1e6)
+    assert e.title == "Context grew from 50k to 350k tokens"
+    assert has(e, f"Crossed 150k at {clock(reqs[1].timestamp)}")
+    assert has(e, f"Crossed 200k at {clock(reqs[2].timestamp)}")
+    assert not has(e, "Crossed 400k")
+    assert has(e, "No compaction in the window")
+
+
+def test_small_contexts_do_not_count_as_growth() -> None:
+    w = World()
+    w.req(0, cache_read=20_000)
+    reqs = [w.req(61 + k, cache_read=c) for k, c in enumerate((40_000, 60_000, 90_000))]
+    assert only(w, spike(reqs, kind=SpikeKind.SLOPE_CHANGE)).cause is CauseKind.UNEXPLAINED
+
+
+# --------------------------------------------------------------------------- rule 7
+
+
+def _fan_out(w: World, n: int) -> list:  # type: ignore[type-arg]
+    types = ["scout", "scout", "coder", "scout", "coder", "scout"][:n]
+    main = w.req(0, cache_read=50_000, tools=[("Agent", t) for t in types])
+    reqs = [main]
+    for k, (call, kind) in enumerate(zip(main.tool_calls, types, strict=True)):
+        w.event(EventKind.SPAWN, 0.1, tool_use_id=call.tool_use_id, agent_type=kind)
+        w.agent(f"a{k}", kind, call.tool_use_id)
+        reqs.append(w.req(1 + k, agent=f"a{k}", cache_write_5m=30_000))
+        reqs.append(w.req(1.5 + k, agent=f"a{k}", cache_read=30_000, tools=[("Bash", "ls")]))
+    return reqs
+
+
+def test_fan_out() -> None:
+    w = World()
+    reqs = _fan_out(w, 5)
+    e = only(w, spike(reqs, kind=SpikeKind.SLOPE_CHANGE))
+    assert e.cause is CauseKind.FAN_OUT
+    assert e.confidence is Confidence.CLEAR
+    assert e.excess_usd == pytest.approx(sum(cost(r) for r in reqs if r.agent_id))
+    assert e.title == "5 subagents in under a minute"
+    assert has(e, "5 Agent tool calls between")
+    assert has(e, "scout \u00d73, coder \u00d72")
+    assert has(e, "Each first request wrote about 30k tokens")
+    assert has(e, "5 of them made two tool calls or fewer")
+
+
+def test_three_spawns_are_not_a_fan_out() -> None:
+    w = World()
+    reqs = _fan_out(w, 3)
+    out = run(w, spike(reqs, kind=SpikeKind.SLOPE_CHANGE))
+    assert all(e.cause is not CauseKind.FAN_OUT for e in out)
+
+
+# --------------------------------------------------------------------------- rule 9
+
+
+def test_thinking_heavy() -> None:
+    w = World()
+    reqs = [
+        w.req(k, cache_read=20_000, output=10_000, thinking=8_000, effort="high") for k in range(3)
+    ]
+    e = only(w, spike(reqs, kind=SpikeKind.SLOPE_CHANGE))
+    assert e.cause is CauseKind.THINKING_HEAVY
+    assert e.confidence is Confidence.CLEAR
+    assert e.excess_usd == pytest.approx(3 * 8_000 * 25 / 1e6)
+    assert has(e, "3 turns with 24k thinking tokens of 30k output")
+    assert has(e, "Effort high on these turns")
+
+
+def test_tool_heavy_turns_are_not_thinking_heavy() -> None:
+    w = World()
+    reqs = [
+        w.req(
+            k,
+            cache_read=20_000,
+            output=10_000,
+            thinking=8_000,
+            tools=[("Read", f"/p/{k}"), ("Grep", None)],
+        )
+        for k in range(3)
+    ]
+    out = run(w, spike(reqs, kind=SpikeKind.SLOPE_CHANGE))
+    assert all(e.cause is not CauseKind.THINKING_HEAVY for e in out)
+
+
+# --------------------------------------------------------------------------- rule 10
+
+
+@pytest.mark.parametrize(("n", "conf"), [(8, Confidence.LIKELY), (12, Confidence.CLEAR)])
+def test_polling(n: int, conf: Confidence) -> None:
+    w = World()
+    reqs = [w.req(k, cache_read=80_000, tools=[("Bash", "sleep")]) for k in range(n)]
+    e = only(w, spike(reqs, kind=SpikeKind.SLOPE_CHANGE))
+    assert e.cause is CauseKind.POLLING
+    assert e.confidence is conf
+    assert e.excess_usd == pytest.approx((n - 1) * (80_000 * 0.5 + 100 * 25) / 1e6)
+    assert e.title == f"The same Bash call {n} times in a row"
+    assert has(e, f"{n} Bash (sleep) calls in a row")
+    assert has(e, "Each turn reread about 80k tokens of context")
+
+
+def test_four_repeats_are_not_polling() -> None:
+    w = World()
+    reqs = [w.req(k, cache_read=80_000, tools=[("Bash", "sleep")]) for k in range(4)]
+    reqs.append(w.req(5, cache_read=80_000, tools=[("Read", "/p/a")]))
+    assert only(w, spike(reqs, kind=SpikeKind.SLOPE_CHANGE)).cause is CauseKind.UNEXPLAINED
+
+
+# --------------------------------------------------------------------------- allocation
+
+
+def test_nothing_fits() -> None:
+    w = World()
+    for k in range(5):
+        w.req(k, cache_read=50_000)
+    r = w.req(6, cache_read=50_000, output=1_500)
+    s = spike([r], baseline=0.0275)
+    e = only(w, s)
+    assert e.cause is CauseKind.UNEXPLAINED
+    assert e.excess_usd == pytest.approx(s.excess_usd)
+    assert e.title == "One request cost $0.06"
+    assert has(e, "No pause, compaction, model switch or tool change in the window")
+    assert has(e, "No tool result above 20k tokens")
+
+
+def test_a_small_cause_is_only_the_closest() -> None:
+    w = World()
+    reqs = [w.req(k, cache_read=80_000, tools=[("Bash", "sleep")]) for k in range(5)]
+    s = replace(spike(reqs, kind=SpikeKind.SLOPE_CHANGE), cost_usd=10.0, baseline_usd=0.0)
+    e = only(w, s)
+    assert e.cause is CauseKind.UNEXPLAINED
+    assert e.excess_usd == 10.0
+    assert has(e, "Closest: The same Bash call 5 times in a row, about $0.17")
+    assert e.title == "Spend rose for 4 min"
+
+
+def test_uncovered_rest_is_unexplained() -> None:
+    w = World()
+    w.req(0, cache_write_1h=200_000)
+    w.req(2, cache_read=200_000)
+    r2 = w.req(80, cache_write_1h=205_000)
+    s = replace(spike([r2]), cost_usd=5.0, baseline_usd=0.0)
+    out = run(w, s)
+    assert [e.cause for e in out] == [CauseKind.IDLE_REWRITE, CauseKind.UNEXPLAINED]
+    assert out[1].excess_usd == pytest.approx(5.0 - 1.90)
+    assert sum(e.excess_usd for e in out) == pytest.approx(5.0)
+
+
+def test_machine_wide_spike_and_order() -> None:
+    w = World()
+    w.req(0, cache_write_1h=200_000)
+    w.req(2, cache_read=200_000)
+    idle = w.req(80, cache_write_1h=200_000)
+    w.req(70, session="s2", cache_write_5m=100_000)
+    w.req(71, session="s2", cache_read=100_000)
+    switch = w.req(80.5, session="s2", model=SONNET, cache_write_5m=100_000)
+    wide = spike([idle, switch], session=None)
+    one = spike([switch], session="s2")
+    out = run(w, one, wide)
+    assert out[0].spike is one and out[0].cause is CauseKind.MODEL_SWITCH
+    rest = out[1:]
+    assert all(e.spike is wide for e in rest)
+    assert {e.cause for e in rest} == {CauseKind.IDLE_REWRITE, CauseKind.MODEL_SWITCH}
+    assert sum(e.excess_usd for e in rest) <= wide.excess_usd + 1e-12
+    assert {ev.session_id for e in rest for ev in e.evidence} == {"s1", "s2"}
+
+
+def test_unknown_messages_are_unexplained() -> None:
+    w = World()
+    r = w.req(0, cache_read=10_000)
+    s = replace(spike([r]), message_ids=("msg_missing",))
+    e = only(w, s)
+    assert e.cause is CauseKind.UNEXPLAINED
+    assert has(e, "No request of the spike is in the index")
