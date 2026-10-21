@@ -14,7 +14,7 @@ import contextlib
 import hashlib
 import math
 import statistics
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from itertools import pairwise
@@ -104,6 +104,15 @@ class Context:
     openclaw_root: Path | None = None  # None: from the configuration
     state_dir: Path | None = None  # where the usage samples are; None: no samples
     scanning: bool = False  # serve's first scan is still running: totals may be partial
+    # serve's job runner (capcom.report.jobs): `step(progress, partial)` after each
+    # chunk of work, with a function that builds the reply so far; it may raise
+    # jobs.Cancelled, or wait while a request of higher priority runs
+    step: Callable[[float, Callable[[], Any] | None], None] | None = None
+
+    def progress(self, fraction: float, partial: Callable[[], Any] | None = None) -> None:
+        """Say how far the reply is (0..1) and, optionally, how to build it so far."""
+        if self.step is not None:
+            self.step(fraction, partial)
 
     def local(self, t: datetime) -> datetime:
         return t.astimezone(self.tz)
@@ -237,9 +246,11 @@ def _spike_marks(
     )
     if found is None:
         return None
+    ctx.progress(0.6)
     marks = sorted(found, key=lambda sp: -sp.excess_usd)[:MAX_MARKERS]
     marks.sort(key=lambda sp: (sp.start, sp.session_id or ""))
     explained = _try(lambda: ctx.analysis.explain(ctx.index, ctx.table, marks), unavailable)
+    ctx.progress(0.75)
     causes = _by_spike(explained or [])
     return {
         "count": len(found),
@@ -273,6 +284,7 @@ STORY_DAYS = 14  # Overview's "what changed": a change in the last two weeks
 def _regime(ctx: Context, first_day: date, unavailable: list[str]) -> dict[str, Any] | None:
     """The latest change of the daily spend's level on or after `first_day`
     (capcom.report.story), None without one."""
+    ctx.progress(0.8)
     change = _try(
         lambda: latest_change(
             ctx.index,
@@ -353,6 +365,7 @@ def overview(ctx: Context) -> dict[str, Any]:
         today.add(req)
         if req.timestamp >= hour_ago:
             last_hour.add(req, cost)
+    ctx.progress(0.2)
 
     unavailable: list[str] = []
     step = _STEPS[1]
@@ -362,6 +375,7 @@ def overview(ctx: Context) -> dict[str, Any]:
         ),
         unavailable,
     )
+    ctx.progress(0.3)
     if cum is not None:
         cum = _tidy(cum, GroupBy.CATEGORY, names)
     marks = _spike_marks(ctx, today_since, ctx.now, infos, names, unavailable)
@@ -456,6 +470,7 @@ def spend(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     w = _window(ctx)
     for req in ctx.index.requests(since=since):
         w.add(req)
+    ctx.progress(0.15)
 
     unavailable: list[str] = []
     step = _STEPS[days]
@@ -465,12 +480,14 @@ def spend(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
         ),
         unavailable,
     )
+    ctx.progress(0.3)
     hourly = _try(
         lambda: ctx.analysis.per_step(
             ctx.index, ctx.table, since, ctx.now, group, timedelta(hours=1), top=TOP_MEMBERS
         ),
         unavailable,
     )
+    ctx.progress(0.45)
     if cum is not None:
         cum = _tidy(cum, group, w.names)
     if hourly is not None:
@@ -1231,11 +1248,79 @@ def _project_filter(
 
 def spikes(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     days = _int(query, "days", 14, 1, 366)
+    cause = query.get("cause") or None
+    if cause is not None and cause not in {c.value for c in CauseKind}:
+        raise ApiError(400, "bad_query", "cause names no known cause")
     since = ctx.midnight(days - 1)
-    found, explained = ctx.analysis.spikes(ctx.index, ctx.table, since, ctx.now)
+    ctx.progress(0.02)
+    found = ctx.analysis.detect(ctx.index, ctx.table, since, ctx.now)
     infos = ctx.infos()
     names = ctx.names(infos)
     agents = ctx.agents()
+    items: dict[Spike, dict[str, Any]] = {}  # a listed spike's JSON, made once
+    by: dict[Spike, list[Explanation]] = {}
+    total = len(found)
+    if ctx.step is None or total == 0:
+        explained = ctx.analysis.explain(ctx.index, ctx.table, found)
+    else:
+        # serve's job: explain session by session (the sessions of the largest
+        # spikes first, newest first), publishing the reply so far after each batch
+        for batch in _explain_batches(found):
+            ctx.progress(SPIKES_DETECTED + (1 - SPIKES_DETECTED) * len(by) / total)
+            for sp in batch:
+                by[sp] = []
+            for e in ctx.analysis.explain(ctx.index, ctx.table, batch):
+                by[e.spike].append(e)
+            so_far = [e for sp in found if sp in by for e in by[sp]]
+            ctx.progress(
+                SPIKES_DETECTED + (1 - SPIKES_DETECTED) * len(by) / total,
+                lambda so_far=so_far: _spikes_reply(  # type: ignore[misc]
+                    ctx, query, days, since, found, so_far, infos, names, agents, items, set(by)
+                ),
+            )
+        explained = [e for sp in found for e in by[sp]]
+    return _spikes_reply(ctx, query, days, since, found, explained, infos, names, agents, items)
+
+
+SPIKES_DETECTED = 0.25  # the share of a spikes job's progress that detection stands for
+EXPLAIN_BATCH = 40  # spikes explained per chunk of a spikes job (whole sessions)
+
+
+def _explain_batches(found: Sequence[Spike]) -> list[list[Spike]]:
+    """The spikes in batches of whole sessions (one session is loaded once): first
+    the sessions that hold the largest spikes (the ones the page lists), newest
+    first, then the rest, newest first."""
+    groups: dict[str, list[Spike]] = {}
+    for sp in found:
+        groups.setdefault(sp.session_id or "", []).append(sp)
+    listed = {sp for sp in sorted(found, key=lambda sp: -sp.excess_usd)[:MAX_SPIKES]}
+    order = sorted(
+        groups.values(),
+        key=lambda g: (not any(sp in listed for sp in g), -max(sp.start.timestamp() for sp in g)),
+    )
+    out: list[list[Spike]] = []
+    for g in order:
+        if not out or len(out[-1]) >= EXPLAIN_BATCH:
+            out.append([])
+        out[-1].extend(g)
+    return out
+
+
+def _spikes_reply(
+    ctx: Context,
+    query: Mapping[str, str],
+    days: int,
+    since: datetime,
+    found: list[Spike],
+    explained: list[Explanation],
+    infos: Mapping[str, SessionInfo],
+    names: ProjectNames,
+    agents: Mapping[str, AgentInfo],
+    items: dict[Spike, dict[str, Any]],
+    done: set[Spike] | None = None,
+) -> dict[str, Any]:
+    """The Spikes reply; with `done`, the reply so far: only the spikes in `done`
+    have their causes yet, and only those are listed."""
     where = {sp: _spike_project(sp, infos, names) for sp in found}
     projects: dict[str, list[Any]] = {}  # label -> [path, excess, spikes]
     for sp in found:
@@ -1262,19 +1347,21 @@ def spikes(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     # lists every cause (the page's filter chips)
     cause = query.get("cause") or None
     if cause is not None:
-        if cause not in {c.value for c in CauseKind}:
-            raise ApiError(400, "bad_query", "cause names no known cause")
         found = [sp for sp in found if any(str(e.cause) == cause for e in causes.get(sp, ()))]
     shown = sorted(found, key=lambda sp: -sp.excess_usd)[:MAX_SPIKES]
+    if done is not None:
+        shown = [sp for sp in shown if sp in done]
     largest = spike_key(shown[0]) if shown else None
     wanted = query.get("spike")  # a linked spike is listed even when it is not among the largest
     if wanted and not any(spike_key(sp) == wanted for sp in shown):
         shown += [sp for sp in found if spike_key(sp) == wanted][:1]
     shown.sort(key=lambda sp: (sp.start, sp.session_id or "", sp.agent_id or ""))
-    items = []
+    listed = []
     for i, sp in enumerate(shown):
-        item = _spike_json(ctx, sp, causes.get(sp, []), infos, agents, names)
-        items.append({"n": i + 1} | item | {"window": _spike_window(ctx, sp)})
+        if sp not in items:
+            item = _spike_json(ctx, sp, causes.get(sp, []), infos, agents, names)
+            items[sp] = item | {"window": _spike_window(ctx, sp)}
+        listed.append({"n": i + 1} | items[sp])
     # matched as capcom.explain.matched counts it: its causes other than UNEXPLAINED
     # cover at least KEEP_SHARE (a tenth) of the spike's excess
     explained_count = sum(
@@ -1316,7 +1403,7 @@ def spikes(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
             }
             for k, v in by_cause
         ],
-        "spikes": items,
+        "spikes": listed,
     }
 
 
@@ -1356,7 +1443,9 @@ def limits(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
 def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     days = _int(query, "days", 14, 1, 366)
     since = ctx.midnight(days - 1)
+    ctx.progress(0.02)
     every = ctx.analysis.checks(ctx.index, ctx.table, since, ctx.now)
+    ctx.progress(0.9)
     # as `capcom checks`: findings under the floor are counted in one line, not listed
     found = [f for f in every if f.saving_usd_per_week >= MIN_LISTED_USD_PER_WEEK]
     small = [f for f in every if f.saving_usd_per_week < MIN_LISTED_USD_PER_WEEK]

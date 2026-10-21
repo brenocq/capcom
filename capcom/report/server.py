@@ -29,6 +29,7 @@ import os
 import sqlite3
 import sys
 import threading
+import time
 import traceback
 import webbrowser
 from collections import OrderedDict
@@ -47,6 +48,7 @@ from capcom.limits.cli import adopt_samples
 from capcom.limits.model import samples_path
 from capcom.report import api
 from capcom.report.analysis import Analysis, Unavailable, default_analysis
+from capcom.report.jobs import Job, Jobs, Result, computing_body
 from capcom.store.index import open_index
 from capcom.types import PriceTable
 
@@ -82,6 +84,7 @@ NO_INDEX_PAGE = """<!doctype html>
 CACHE_BYTES = 32 * 1024 * 1024  # encoded replies kept, all endpoints together
 CACHE_TTL = 300.0  # seconds: "today", "last hour" and "running" move with the clock
 UNCACHED = {"status", "live"}  # cheap, and about the current minute
+PATIENCE = 0.3  # seconds a request waits for its reply before answering 202
 
 
 class ApiCache:
@@ -98,6 +101,11 @@ class ApiCache:
         self.hits = 0
         self.misses = 0
         self._watch: DataVersion | None = None
+        # the last reply of each view (the key without its generation and date),
+        # kept after its generation ended: shown, marked stale, while the new one
+        # is computed
+        self._stale: OrderedDict[tuple[Any, ...], bytes] = OrderedDict()
+        self._stale_bytes = 0
 
     def watch(self, index_path: Path) -> DataVersion:
         """The held data_version reader of `index_path`, made on first use."""
@@ -111,7 +119,7 @@ class ApiCache:
             entry = self._entries.get(key)
             if entry is None or now - entry[0] > self.ttl or now < entry[0]:
                 if entry is not None:
-                    self._drop(key)
+                    self._retire(key)
                 self.misses += 1
                 return None
             self._entries.move_to_end(key)
@@ -126,15 +134,38 @@ class ApiCache:
                 self._drop(key)
             # entries of an older generation are dead: drop them first
             for old in [k for k in self._entries if k[0] != key[0]]:
-                self._drop(old)
+                self._retire(old)
             self._entries[key] = (now, body)
             self._bytes += len(body)
             while self._bytes > self.max_bytes:
                 self._drop(next(iter(self._entries)))
 
+    def stale(self, key: tuple[Any, ...]) -> bytes | None:
+        """The last reply of `key`'s view from an earlier generation or day, if kept."""
+        with self._lock:
+            view = key[2:]
+            # an entry of an older generation is retired only when a newer one is put
+            for k in reversed(self._entries):
+                if k[2:] == view and k != key:
+                    return self._entries[k][1]
+            return self._stale.get(view)
+
     def _drop(self, key: tuple[Any, ...]) -> None:
         _, body = self._entries.pop(key)
         self._bytes -= len(body)
+
+    def _retire(self, key: tuple[Any, ...]) -> None:
+        """Drop an entry, keeping its reply as its view's stale stand-in (bounded
+        by half the cache's bytes)."""
+        body = self._entries[key][1]
+        self._drop(key)
+        view = key[2:]
+        if view in self._stale:
+            self._stale_bytes -= len(self._stale.pop(view))
+        self._stale[view] = body
+        self._stale_bytes += len(body)
+        while self._stale_bytes > self.max_bytes // 2:
+            self._stale_bytes -= len(self._stale.popitem(last=False)[1])
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -242,6 +273,9 @@ class Site:
     state_dir: Path | None = None  # where the usage samples are; None: no samples
     scanner: Scanner | None = None
     cache: ApiCache | None = field(default_factory=ApiCache)  # None: no caching
+    jobs: Jobs | None = field(default_factory=Jobs)  # None: every reply computed in the request
+    patience: float = PATIENCE  # seconds a request waits for its job before a 202
+    warmer: Warmer | None = None
 
 
 class Scanner:
@@ -291,6 +325,120 @@ class Scanner:
 
     def stop(self, timeout: float | None = None) -> None:
         """Ask the loop to end after the current scan; wait up to `timeout`."""
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout)
+
+
+# The views the warmer computes ahead of the clicks: each page's default request
+# first, then its other range tabs, with the query the page sends.
+WARM_VIEWS: dict[str, list[dict[str, str]]] = {
+    "overview": [{}],
+    "spikes": [{"days": d} for d in ("14", "1", "7", "30", "90")],
+    "spend": [{"days": d, "group": "category"} for d in ("14", "7", "30", "90")],
+    "sessions": [{"days": d, "sort": "usd", "limit": "300"} for d in ("14", "1", "7", "30", "0")],
+    "checks": [{"days": d} for d in ("14", "7", "30")],
+    "limits": [{"days": d} for d in ("14", "7", "30", "90")],
+}
+WARM_IDLE = 1800.0  # seconds without a page request after which the warmer rests
+WARM_REST = 1.0  # after each reply, rest this many times as long as it took
+
+
+class Warmer:
+    """One low-priority thread that fills the cache with the pages' usual views
+    after startup and whenever the index's generation (or the date) changes: the
+    views of the page last asked for first, then every page's default view, then
+    the other range tabs. Its jobs run as background jobs (`capcom.report.jobs`),
+    so a page's request never waits for it; a new generation stops its job and
+    starts the round over. It rests between replies (`rest`) and stops warming
+    when no page asked for anything in `idle` seconds."""
+
+    def __init__(
+        self,
+        site: Site,
+        views: dict[str, list[dict[str, str]]] | None = None,
+        rest: float = WARM_REST,
+        idle: float = WARM_IDLE,
+        tick: float = 2.0,
+    ) -> None:
+        self.site = site
+        self.views = WARM_VIEWS if views is None else views
+        self.rest = rest
+        self.idle = idle
+        self.tick = tick
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, name="capcom-warm", daemon=True)
+        self._focus: tuple[str, dict[str, str]] | None = None
+        self._seen = time.monotonic()
+        self._warm: tuple[Any, ...] | None = None  # the (generation, date) last warmed
+        self.computed = 0  # replies the warmer computed
+
+    def saw(self, name: str, query: dict[str, str]) -> None:
+        """A page asked for `name`: its views come first in the next round."""
+        self._seen = time.monotonic()
+        if name in self.views:
+            self._focus = (name, dict(query))
+
+    def order(self) -> list[tuple[str, dict[str, str]]]:
+        first: list[tuple[str, dict[str, str]]] = []
+        if self._focus is not None:
+            name, query = self._focus
+            first = [(name, query), *((name, v) for v in self.views[name])]
+        defaults = [(n, vs[0]) for n, vs in self.views.items() if vs]
+        rest = [(n, v) for n, vs in self.views.items() for v in vs]
+        out: list[tuple[str, dict[str, str]]] = []
+        seen: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
+        for name, query in [*first, *defaults, *rest]:
+            tag = (name, tuple(sorted(query.items())))
+            if tag not in seen:
+                seen.add(tag)
+                out.append((name, query))
+        return out
+
+    def warm_round(self) -> bool:
+        """Compute the views not cached yet; True when the round got through."""
+        site = self.site
+        if site.cache is None or site.jobs is None:
+            return True
+        now = site.clock()
+        mark = cache_key(site, "overview", ["overview"], {}, now)[:2]
+        if mark == self._warm or time.monotonic() - self._seen > self.idle:
+            return True
+        for name, query in self.order():
+            if self._stop.is_set():
+                return False
+            now = site.clock()
+            key = cache_key(site, name, [name], query, now)
+            if key[:2] != mark:
+                return False  # the index changed: start over
+            if site.cache.get(key, now.timestamp()) is not None:
+                continue
+            site.jobs.set_gen(key[0])
+            work = _work(site, name, [name], query, now, key)
+            t0 = time.monotonic()
+            job = site.jobs.submit(key, key[0], work, (name, key[4]), background=True)
+            job.done.wait()
+            if job.cancelled is not None:
+                return False
+            self.computed += 1
+            if self._stop.wait(min(30.0, (time.monotonic() - t0) * self.rest)):
+                return False
+        self._warm = mark
+        return True
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.warm_round()
+            except Exception:
+                print("capcom serve: warming the cache failed:", file=sys.stderr)
+                traceback.print_exc()
+            self._stop.wait(self.tick)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self, timeout: float | None = None) -> None:
         self._stop.set()
         if self._thread.is_alive():
             self._thread.join(timeout)
@@ -441,60 +589,138 @@ class Handler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, "not_found", "no such endpoint")
             return
         site = self.site
-        key: tuple[Any, ...] | None = None
+        job_id = query.pop("job", None)
         now = site.clock()
-        if site.cache is not None and name not in UNCACHED:
-            gen = generation(site.index_path, site.cache.watch(site.index_path))
-            gen += _limits_stamp(site.state_dir)  # the recorder writes without a scan
-            today = now.astimezone(site.tz).date().isoformat()  # the windows start at midnight
-            args = tuple((k, query[k]) for k in PARAMS.get(name, ()) if k in query)
-            key = (gen, today, name, tuple(parts[1:]), args)
-            hit = site.cache.get(key, now.timestamp())
-            if hit is not None:
-                self._send(HTTPStatus.OK, hit, TYPES[".json"])
-                return
-        try:
-            index = _open(self.site)
-        except IndexMissing as err:
-            scanning = self.site.scanner is not None and self.site.scanner.running
-            action = SCANNING if scanning else "Run `capcom scan` first."
-            self._error(
-                HTTPStatus.SERVICE_UNAVAILABLE, "no_index", f"{err} {action}", scanning=scanning
-            )
+        if site.cache is None or name in UNCACHED:
+            result = compute(site, name, parts, query, now)
+            self._send(result.status, result.body, _ctype(result))
             return
-        try:
-            ctx = api.Context(
-                index=index,
-                table=self.site.table,
-                analysis=self.site.analysis,
-                now=now,
-                tz=self.site.tz,
-                index_path=self.site.index_path,
-                openclaw_root=self.site.openclaw_root,
-                state_dir=self.site.state_dir,
-                scanning=self.site.scanner is not None and self.site.scanner.first_scan,
+        key = cache_key(site, name, parts, query, now)
+        if site.warmer is not None:
+            site.warmer.saw(name, query)
+        hit = site.cache.get(key, now.timestamp())
+        if hit is not None:
+            self._send(HTTPStatus.OK, hit, TYPES[".json"])
+            return
+        jobs = site.jobs
+        if jobs is None:
+            result = compute(site, name, parts, query, now, key)
+            self._send(result.status, result.body, _ctype(result))
+            return
+        jobs.set_gen(key[0])
+        job = jobs.by_id(job_id) if job_id else None
+        if job is None or job.key != key or (job.cancelled and job.result is None):
+            job = jobs.find(key)
+        if job is None:
+            job = jobs.submit(
+                key, key[0], _work(site, name, parts, query, now, key), (name, key[4])
             )
-            payload = ENDPOINTS[name](ctx, parts[1] if len(parts) == 2 else "", query)
-            body = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode()
-            if key is not None and site.cache is not None and not ctx.scanning:
-                site.cache.put(key, now.timestamp(), body)
-            self._send(HTTPStatus.OK, body, TYPES[".json"])
-        except api.ApiError as err:
-            self._error(err.status, err.code, err.message)
-        except Unavailable as err:
+        else:
+            job.poll()
+        if not job_id:
+            job.done.wait(site.patience)
+        if job.result is not None:
+            self._send(job.result.status, job.result.body, _ctype(job.result))
+        elif job.timed_out() or job.cancelled == "timeout":
+            job.cancelled = "timeout"
             self._error(
-                HTTPStatus.NOT_IMPLEMENTED,
-                "unavailable",
-                f"Coming in milestone {err.milestone}.",
-                module=err.module,
-                milestone=err.milestone,
+                HTTPStatus.GATEWAY_TIMEOUT, "timeout", "This reply took too long to compute."
             )
-        except sqlite3.Error:
-            self._error(
-                HTTPStatus.SERVICE_UNAVAILABLE, "index_busy", "The index could not be read."
-            )
-        finally:
-            index.close()
+        else:
+            partial, source = job.partial, "chunks"
+            if partial is None:
+                partial, source = site.cache.stale(key), "stale"
+            body = computing_body(job, partial, source if partial is not None else None)
+            self._send(HTTPStatus.ACCEPTED, body, TYPES[".json"])
+
+
+def _ctype(result: Result) -> str:
+    return TYPES[".json"] if result.body[:1] in (b"{", b"[") else "text/plain"
+
+
+def cache_key(
+    site: Site, name: str, parts: list[str], query: dict[str, str], now: datetime
+) -> tuple[Any, ...]:
+    """The cache's and the jobs' key of a request: the index generation, the local
+    date, the endpoint, its path argument and the query parameters it reads."""
+    assert site.cache is not None
+    gen = generation(site.index_path, site.cache.watch(site.index_path))
+    gen += _limits_stamp(site.state_dir)  # the recorder writes without a scan
+    today = now.astimezone(site.tz).date().isoformat()  # the windows start at midnight
+    args = tuple((k, query[k]) for k in PARAMS.get(name, ()) if k in query)
+    return (gen, today, name, tuple(parts[1:]), args)
+
+
+def _work(
+    site: Site,
+    name: str,
+    parts: list[str],
+    query: dict[str, str],
+    now: datetime,
+    key: tuple[Any, ...],
+) -> Callable[[Job], Result]:
+    return lambda job: compute(site, name, parts, query, now, key, job.step)
+
+
+def _encode(payload: Any) -> bytes:
+    return json.dumps(payload, separators=(",", ":"), allow_nan=False).encode()
+
+
+def _err(status: int, code: str, message: str, **extra: Any) -> Result:
+    return Result(status, _encode({"error": code, "message": message} | extra), cacheable=False)
+
+
+def compute(
+    site: Site,
+    name: str,
+    parts: list[str],
+    query: dict[str, str],
+    now: datetime,
+    key: tuple[Any, ...] | None = None,
+    step: Callable[[float, Callable[[], Any] | None], None] | None = None,
+) -> Result:
+    """One API reply, computed now (in the request's thread or in a job's), and
+    cached under `key` when it can be."""
+    try:
+        index = _open(site)
+    except IndexMissing as err:
+        scanning = site.scanner is not None and site.scanner.running
+        action = SCANNING if scanning else "Run `capcom scan` first."
+        return _err(
+            HTTPStatus.SERVICE_UNAVAILABLE, "no_index", f"{err} {action}", scanning=scanning
+        )
+    try:
+        ctx = api.Context(
+            index=index,
+            table=site.table,
+            analysis=site.analysis,
+            now=now,
+            tz=site.tz,
+            index_path=site.index_path,
+            openclaw_root=site.openclaw_root,
+            state_dir=site.state_dir,
+            scanning=site.scanner is not None and site.scanner.first_scan,
+            step=step,
+        )
+        payload = ENDPOINTS[name](ctx, parts[1] if len(parts) == 2 else "", query)
+        body = _encode(payload)
+        if key is not None and site.cache is not None and not ctx.scanning:
+            site.cache.put(key, now.timestamp(), body)
+        return Result(HTTPStatus.OK, body, cacheable=not ctx.scanning)
+    except api.ApiError as err:
+        return _err(err.status, err.code, err.message)
+    except Unavailable as err:
+        return _err(
+            HTTPStatus.NOT_IMPLEMENTED,
+            "unavailable",
+            f"Coming in milestone {err.milestone}.",
+            module=err.module,
+            milestone=err.milestone,
+        )
+    except sqlite3.Error:
+        return _err(HTTPStatus.SERVICE_UNAVAILABLE, "index_busy", "The index could not be read.")
+    finally:
+        index.close()
 
 
 Endpoint = Callable[[api.Context, str, dict[str, str]], Any]
@@ -549,6 +775,8 @@ def run_serve(config: Config, port: int, open_browser: bool, scan: bool = True) 
     print(f"capcom: serving {url} (local only, {fresh}; Ctrl+C to stop)", flush=True)
     if scanner is not None:
         scanner.start()
+    site.warmer = Warmer(site)
+    site.warmer.start()
     if open_browser:
         webbrowser.open(url)
     try:
@@ -557,6 +785,7 @@ def run_serve(config: Config, port: int, open_browser: bool, scan: bool = True) 
         pass
     finally:
         server.server_close()
+        site.warmer.stop(timeout=1)
         if scanner is not None:
             scanner.stop(timeout=5)
             if scanner.running:

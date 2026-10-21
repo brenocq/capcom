@@ -13,6 +13,37 @@ numbers, such as "the last hour", move with the clock alone) and the cache holds
 most 32 MB of encoded replies, least recently used out first. `status` and `live` are
 never cached; errors are never cached.
 
+### Progressive replies
+
+A reply that is not cached is computed as a job, off the request's thread, keyed like
+the cache (two requests for the same view share one job). When the job is done within
+0.3 s the request gets the normal `200`. Otherwise it gets `202 Accepted`:
+
+```
+{"status": "computing", "job": id, "progress": 0..1,
+ "source": "chunks" | "stale" | null, "partial": <reply so far> | null}
+```
+
+`partial` has the same shape as the final reply, so a page can draw either. With
+`source: "chunks"` it is this job's reply so far (`spikes`: the whole window's spikes,
+count, excess and projects, with the causes and listed spikes of the sessions explained
+so far, the sessions of the largest spikes first); with `"stale"` it is the last reply
+of the same view from before the index changed (or from an earlier day). The client
+polls the same URL with `&job=<id>` (about every 400 ms) and gets `202` with newer
+progress and partial replies, then the final `200` (or the endpoint's error). `progress`
+never goes back; between the job's own steps it is estimated from how long the same view
+took last time. A `job` the server no longer knows is ignored: the request is answered
+as if it were the first. A job is dropped when the index's generation changes (the next
+poll starts a new one), stops after 120 s (the poll gets `504 {"error": "timeout"}`),
+and runs at low priority once no page polled it for 2.5 s. `status` and `live` are
+always answered at once.
+
+At most 3 jobs compute at once. A warmer thread computes each page's usual views
+(the default view of every page, then their range tabs, the page last asked for
+first) after startup and whenever the index changes, at low priority: its jobs pause
+while a page's job runs, it rests as long as each reply took, and it stops after
+30 minutes without a page request.
+
 The server keeps the index fresh itself: an incremental scan (`run_scan`, quiet) at
 start and then a minute after each scan ends, in one background thread; a lock keeps
 two scans from overlapping, and `--no-scan` turns it off. The handlers never write.
@@ -53,6 +84,7 @@ Errors are JSON: `{"error": code, "message": text, ...}`.
 | 501 | `unavailable` | The analysis module behind it is not built yet; adds `module` and `milestone`. |
 | 503 | `no_index` | No index, or one written by another capcom version: run `capcom scan`. Adds `scanning`: true when serve's scan is running (the message then says the logs are being read). |
 | 503 | `index_busy` | SQLite could not read the index. |
+| 504 | `timeout` | A job ran past its time limit (see Progressive replies). |
 
 Anything else is a plain-text `500 internal error` that says nothing more; the
 traceback goes to the terminal only. A static name that cannot be a file (a NUL byte,
