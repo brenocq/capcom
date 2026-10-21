@@ -66,6 +66,7 @@ def test_connectors_never_called_give_the_env_change_and_a_hand_checked_saving()
     assert f"{CWD}/.claude/settings.json" in f.advice
     assert f.metrics["sessions_using"] == 0
     assert f.metrics["tokens_per_request"] == 1012
+    assert f.metrics["requests"] == 200  # three items, each request counted once
 
 
 def test_connectors_called_in_the_session_are_not_flagged() -> None:

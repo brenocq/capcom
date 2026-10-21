@@ -77,16 +77,24 @@ def _group(project: str) -> str:
 
 @dataclass(slots=True)
 class _Sum:
+    """Accounts of several items or threads added up. A request that carried several
+    of the items counts once: `requests` sums, per thread, the largest count."""
+
     usd: float = 0.0
-    requests: int = 0
     size: int = 0
     sessions: set[str] = field(default_factory=set)
+    per_thread: dict[tuple[str, str | None], int] = field(default_factory=dict)
 
-    def add(self, sid: str, acc: Account) -> None:
+    def add(self, sid: str, aid: str | None, acc: Account) -> None:
         self.usd += acc.usd
-        self.requests += acc.requests
         self.size = max(self.size, acc.size)
         self.sessions.add(sid)
+        key = (sid, aid)
+        self.per_thread[key] = max(self.per_thread.get(key, 0), acc.requests)
+
+    @property
+    def requests(self) -> int:
+        return sum(self.per_thread.values())
 
 
 def _accounts(
@@ -161,9 +169,9 @@ def claudeai_connectors_unused(facts: Facts) -> list[Finding]:
     prompt price."""
     listed: dict[str, dict[str, _Sum]] = defaultdict(dict)  # project -> session -> sum
     servers: dict[str, set[str]] = defaultdict(set)
-    for sid, _aid, key, acc in _accounts(facts, _is_connector):
+    for sid, aid, key, acc in _accounts(facts, _is_connector):
         project = _group(facts.project_of(sid))
-        listed[project].setdefault(sid, _Sum()).add(sid, acc)
+        listed[project].setdefault(sid, _Sum()).add(sid, aid, acc)
         servers[project].add(_server(key) or "?")
     out: list[Finding] = []
     for project, sessions in listed.items():
@@ -177,7 +185,7 @@ def claudeai_connectors_unused(facts: Facts) -> list[Finding]:
             continue
         usd = sum(s.usd for s in unused.values())
         reqs = sum(s.requests for s in unused.values())
-        tokens = _connector_tokens(facts, set(unused))
+        tokens = _connector_tokens(facts, unused)
         names = sorted(n.removeprefix("claude_ai_").replace("_", " ") for n in servers[project])
         top = sorted(unused.items(), key=lambda kv: -kv[1].usd)[:EVIDENCE_PER_FINDING]
         summary = (
@@ -221,13 +229,15 @@ def claudeai_connectors_unused(facts: Facts) -> list[Finding]:
     return out
 
 
-def _connector_tokens(facts: Facts, sessions: set[str]) -> int:
-    """The largest per-thread total size of connector items in `sessions`."""
-    per_thread: dict[tuple[str, str | None], int] = defaultdict(int)
-    for sid, aid, _key, acc in _accounts(facts, _is_connector):
-        if sid in sessions:
-            per_thread[(sid, aid)] += acc.size
-    return max(per_thread.values(), default=0)
+def _connector_tokens(facts: Facts, sessions: Mapping[str, _Sum]) -> int:
+    """Connector tokens per request in `sessions`, averaged over their requests."""
+    token_requests = sum(
+        acc.size * acc.requests
+        for sid, _aid, _key, acc in _accounts(facts, _is_connector)
+        if sid in sessions
+    )
+    reqs = sum(s.requests for s in sessions.values())
+    return round(token_requests / reqs) if reqs else 0
 
 
 # --------------------------------------------------------------------------- MCP servers
@@ -241,14 +251,14 @@ def tools_unused(facts: Facts) -> list[Finding]:
     cannot drop them."""
     loaded: dict[str, set[str]] = defaultdict(set)
     per_server: dict[str, dict[str, _Sum]] = defaultdict(dict)
-    for sid, _aid, key, acc in _accounts(facts, lambda k: k[0] in ("tool", "mcp")):
+    for sid, aid, key, acc in _accounts(facts, lambda k: k[0] in ("tool", "mcp")):
         project = _group(facts.project_of(sid))
         if key[0] == "tool":
             loaded[project].add(key[2])
         server = _server(key)
         if server is None or server.startswith("claude_ai_"):
             continue
-        per_server[project].setdefault(server, _Sum()).add(sid, acc)
+        per_server[project].setdefault(server, _Sum()).add(sid, aid, acc)
     called: dict[str, set[str]] = defaultdict(set)
     for sid, session_calls in facts.calls_by_session.items():
         called[_group(facts.project_of(sid))].update(session_calls)
@@ -314,8 +324,8 @@ def skills_unused(facts: Facts) -> list[Finding]:
     the Skill tool nor by a slash command). Saving: each unused skill's share of the
     listing x the requests that carried it x each request's prompt price."""
     listed: dict[str, dict[str, _Sum]] = defaultdict(dict)
-    for sid, _aid, key, acc in _accounts(facts, lambda k: k[0] == "skill"):
-        listed[_group(facts.project_of(sid))].setdefault(key[1], _Sum()).add(sid, acc)
+    for sid, aid, key, acc in _accounts(facts, lambda k: k[0] == "skill"):
+        listed[_group(facts.project_of(sid))].setdefault(key[1], _Sum()).add(sid, aid, acc)
     invoked: dict[str, set[str]] = defaultdict(set)
     for sid, session_skills in facts.skills_by_session.items():
         invoked[_group(facts.project_of(sid))].update(session_skills)
@@ -391,7 +401,7 @@ def agent_tools_unused(facts: Facts, definitions: Mapping[str, AgentDefinition])
         sized: dict[str, _Sum] = {}
         for sid, aid, key, acc in _accounts(facts, lambda k: k[0] == "tool"):
             if (sid, aid) in keys:
-                sized.setdefault(key[2], _Sum()).add(sid, acc)
+                sized.setdefault(key[2], _Sum()).add(sid, aid, acc)
         definition = definitions.get(kind)
         given = set(definition.tools) if definition and definition.tools else set(sized)
         unused = sorted(given - called)
@@ -544,8 +554,13 @@ def large_memory(facts: Facts) -> list[Finding]:
     imports, nested memory) above MEMORY_BUDGET_TOKENS per file. Saving: the part
     above the budget x the requests that carried it x each request's prompt price."""
     per_project: dict[str, dict[str, _Sum]] = defaultdict(dict)
-    for sid, _aid, key, acc in _accounts(facts, lambda k: k[0] == "memory"):
-        per_project[_group(facts.project_of(sid))].setdefault(key[2], _Sum()).add(sid, acc)
+    carried: dict[str, _Sum] = defaultdict(_Sum)  # every memory item, per project
+    token_requests: dict[str, int] = defaultdict(int)
+    for sid, aid, key, acc in _accounts(facts, lambda k: k[0] == "memory"):
+        project = _group(facts.project_of(sid))
+        per_project[project].setdefault(key[2], _Sum()).add(sid, aid, acc)
+        carried[project].add(sid, aid, acc)
+        token_requests[project] += acc.size * acc.requests
     out: list[Finding] = []
     for project, labels in per_project.items():
         over: list[tuple[str, _Sum, int]] = []
@@ -556,7 +571,8 @@ def large_memory(facts: Facts) -> list[Finding]:
         if not over:
             continue
         usd = sum(s.usd * (s.size - b) / s.size for _, s, b in over)
-        total = sum(s.size for s in labels.values())
+        reqs = carried[project].requests
+        total = round(token_requests[project] / reqs) if reqs else 0
         paths = sorted({p for label, _, _ in over for p in label.split("|")})
         f = _finding(
             facts,
@@ -565,8 +581,8 @@ def large_memory(facts: Facts) -> list[Finding]:
             title="Large always-loaded instructions",
             scope=project,
             summary=(
-                f"About {_k(total)} tokens of instructions and memory ride in every "
-                f"request here; {len(paths)} file(s) are above the "
+                f"Instructions and memory average about {_k(total)} tokens in each of "
+                f"{_k(reqs)} requests here; {len(paths)} file(s) are above the "
                 f"{_k(MEMORY_BUDGET_TOKENS)}-token (about 150-line) budget."
             ),
             advice=(
@@ -766,18 +782,18 @@ def images_in_tool_results(facts: Facts) -> list[Finding]:
     """Images and screenshots in tool results, reread by every later turn until a
     compaction. Saving: IMAGE_SAVING_SHARE of what they cost (size x later requests x
     prompt price), for images cropped and downscaled to half the tokens."""
-    per_project: dict[str, list[tuple[str, ItemKey, Account]]] = defaultdict(list)
-    for sid, _aid, key, acc in _accounts(facts, lambda k: k[0] == "image"):
-        per_project[_group(facts.project_of(sid))].append((sid, key, acc))
+    per_project: dict[str, list[tuple[str, str | None, ItemKey, Account]]] = defaultdict(list)
+    for sid, aid, key, acc in _accounts(facts, lambda k: k[0] == "image"):
+        per_project[_group(facts.project_of(sid))].append((sid, aid, key, acc))
     out: list[Finding] = []
     for project, images in per_project.items():
         usd = sum(a.usd for *_, a in images) * IMAGE_SAVING_SHARE
         tokens = sum(a.size for *_, a in images)
         by_tool: dict[str, int] = defaultdict(int)
-        for _, key, _a in images:
+        for _sid, _aid, key, _acc in images:
             by_tool[key[2]] += 1
         tools = ", ".join(f"{t} ({n})" for t, n in sorted(by_tool.items(), key=lambda kv: -kv[1]))
-        top = sorted(images, key=lambda i: -i[2].usd)[:EVIDENCE_PER_FINDING]
+        top = sorted(images, key=lambda i: -i[3].usd)[:EVIDENCE_PER_FINDING]
         f = _finding(
             facts,
             usd,
@@ -796,9 +812,10 @@ def images_in_tool_results(facts: Facts) -> list[Finding]:
                 Evidence(
                     f"{key[2]} image of {_k(a.size)} tokens, reread by {a.requests} requests",
                     session_id=sid,
+                    agent_id=aid,
                     event_key=key[1],
                 )
-                for sid, key, a in top
+                for sid, aid, key, a in top
             ),
             metrics={"images": len(images), "tokens": tokens},
         )
