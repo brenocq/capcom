@@ -9,7 +9,7 @@
 <br>
 
 <p align="center">
-  <img alt="capcom's website in a browser window: the overview with the sessions running now; two weeks of spend grouped by project, then by model, with a tooltip; the Spikes page, opening a burst of 14 subagents to its cause and cost; and the Checks page, copying the settings change for two unused MCP servers" src="https://github.com/brenocq/capcom/raw/assets/demo.webp" width="992">
+  <img alt="capcom's website in a browser window: two weeks of spend grouped by project, with a tooltip on the chart, then by model; the Spikes page, opening a burst of 14 subagents to its cause and cost; and the Checks page, copying the settings change for two unused MCP servers" src="https://github.com/brenocq/capcom/raw/assets/demo.webp" width="992">
 </p>
 
 capcom reads the logs Claude Code keeps on your machine and shows where your
