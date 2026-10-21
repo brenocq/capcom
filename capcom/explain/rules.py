@@ -1137,28 +1137,35 @@ def context_growth(view: SpikeView) -> list[Candidate]:
 # --------------------------------------------------------------------------- rule 7: fan-out
 
 
-def burst(spawns: list[tuple[Thread, Event]]) -> list[tuple[Thread, Event]]:
-    """The spawns (in time order) that fall in a window of FAN_OUT_BURST holding at
-    least FAN_OUT_MIN of them."""
+def _bursts(times: Sequence[datetime]) -> list[int]:
+    """The positions of `times` (in order) that fall in a window of FAN_OUT_BURST
+    holding at least FAN_OUT_MIN of them."""
     keep: set[int] = set()
     j = 0
-    for i, (_, e) in enumerate(spawns):
-        while e.timestamp - spawns[j][1].timestamp > FAN_OUT_BURST:
+    for i, t in enumerate(times):
+        while t - times[j] > FAN_OUT_BURST:
             j += 1
         if i - j + 1 >= FAN_OUT_MIN:
             keep.update(range(j, i + 1))
-    return [spawns[k] for k in sorted(keep)]
+    return sorted(keep)
 
 
-def _spawned(sess: SessionData, spawns: list[tuple[Thread, Event]]) -> set[str]:
-    """The agents of `spawns`: by the spawn's tool_use_id, else the first agent with
-    no known spawn whose first request follows the spawn within FAN_OUT_START."""
-    agents: set[str] = set()
+def burst(spawns: list[tuple[Thread, Event]]) -> list[tuple[Thread, Event]]:
+    """The spawns (in time order) that fall in a window of FAN_OUT_BURST holding at
+    least FAN_OUT_MIN of them."""
+    return [spawns[k] for k in _bursts([e.timestamp for _, e in spawns])]
+
+
+def _spawned(sess: SessionData, spawns: list[tuple[Thread, Event]]) -> dict[str, Event]:
+    """The agents of `spawns`, each with its spawn: by the spawn's tool_use_id, else
+    the first agent with no known spawn whose first request follows the spawn within
+    FAN_OUT_START."""
+    agents: dict[str, Event] = {}
     unmapped: list[Event] = []
     for _, e in spawns:
         tid = e.attrs.get("tool_use_id")
         if isinstance(tid, str) and tid in sess.agent_by_tool_use:
-            agents.add(sess.agent_by_tool_use[tid])
+            agents[sess.agent_by_tool_use[tid]] = e
         else:
             unmapped.append(e)
     for e in unmapped:
@@ -1172,11 +1179,13 @@ def _spawned(sess: SessionData, spawns: list[tuple[Thread, Event]]) -> set[str]:
             and e.timestamp <= th.requests[0].timestamp <= e.timestamp + FAN_OUT_START
         )
         if starts:
-            agents.add(starts[0][1])
+            agents[starts[0][1]] = e
     return agents
 
 
 def fan_out(view: SpikeView) -> list[Candidate]:
+    if view.spike.scope == "session":
+        return session_fan_out(view)
     out = []
     sessions = {m.session.session_id: m.session for m in view.members}
     lo = view.spike.start - FAN_OUT_LOOKBACK
@@ -1252,6 +1261,139 @@ def fan_out(view: SpikeView) -> list[Candidate]:
                 f"{len(members)} subagent{'s' if len(members) != 1 else ''} active in the "
                 f"spike. Each wrote its own prefix to a cache, and "
                 f"{'their' if not own else 'its first'} requests here cost {fmt.usd(excess)}.",
+            )
+        )
+    return out
+
+
+# A session spike sums every thread of its session, so a fan-out shows there as new
+# threads: subagents whose first request falls in the span, whether an Agent call
+# started them or not (a workflow's agents have no Agent call, hence no SPAWN).
+WORKFLOW_AGENT_TYPE = "workflow-subagent"  # the meta.json agentType of a workflow's agents
+_ORIGIN_LABELS = {
+    "agent": "from Agent calls",
+    "workflow": "from a workflow, without an Agent call",
+    "none": "without an Agent call",
+}
+
+
+def _new_threads(sess: SessionData, spike: Spike) -> list[tuple[datetime, str]]:
+    """(first request time, agent id) of the agent threads that start in the spike and
+    fall in a burst of FAN_OUT_MIN within FAN_OUT_BURST, in time order."""
+    starts = sorted(
+        (th.requests[0].timestamp, aid)
+        for aid, th in sess.threads.items()
+        if aid is not None and th.requests and spike.start <= th.requests[0].timestamp < spike.end
+    )
+    return [starts[k] for k in _bursts([t for t, _ in starts])]
+
+
+def _spawns_of(sess: SessionData, lo: datetime, hi: datetime) -> dict[str, Event]:
+    """The SPAWN events of the session in (lo, hi], by the agent they started."""
+    found = sorted(
+        (
+            (th, e)
+            for th in sess.threads.values()
+            for e in th.events_between(lo, hi, (EventKind.SPAWN,))
+        ),
+        key=lambda x: x[1].timestamp,
+    )
+    return _spawned(sess, found)
+
+
+def _origin(sess: SessionData, agent: str, spawns: dict[str, Event]) -> str:
+    """How an agent started: "agent" (an Agent call names it, in its meta or by a
+    SPAWN), "workflow" (a workflow's agent), "none" (no call found)."""
+    info = sess.agents.get(agent)
+    if info is not None and info.tool_use_id:
+        return "agent"
+    if info is not None and info.agent_type == WORKFLOW_AGENT_TYPE:
+        return "workflow"
+    return "agent" if agent in spawns else "none"
+
+
+def session_fan_out(view: SpikeView) -> list[Candidate]:
+    """Fan-out on a session spike: FAN_OUT_MIN or more new threads within FAN_OUT_BURST.
+    It claims what the rules before it left of those threads' requests in the span."""
+    out = []
+    spike = view.spike
+    sessions = {m.session.session_id: m.session for m in view.members}
+    for sess in sessions.values():
+        new = _new_threads(sess, spike)
+        if not new:
+            continue
+        agents = [a for _, a in new]
+        wanted = set(agents)
+        members = [m for m in view.members if m.session is sess and m.thread.agent_id in wanted]
+        excess = sum(
+            view.ledger.take(r, view.ledger.left(r), CauseKind.FAN_OUT)
+            for m in members
+            for r in m.requests
+        )
+        if excess <= 0 or not members:
+            continue
+        t_first, t_last = new[0][0], new[-1][0]
+        lo = t_first - FAN_OUT_LOOKBACK
+        spawns = _spawns_of(sess, lo, view.window_end)
+        types = Counter(
+            sess.agent_type(a) or _str(spawns[a].attrs.get("agent_type")) or "unknown type"
+            if a in spawns
+            else sess.agent_type(a) or "unknown type"
+            for a in agents
+        )
+        origins = Counter(_origin(sess, a, spawns) for a in agents)
+        n = len(agents)
+        span = t_last - t_first
+        when = "in under a minute" if span < timedelta(minutes=1) else f"in {fmt.duration(span)}"
+        m0 = members[0]
+        first0 = m0.thread.requests[0]
+        firsts = [sess.threads[a].requests[0].usage.cache_write for a in agents]
+        small = sum(
+            1 for a in agents if sum(len(r.tool_calls) for r in sess.threads[a].requests) <= 2
+        )
+        mix = ", ".join(f"{k} \u00d7{v}" for k, v in types.most_common(4))
+        how = "; ".join(
+            f"{v} {_ORIGIN_LABELS[k]}" for k, v in sorted(origins.items(), key=lambda kv: -kv[1])
+        )
+        a, b = fmt.hm(t_first), fmt.hm(t_last)
+        between = f"at {a}" if a == b else f"between {a} and {b}"
+        evidence = [
+            _ev(f"{n} new subagents {when}: {mix}", m0, r=first0),
+            _ev(
+                f"Started {between}: {how}",
+                m0,
+                r=first0,
+            ),
+            _ev(
+                f"Each first request wrote about {fmt.approx(statistics.median(firsts))} tokens",
+                m0,
+            ),
+            _ev(f"{small} of them made two tool calls or fewer", m0),
+        ]
+        conf = Confidence.CLEAR if excess >= 0.5 * view.cost else Confidence.LIKELY
+        if origins.most_common(1)[0][0] == "workflow":
+            advice = (
+                "A workflow starts its agents in parallel without an Agent call: check how "
+                "many it runs at once, and give its agents a narrower tool list so each "
+                "prefix is smaller."
+            )
+        else:
+            advice = (
+                "Do one-command lookups in the parent and batch related questions into one "
+                "agent. Give scouts a narrower tool list so their prefix is smaller."
+            )
+        kinds = ", ".join(f"{v} {k}" for k, v in types.most_common(3))
+        out.append(
+            Candidate(
+                CauseKind.FAN_OUT,
+                conf,
+                excess,
+                f"{n} new subagents {when}",
+                _cap(evidence),
+                advice,
+                f"{n} subagents ({kinds}) started {when} from {fmt.hm(t_first)}, {how}. "
+                f"Each wrote its own prefix to a cache, and their requests in the spike "
+                f"cost {fmt.usd(excess)}.",
             )
         )
     return out
