@@ -6,8 +6,9 @@ The index outlives the logs: a file Claude Code deleted keeps its rows.
 
 Tables (schema version in `schema_version`):
 
-- files: path -> inode, size, mtime_ns, pos (the FileState of each log), and what
-  the scan checks besides: a hash of the file's head, the meta.json's mtime
+- files: path -> inode, size, mtime_ns, pos (the FileState of each log; for OpenClaw's
+  database, pos is the last rowid read), and what the scan checks besides: a hash of
+  the file's head, the meta.json's mtime
 - requests: one row per message_id (the latest record wins, but tool calls are the
   union of every record's by tool_use_id, and an estimated output never shrinks),
   tool calls as JSON
@@ -25,9 +26,11 @@ Tables (schema version in `schema_version`):
   row of another session, and kept as history (forget_file leaves it)
 
 Version 2 lacked cost_states.ts, version 3 cost_states.next_ts and shared_replies,
-and version 4 filled next_ts from the earliest time of the next batch: a writable open
-migrates them in place (the index keeps history the logs may have lost) and queues the
-files with cost-states, and every file of their sessions, for a reread.
+version 4 filled next_ts from the earliest time of the next batch, and version 5 lacked
+requests.reported_cost (OpenClaw's own cost estimate): a writable open
+migrates them in place (the index keeps history the logs may have lost); up to version
+5 it queues the files with cost-states, and every file of their sessions, for a reread
+(5 -> 6 only adds the column).
 
 Times are stored as integer microseconds since the Unix epoch, UTC.
 """
@@ -62,7 +65,7 @@ from capcom.types import (
     Usage,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _US = timedelta(microseconds=1)
@@ -136,7 +139,8 @@ CREATE TABLE IF NOT EXISTS requests (
     stop_reason TEXT,
     is_api_error INTEGER NOT NULL,
     output_estimated INTEGER NOT NULL,
-    tool_calls TEXT
+    tool_calls TEXT,
+    reported_cost REAL
 );
 CREATE INDEX IF NOT EXISTS requests_ts ON requests (ts);
 CREATE INDEX IF NOT EXISTS requests_session_ts ON requests (session_id, ts);
@@ -191,10 +195,10 @@ _REQUEST_COLS = (
     "message_id, file, session_id, agent_id, project_dir, ts, model, input, cache_read, "
     "cache_write_5m, cache_write_1h, output, thinking, web_searches, web_fetches, "
     "request_id, cwd, version, effort, speed, service_tier, inference_geo, stop_reason, "
-    "is_api_error, output_estimated, tool_calls"
+    "is_api_error, output_estimated, tool_calls, reported_cost"
 )
 _INSERT_REQUEST = (
-    f"INSERT OR REPLACE INTO requests ({_REQUEST_COLS}) VALUES ({', '.join('?' * 26)})"
+    f"INSERT OR REPLACE INTO requests ({_REQUEST_COLS}) VALUES ({', '.join('?' * 27)})"
 )
 _SELECT_REQUEST = f"SELECT {_REQUEST_COLS.replace('file, ', '')} FROM requests"
 
@@ -442,7 +446,7 @@ class SqliteIndex:
     def apply(self, log: LogFile, batch: Batch, state: FileState) -> None:
         """Store a batch and the file's new state in one transaction."""
         file = str(log.path)
-        reqs: dict[str, tuple[list[Any], list[list[Any]]]] = {}
+        reqs: dict[str, tuple[list[Any], list[list[Any]], float | None]] = {}
         evs: list[tuple[Any, ...]] = []
         sess: list[SessionInfo] = []
         agents: list[AgentInfo] = []
@@ -483,7 +487,7 @@ class SqliteIndex:
                     tools = _union(prev[1], tools)
                     if r.output_estimated:
                         row[_OUTPUT] = max(row[_OUTPUT], prev[0][_OUTPUT])
-                reqs[r.message_id] = (row, tools)
+                reqs[r.message_id] = (row, tools, r.reported_cost_usd)
             elif isinstance(r, Event):
                 attrs = _dumps(dict(r.attrs)) if r.attrs else None
                 evs.append(
@@ -550,7 +554,7 @@ class SqliteIndex:
 
     @staticmethod
     def _write_requests(
-        cur: sqlite3.Cursor, reqs: dict[str, tuple[list[Any], list[list[Any]]]]
+        cur: sqlite3.Cursor, reqs: dict[str, tuple[list[Any], list[list[Any]], float | None]]
     ) -> None:
         # Records of one reply can arrive in different scans, a later one with fewer
         # tool calls or (when estimated) a smaller output than before: keep the union of
@@ -568,7 +572,7 @@ class SqliteIndex:
                 old[mid] = (output, json.loads(tools) if tools else [], session)
         rows = []
         shared: list[tuple[str, str]] = []
-        for mid, (row, tools) in reqs.items():
+        for mid, (row, tools, reported) in reqs.items():
             prev = old.get(mid)
             if prev is not None:
                 tools = _union(prev[1], tools)
@@ -576,7 +580,7 @@ class SqliteIndex:
                     row[_OUTPUT] = max(row[_OUTPUT], prev[0])
                 if prev[2] != row[_SESSION]:
                     shared += [(prev[2], mid), (row[_SESSION], mid)]
-            rows.append((*row, _dumps(tools) if tools else None))
+            rows.append((*row, _dumps(tools) if tools else None, reported))
         cur.executemany(_INSERT_REQUEST, rows)
         if shared:
             cur.executemany(
@@ -629,6 +633,7 @@ class SqliteIndex:
                 is_api_error=bool(row[22]),
                 output_estimated=bool(row[23]),
                 tool_calls=tools,
+                reported_cost_usd=row[25],
             )
 
     def events(
@@ -806,6 +811,24 @@ def _migrate_4_to_5(con: sqlite3.Connection) -> None:
     con.execute("COMMIT")
 
 
+def _migrate_5_to_6(con: sqlite3.Connection) -> None:
+    """Add requests.reported_cost (the cost a source reported itself, OpenClaw's
+    estimate for its direct calls). No reread: Claude Code's rows have none, and the
+    OpenClaw database was not read before this version. One transaction."""
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        if con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 5:
+            cols = {r[1] for r in con.execute("PRAGMA table_info(requests)")}
+            if "reported_cost" not in cols:
+                con.execute("ALTER TABLE requests ADD COLUMN reported_cost REAL")
+            con.execute("DELETE FROM schema_version")
+            con.execute("INSERT INTO schema_version (version) VALUES (6)")
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
+    con.execute("COMMIT")
+
+
 def open_index(path: Path, readonly: bool = False) -> SqliteIndex:
     """Open the index at `path` (normally `config.index_path`).
 
@@ -839,6 +862,8 @@ def open_index(path: Path, readonly: bool = False) -> SqliteIndex:
                     _migrate_3_to_4(con)
                 if con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 4:
                     _migrate_4_to_5(con)
+                if con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 5:
+                    _migrate_5_to_6(con)
         row = con.execute("SELECT MAX(version) FROM schema_version").fetchone()
         version = row[0] if row else None
         if version != SCHEMA_VERSION:
