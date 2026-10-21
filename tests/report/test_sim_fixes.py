@@ -311,7 +311,7 @@ def test_spikes_times_causes_and_largest(spikes_index: Path) -> None:
 
 @pytest.fixture(scope="module")
 def resumed(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A session run in two processes; the last cost-state counts the second only."""
+    """A session run in two processes, each with its own cost-state from zero."""
     path = tmp_path_factory.mktemp("resumed") / "index.sqlite"
     ix = open_index(path)
     first = [req("rs", NOW - timedelta(days=2, hours=h), GAMMA, output=50_000) for h in (3, 2)]
@@ -327,15 +327,16 @@ def resumed(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return path
 
 
-def test_session_page_explains_a_resumed_session(resumed: Path) -> None:
+def test_session_page_compares_every_process_of_a_resumed_session(resumed: Path) -> None:
     data = api.session(_ctx(resumed), "rs")
     cal = data["calibration"]
+    # Both processes wrote a cost-state: both are compared, as two steps.
     assert cal["part"]["process"] == 2 and cal["part"]["processes"] == 2
-    assert cal["part"]["whole_session"] is False
-    assert "process 2 of 2" in cal["part"]["text"]
+    assert cal["part"]["whole_session"] is True and cal["part"]["text"] == "whole session"
     assert cal["session_usd"] == pytest.approx(data["totals"]["usd"])
-    assert cal["capcom_usd"] < cal["session_usd"]
-    assert "process 2 of 2" in cal["note"] and "whole session" in cal["note"]
+    assert cal["capcom_usd"] == pytest.approx(cal["session_usd"])
+    assert cal["claude_code_usd"] == pytest.approx(cal["session_usd"])
+    assert cal["outside_usd"] == 0 and cal["note"] is None
 
 
 def test_whole_session_has_no_note(plain: Path) -> None:
@@ -351,8 +352,8 @@ def test_calibrate_cli_rows_and_filters(resumed: Path, plain: Path) -> None:
     head = text.splitlines()[0].split()
     assert head[:3] == ["session", "project", "title"]
     row = text.splitlines()[2]
-    assert row.startswith("rs") and "gamma" in row and "process 2 of 2" in row
-    assert "1 of these were resumed" in text
+    assert row.startswith("rs") and "gamma" in row and "whole session" in row
+    assert "on the rest: $0.00 in processes with no cost-state" in text
     out = io.StringIO()
     run_calibrate(load_config(), 20, project="nope", index=ix, out=out, now=NOW, tz=UTC)
     assert "no session" in out.getvalue()
@@ -362,7 +363,7 @@ def test_calibrate_cli_rows_and_filters(resumed: Path, plain: Path) -> None:
     assert "no session" in out.getvalue()
     out = io.StringIO()
     run_calibrate(load_config(), 20, project="gamma", index=ix, out=out, now=NOW, tz=UTC)
-    assert "process 2 of 2" in out.getvalue()
+    assert "\nrs " in out.getvalue()
 
 
 def test_requests_after_the_last_cost_state(tmp_path: Path) -> None:
@@ -390,9 +391,11 @@ def test_requests_after_the_last_cost_state(tmp_path: Path) -> None:
     # the later requests are a second process that wrote no cost-state yet
     assert cal["part"]["whole_session"] is False
     assert (cal["part"]["process"], cal["part"]["processes"]) == (1, 2)
-    assert cal["part"]["text"].endswith("process 1 of 2, later requests not in it")
+    assert cal["part"]["text"].endswith("1 of 2 processes, later requests not in it")
     assert cal["note"] is not None and "later requests not in it" in cal["note"]
-    assert "process 1 of 2" in cal["note"]
+    assert "1 of 2 processes" in cal["note"]
+    assert "process that wrote no cost-state" in cal["note"]
+    assert cal["outside_usd"] == pytest.approx(usd(late))
     out = io.StringIO()
     run_calibrate(
         load_config(), 20, days=7, index=open_index(path, readonly=True), out=out, now=NOW, tz=UTC
@@ -433,8 +436,8 @@ def test_a_process_before_the_first_cost_state_counts(tmp_path: Path) -> None:
     _put(ix, _log(GAMMA, "pre"), [info, *old, *new, cs])
     ix.close()
     cal = api.session(_ctx(path), "pre")["calibration"]
-    assert (cal["part"]["process"], cal["part"]["processes"]) == (2, 2)
-    assert "process 2 of 2" in cal["note"] and "later" not in cal["note"]
+    assert (cal["part"]["process"], cal["part"]["processes"]) == (1, 2)
+    assert "1 of 2 processes" in cal["note"] and "later" not in cal["note"]
 
 
 def _scoped_findings(*args: Any) -> list[Finding]:
