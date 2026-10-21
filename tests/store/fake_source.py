@@ -107,6 +107,7 @@ def to_record(d: dict[str, Any], log: LogFile, pos: int) -> Record | None:
             models={k: ModelUsage(**v) for k, v in d.get("models", {}).items()},
             timestamp=_t(d.get("ts")),
             next_timestamp=_t(d.get("next")),
+            total_duration_ms=d.get("dur"),
         )
     return None
 

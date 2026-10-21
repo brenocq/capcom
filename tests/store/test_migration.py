@@ -1,6 +1,6 @@
-"""Schemas 2 -> 3 -> 4 -> 5: cost_states gains its times (ts, then next_ts) and the
+"""Schemas 2 -> 3 -> 4 -> 5 -> 6 -> 7: cost_states gains its times (ts, then next_ts) and the
 index its shared_replies, in place, and the files with cost-states and every file of
-their sessions are read again."""
+their sessions are read again (6 -> 7 for cost_states.total_duration_ms)."""
 
 from __future__ import annotations
 
@@ -183,7 +183,7 @@ def test_v3_index_is_migrated_in_place_and_reread(config: Config) -> None:
         assert next(ix.last_cost_states()).next_timestamp is None
     con = sqlite3.connect(config.index_path)
     assert con.execute("SELECT version FROM schema_version").fetchall() == [(SCHEMA_VERSION,)]
-    assert SCHEMA_VERSION == 6
+    assert SCHEMA_VERSION == 7
     con.close()
 
     source = FakeSource(batch_lines=2)  # the cost-state ends a batch
@@ -210,7 +210,7 @@ def test_v2_index_migrates_through_v3(config: Config) -> None:
         assert ix.shared_replies("s1") == 0
     con = sqlite3.connect(config.index_path)
     cols = [r[1] for r in con.execute("PRAGMA table_info(cost_states)")]
-    assert cols[-2:] == ["ts", "next_ts"]
+    assert cols[-3:] == ["ts", "next_ts", "total_duration_ms"]
     assert con.execute("SELECT version FROM schema_version").fetchall() == [(SCHEMA_VERSION,)]
     con.close()
 
@@ -261,3 +261,45 @@ def test_v4_index_rereads_every_file_of_sessions_with_cost_states(config: Config
         assert (cs.timestamp, cs.next_timestamp) == (at(1), at(3))  # filled again
         # The subagent log took m5's row back from the fork: s3 now lacks it.
         assert (ix.shared_replies("s1"), ix.shared_replies("s3")) == (0, 1)
+
+
+def test_v6_index_gains_total_duration_and_rereads(config: Config) -> None:
+    project = config.projects_dir / "-home-u-p"
+    main = project / "s1.jsonl"
+    sub = project / "s1" / "subagents" / "agent-a1.jsonl"  # same session: not reread
+    other = project / "s2.jsonl"  # no cost-state: not reread
+    write_lines(main, {"t": "req", "id": "m1", "ts": 1})
+    write_lines(sub, {"t": "req", "id": "m3", "ts": 2})
+    cost_pos = main.stat().st_size
+    write_lines(main, {"t": "cost", "usd": 0.5, "ts": 1, "dur": 90_000})
+    write_lines(other, {"t": "req", "id": "m2", "s": "s2", "ts": 2})
+
+    # The index as version 6 left it: no total_duration_ms column.
+    config.index_path.parent.mkdir(parents=True)
+    con = sqlite3.connect(config.index_path)
+    con.executescript(index_module._SCHEMA.replace("    total_duration_ms INTEGER,\n", ""))
+    con.execute("INSERT INTO schema_version (version) VALUES (6)")
+    for f in (main, sub, other):
+        _file_row(con, f, f.stat().st_size)
+    _request_row(con, "m1", main, 5)
+    _request_row(con, "m3", sub, 0)
+    con.execute(
+        "INSERT INTO cost_states (file, pos, session_id, main, total_cost_usd, ts) "
+        "VALUES (?, ?, 's1', 1, 0.5, 0)",
+        (str(main), cost_pos),
+    )
+    con.commit()
+    con.close()
+
+    with open_index(config.index_path) as ix:
+        assert ix.file_state(main).offset == 0  # type: ignore[union-attr]
+        assert ix.file_state(other).offset == other.stat().st_size  # type: ignore[union-attr]
+        assert ix.file_state(sub).offset == sub.stat().st_size  # type: ignore[union-attr]
+        (cs,) = ix.last_cost_states()
+        assert cs.total_duration_ms is None
+    source = FakeSource()
+    run_scan(config, quiet=True, source=source)
+    assert source.calls == [(main, 0)]
+    with open_index(config.index_path, readonly=True) as ix:
+        (cs,) = ix.last_cost_states()
+        assert cs.total_duration_ms == 90_000

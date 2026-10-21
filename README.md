@@ -146,9 +146,12 @@ listed apart, and not in the total.
 Claude Code writes a streaming reply several times; capcom counts each reply
 once, and prices cache writes by their lifetime. Claude Code also keeps its own
 running cost for each session, and `capcom calibrate` compares the two: on the
-author's logs, 1,426 of 1,429 comparable sessions came within 2 %. A session
+author's logs, 1,429 of 1,432 comparable sessions came within 2 %. A session
 is not comparable when it made calls the logs don't show, such as compactions
-or web fetches.
+or web fetches; for those, `capcom calibrate` estimates from token counts how
+much of the gap is output above capcom's estimate and how much is calls the log
+doesn't record. Spend in a Claude Code process that never wrote its running
+cost is counted by capcom and left out of the comparison.
 
 </details>
 
