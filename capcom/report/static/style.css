@@ -7,7 +7,7 @@
   --l07: rgba(31,30,29,0.07); --l10: rgba(31,30,29,0.1); --l12: rgba(31,30,29,0.12);
   --l15: rgba(31,30,29,0.15); --l25: rgba(31,30,29,0.25); --l30: rgba(31,30,29,0.3); --l35: rgba(31,30,29,0.35);
   --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300;
-  --accent: #D97757; --accent-strong: #C4603D; --ok: #558A42;
+  --accent: #D97757; --accent-strong: #C4603D; --ok: #558A42; --fan-fill: 0.18;
   --shadow: 0 1px 2px rgba(20,20,19,0.08);
   color-scheme: light;
 }
@@ -19,6 +19,7 @@
   --l07: rgba(250,249,245,0.06); --l10: rgba(250,249,245,0.09); --l12: rgba(250,249,245,0.11);
   --l15: rgba(250,249,245,0.14); --l25: rgba(250,249,245,0.22); --l30: rgba(250,249,245,0.28); --l35: rgba(250,249,245,0.32);
   --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300;
+  --fan-fill: 0.22;
   color-scheme: dark;
 }
 :root {
@@ -342,11 +343,12 @@ details.rollup .tags { display: flex; flex-wrap: wrap; gap: 6px; align-items: ba
 .causechip[aria-pressed="true"] { background: var(--sel); font-weight: 600; }
 .causechip:hover { background: var(--l15); }
 .causechips { align-items: center; margin: -6px 0 0; }
-/* the limits charts: when the forecast runs out (marker on 100 %, guide, label, range band) */
+/* the limits charts: when the forecast runs out (marker on 100 %, guide, label below
+   the limit line where the rising forecast is not; runoutLabel places it) */
 .runguide { position: absolute; bottom: 0; border-left: 1px solid var(--l35); pointer-events: none; }
 .rundot { position: absolute; width: 10px; height: 10px; border-radius: 999px; background: var(--accent-strong); transform: translate(-50%, -50%); box-shadow: 0 0 0 2px var(--card); z-index: 2; }
 .runlab { position: absolute; display: flex; flex-direction: column; gap: 2px; white-space: nowrap; pointer-events: none; z-index: 2;
-  transform: translate(10px, calc(-100% - 8px)); text-shadow: 0 0 3px var(--card), 0 0 3px var(--card); }
-.runlab.left { transform: translate(calc(-100% - 10px), calc(-100% - 8px)); align-items: flex-end; }
+  transform: translateX(10px); text-shadow: 0 0 3px var(--card), 0 0 3px var(--card); }
+.runlab.left { transform: translateX(calc(-100% - 10px)); align-items: flex-end; }
 .runlab .v { font-family: var(--serif); font-size: 22px; line-height: 1.05; color: var(--text); }
 .runlab .r { font-size: 12px; color: var(--muted); }

@@ -69,6 +69,50 @@ export function runoutMark(fc, x0, x1, weekly) {
   return { t: mid, f, side: f > 0.5 ? 'left' : 'right', title: `Runs out ~${at(fc.runs_out_at)}`, sub, band };
 }
 
+// Where the run-out label goes: below the 100 % line, beside the guide, in the
+// room the rising forecast leaves under itself. Pure: `f` is the crossing (0 to 1
+// across the plot), `fan` the forecast ([t, median, low, high], rising), `plot`
+// {x0, x1, w, h, ymax} in px and percent, `box` the label's size in px. Right of
+// the guide unless the label would pass the right edge; then left of it. Its top
+// sits under the lowest point of the fan and median over the label's span (and
+// under the run-out dot). Returns {side, top (px from the plot's top), x: [a, b] px}.
+export const LABEL_BOX = { w: 240, h: 46 }, LABEL_GAP = 10, PLOT_GUESS = 560;
+export function runoutLabel(f, fan, plot, box = LABEL_BOX) {
+  const { x0, x1, w, h, ymax } = plot;
+  const xc = f * w;
+  const Ypx = (v) => h - v / ymax * h;
+  const tAt = (x) => x0 + x / w * (x1 - x0);
+  const place = (side) => {
+    const a = side === 'right' ? xc + LABEL_GAP : xc - LABEL_GAP - box.w;
+    const b = a + box.w;
+    // lowest value of the fan's lower edge and median over [a, b]: at its points
+    // inside the span and where the span's edges cut it
+    let low = 100;
+    const ta = tAt(a), tb = tAt(b);
+    for (let i = 0; i < fan.length; i++) {
+      const p = fan[i];
+      if (p[0] >= ta && p[0] <= tb) low = Math.min(low, p[1], p[2]);
+      const q = fan[i + 1];
+      if (!q) continue;
+      for (const t of [ta, tb]) {
+        if (t >= p[0] && t <= q[0] && q[0] > p[0]) {
+          const k = (t - p[0]) / (q[0] - p[0]);
+          low = Math.min(low, p[1] + (q[1] - p[1]) * k, p[2] + (q[2] - p[2]) * k);
+        }
+      }
+    }
+    const top = Math.max(Ypx(100) + 10, Ypx(low) + 6);
+    return { side, top, x: [a, b], fits: top + box.h <= h };
+  };
+  const first = xc + LABEL_GAP + box.w <= w ? 'right' : 'left';
+  let best = place(first);
+  if (!best.fits) {
+    const other = place(first === 'right' ? 'left' : 'right');
+    if (other.fits && other.x[0] >= 0 && other.x[1] <= w) best = other;
+  }
+  return { side: best.side, top: Math.min(best.top, h - box.h), x: best.x };
+}
+
 // What the cards and the page say about a window, in words.
 function summary(w) {
   const out = [];
@@ -99,7 +143,7 @@ function fitNote(w) {
 
 // Usage windows over time: each window's readings as a rising line that drops to
 // 0 at its reset, a dashed line at 100%, and the current window's forecast as a
-// fan (the 80% range, filled with a fade, and the median dashed).
+// fan (the 80% range, filled, with hairline edges, and the median dashed).
 // Each reading is a dot; the stretch from a window's reset (0 %) to its first reading
 // is dashed and labeled, since nothing was read there.
 // opts: {segments: [{points, resets_at, reset, hit_limit, start_known}], fan, now, x0, x1,
@@ -112,7 +156,7 @@ export function limitChart(opts) {
   // headroom above the limit when the fan crosses it: the fan and its median go on
   // past 100 % along the forecast, clipped only by the plot's edges, so where the
   // fan crosses the limit line shows the earliest-latest run-out. With a run-out
-  // mark the headroom holds its label: 48 px.
+  // mark the headroom is 48 px, so the rise past the limit stays in view.
   const H = (opts.height || 160) + (runout ? 30 : 0);
   let top = 100;
   for (const p of fan) top = Math.max(top, p[3]);
@@ -121,9 +165,7 @@ export function limitChart(opts) {
   const Y = (v) => (H - v / ymax * H).toFixed(1);
   const id = 'fan' + (++uid);
   const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', 'aria-hidden': 'true', style: 'overflow:hidden' },
-    s('defs', null, s('linearGradient', { id, x1: 0, y1: 0, x2: 0, y2: 1 },
-      s('stop', { offset: 0, style: 'stop-color:var(--accent);stop-opacity:0.34' }),
-      s('stop', { offset: 1, style: 'stop-color:var(--accent);stop-opacity:0.06' })),
+    s('defs', null,
       s('clipPath', { id: id + 'c' }, s('rect', { x: 0, y: 0, width: W, height: H }))));
   const hover = [];
   const stroke = { fill: 'none', 'stroke-width': 2, 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke' };
@@ -153,8 +195,11 @@ export function limitChart(opts) {
     let band = fan.map((p, i) => (i ? 'L' : 'M') + X(p[0]) + ' ' + Y(p[3])).join('');
     for (let i = fan.length - 1; i >= 0; i--) band += 'L' + X(fan[i][0]) + ' ' + Y(fan[i][2]);
     // clipped to the plot rectangle only: never flattened at the limit line
+    const edge = (k) => fan.map((p, i) => (i ? 'L' : 'M') + X(p[0]) + ' ' + Y(p[k])).join('');
+    const hair = { fill: 'none', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke', style: 'stroke:var(--accent);stroke-opacity:0.4' };
     svg.append(s('g', { 'clip-path': `url(#${id}c)` },
-      s('path', { d: band + 'Z', fill: `url(#${id})` }),
+      s('path', { d: band + 'Z', style: 'fill:var(--accent);fill-opacity:var(--fan-fill)' }),
+      s('path', { d: edge(2), ...hair }), s('path', { d: edge(3), ...hair }),
       s('path', { d: fan.map((p, i) => (i ? 'L' : 'M') + X(p[0]) + ' ' + Y(p[1])).join(''), ...stroke, 'stroke-dasharray': '6 4', style: 'stroke:var(--accent)' })));
     const segs = opts.segments;
     const cur = segs.length ? segs[segs.length - 1] : null;
@@ -190,9 +235,12 @@ export function limitChart(opts) {
   }
   if (runout) {
     const y100 = yp(100), fx = (f) => (f * 100).toFixed(2) + '%';
+    // the plot's width is not known until it is laid out: a narrow one (the
+    // label spans more of it) is the cautious guess, as the forecast rises
+    const lab = runoutLabel(runout.f, fan, { x0, x1, w: PLOT_GUESS, h: H, ymax });
     plot.append(h('div.runguide', { style: `left:${fx(runout.f)};top:${y100}` }),
       h('span.rundot', { style: `left:${fx(runout.f)};top:${y100}`, title: runout.title }),
-      h(`div.runlab.${runout.side}`, { style: `left:${fx(runout.f)};top:${y100}` },
+      h(`div.runlab.${lab.side}`, { style: `left:${fx(runout.f)};top:${lab.top.toFixed(1)}px` },
         h('span.v', { text: runout.title }), runout.sub ? h('span.r', { text: runout.sub }) : null));
   }
   const label = (t) => `${opts.weekly ? monthDay(new Date(t)) + ' ' : ''}${hm(new Date(t))}`;
