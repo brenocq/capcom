@@ -70,9 +70,13 @@ def _checks(args: argparse.Namespace) -> int:
 
 
 def _limits(args: argparse.Namespace) -> int:
+    if args.install or args.uninstall:
+        from capcom.limits.install import run_install
+
+        return run_install(load_config(), sys.stdout, remove=args.uninstall, yes=args.yes)
     from capcom.limits.cli import run_limits
 
-    return run_limits(load_config(), seed=args.seed, dry_run=args.dry_run, install=args.install)
+    return run_limits(load_config(), seed=args.seed, dry_run=args.dry_run)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -133,10 +137,17 @@ def build_parser() -> argparse.ArgumentParser:
     limits.add_argument(
         "--dry-run", action="store_true", help="with --seed: show the samples, write nothing"
     )
-    limits.add_argument(
+    setup = limits.add_mutually_exclusive_group()
+    setup.add_argument(
         "--install",
         action="store_true",
-        help="print the status line change that starts recording (writes nothing)",
+        help="start recording: show the status line change, and make it if you say yes",
+    )
+    setup.add_argument(
+        "--uninstall", action="store_true", help="stop recording: undo that change, after asking"
+    )
+    limits.add_argument(
+        "-y", "--yes", action="store_true", help="with --install or --uninstall: do not ask"
     )
     limits.set_defaults(func=_limits)
 

@@ -331,8 +331,8 @@ Window = {window, label, samples, current,
 
 `available` is false without any sample (`windows` both null); `recording` is true
 once the status line recorder wrote a sample, and `message` is the empty state's
-text until then ("Not recording yet: run `capcom limits --install` to see the
-change."). A segment is one window between resets; within it the percentage only
+text until then ("Not recording yet: run `capcom limits --install` to set it
+up."). A segment is one window between resets; within it the percentage only
 rises. `fit.method` is `per_type` (weights per model and token category, in percent
 per million tokens, by non-negative least squares) once there are enough intervals,
 else `per_usd` (one percent per API-equivalent dollar) and `note` says so; null with

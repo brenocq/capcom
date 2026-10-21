@@ -17,7 +17,7 @@ const isWeekly = (w) => w.window === 'seven_day';
 
 function notRecording(lim) {
   return empty('Not recording yet', h('span', null, 'Run ', h('code', { text: lim.install || 'capcom limits --install' }),
-    ' to see the change to your status line. capcom then records the 5-hour and weekly percentages each time they move, and forecasts the value at reset.'));
+    ' in a terminal: it shows the one-line change to your status line and makes it if you say yes. capcom then records the 5-hour and weekly percentages each time they move, and forecasts the value at reset.'));
 }
 
 function ring(percent, warn) {

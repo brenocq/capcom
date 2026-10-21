@@ -20,7 +20,7 @@ from capcom.limits.model import (
 from capcom.types import Index, LimitSample, LimitWindow, PriceTable
 
 INSTALL = "capcom limits --install"
-NOT_RECORDING = "Not recording yet: run `capcom limits --install` to see the change."
+NOT_RECORDING = "Not recording yet: run `capcom limits --install` to set it up."
 TOP_PROJECTS = 6
 OTHER = "(other)"
 

@@ -24,7 +24,9 @@ modules. Never add or commit anything under `docs/`.
 - **Read-only on the logs.** Never write, move, lock or truncate anything under
   `~/.claude/` or `~/.openclaw/`. Open files read-only; a live session may be
   appending to the one you read, so a last line may be partial (skip it, read
-  it next time).
+  it next time). The one exception is `capcom limits --install`/`--uninstall`
+  (`capcom/limits/install.py`): it rewrites the `statusLine` entry of
+  `~/.claude/settings.json`, and only after the user answers yes.
 - **The logs are private.** They hold the user's conversations, file contents
   and sometimes secrets. Never commit them, anything derived from their text,
   or a report built from them. Test fixtures are synthetic, written by hand or
