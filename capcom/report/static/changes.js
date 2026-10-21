@@ -184,7 +184,7 @@ function howTile(c) {
   const lines = [
     `The finding’s own measure: ${lower(c.measure)} in ${scopeName(c)}.`,
     w.before_from ? `Before is ${monthDay(localDate(w.before_from))} to ${monthDay(localDate(w.before_to))}; after starts ${monthDay(localDate(w.after_from))}, the day after you applied it.` : `After starts ${monthDay(localDate(w.after_from))}, the day after you applied it.`,
-    'Working: the after rate sits below the before weeks’ range, over at least 7 days and enough requests. Within that range it is no clear effect; above it, worse.',
+    'Working: after at least 7 days and enough requests, the after days’ rate is lower than the before days’, by more than chance (95 %) and than their usual swing. Higher by as much: worse. Otherwise, no clear effect.',
     'Saving = (before − after) × the requests a week since × the average price of one in the before window, at list prices.',
   ];
   if (c.verdict === 'too_early' && c.verdict_due) lines.push(`The verdict comes on ${monthDay(localDate(c.verdict_due))}.`);
