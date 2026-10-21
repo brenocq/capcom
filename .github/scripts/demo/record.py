@@ -8,10 +8,11 @@ steps: the spend jumped (Spend over 14 days by project, the cursor across the
 steep rise), who spent it (split by agent type: the coder subagents), why (the
 rise's spike marker opens the Spikes page on its cause), where (its session's
 page: the context, the cost of each request, the subagent lanes), is it a habit
-(Checks: the same cause on top), fix it (a change copied). A second tab draws
-each moment in a macOS-style window (frame.html) with a cursor and a caption
-strip naming the steps, on a transparent page. Everything shown is capcom's own
-output on the synthetic data; nothing on the page is staged.
+(Checks by kind: the same cause on top, opened), fix it (a settings change
+copied). A second tab draws each moment in a macOS-style window (frame.html)
+with a cursor and a caption strip naming the steps, on a transparent page.
+Everything shown is capcom's own output on the synthetic data; nothing on the
+page is staged.
 
 It records twice, once per GitHub theme (prefers-color-scheme emulated in both
 tabs; the site follows it, as nothing is saved in its fresh profile's
@@ -228,7 +229,8 @@ def across_rise(rec: Recorder, spike: dict[str, Any], window: dict[str, Any]) ->
         return x + (t - since) / (until - since) * w
 
     _, my, _, mh = rec.box(".spikemark", "Cache expired", "aria-label")
-    before, after = at(spike["start"] - 4 * 3600e3), at(spike["end"] + 1800e3)
+    start, end = (datetime.fromisoformat(spike[k]).timestamp() * 1000 for k in ("start", "end"))
+    before, after = at(start - 4 * 3600e3), at(end + 1800e3)
     rec.move((before, my + mh + 70), 0.5)
     rec.keep_hover(True)
     rec.move((after, my + mh + 40), 1.0, hover=True)
@@ -290,18 +292,26 @@ def script(rec: Recorder, numbers: dict[str, Any]) -> None:
     rec.still("4-session")
     rec.keep_hover(False)
 
-    # 5. Is it a habit: Checks, the same cause on top across the project.
-    rec.go(".nav a", "Checks", seconds=0.6, step=4, ready="section.card.check")
+    # 5. Is it a habit: Checks by kind puts the same cause on top; open its row.
+    kinds = {k["kind"]: k["title"] for k in numbers["checks"]["rollups"]}
+    habit = kinds["subagent_cache_expiry"]
+    rec.go(".nav a", "Checks", seconds=0.6, step=4, ready="details.rollup")
     rec.hold(0.3)
-    _, card, _, _ = rec.box("section.card.check", "Subagent caches expired")
-    rec.move((rec.x + 420, rec.y + 160), 0.3)
-    rec.scroll(card - 14, seconds=0.6)
+    rec.go("details.rollup summary", habit, seconds=0.6, settle=0.6)
+    _, row, _, _ = rec.box("section.card.rollups")
+    rec.move((rec.x + 420, rec.y + 120), 0.3)
+    rec.scroll(row - 14, seconds=0.6)
     rec.hold(2.3)
     rec.still("5-checks")
 
-    # 6. Fix it: down to the first change to paste, and copy it.
-    _, copy, _, ch = rec.box("button.copy", "Copy")
+    # 6. Fix it: down to a kind with a change to paste (servers loaded and never
+    # called), open it, and copy the change.
     rec.step = 5
+    servers = kinds["mcp_servers_unused"]
+    _, sy, _, _ = rec.box("details.rollup summary", servers)
+    rec.scroll(sy - 160, seconds=0.8)
+    rec.go("details.rollup summary", servers, seconds=0.5, settle=0.6)
+    _, copy, _, ch = rec.box("button.copy", "Copy")
     rec.scroll(copy + ch + 70 - APP_H, seconds=0.9)
     rec.go("button.copy", "Copy", seconds=0.5, settle=0.3)
     rec.move((rec.x + 60, rec.y + 34), 0.3)

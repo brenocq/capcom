@@ -12,6 +12,7 @@ only the banner's wordmark is outlines.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from datetime import datetime
 from html import escape
 from typing import Any
 
@@ -233,6 +234,14 @@ def mark(cx: float, cy: float, size: float, cls: str = "") -> str:
     )
 
 
+def ms(v: float | str) -> float:
+    """An API time as epoch milliseconds: chart points are numbers already, other times
+    ISO strings (with their UTC offset)."""
+    if isinstance(v, str):
+        return datetime.fromisoformat(v).timestamp() * 1000
+    return float(v)
+
+
 def usd(v: float, cents: bool = True) -> str:
     return f"${v:,.2f}" if cents else f"${v:,.0f}"
 
@@ -258,12 +267,12 @@ def spike_pins(
 
     pins: list[tuple[float, float, float]] = []
     for m in sorted(marks, key=lambda m: -m["excess_usd"]):
-        lo = max(after(m["t"] / 1000), 1)
-        hi = max(after(m.get("end", m["t"]) / 1000), lo)
+        lo = max(after(ms(m["t"]) / 1000), 1)
+        hi = max(after(ms(m.get("end", m["t"])) / 1000), lo)
         i = max(range(lo, hi + 1), key=lambda k: total[k] - total[k - 1])
         x, y = points[i]
         if all(abs(x - p[1]) >= gap for p in pins):
-            pins.append((m["t"], x, y))
+            pins.append((ms(m["t"]), x, y))
         if len(pins) == count:
             break
     pins.sort()

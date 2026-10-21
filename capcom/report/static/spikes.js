@@ -8,6 +8,40 @@ import { pendingBlock } from './sessions.js';
 
 const RANGES = [[1, 'Today'], [7, '7 days'], [14, '14 days'], [30, '30 days'], [90, '90 days']];
 
+// The list's order, kept in the URL (?sort=cost-desc|cost-asc|date-desc|date-asc):
+// sorting is client-side, so the API never sees it.
+export const SORTS = ['cost-desc', 'cost-asc', 'date-desc', 'date-asc'];
+export function parseSort(v) { return SORTS.includes(v) ? v : 'cost-desc'; }
+export function sortText(sort) {
+  return {
+    'cost-desc': 'Sorted by cost, highest first', 'cost-asc': 'Sorted by cost, lowest first',
+    'date-desc': 'Sorted by date, newest first', 'date-asc': 'Sorted by date, oldest first',
+  }[parseSort(sort)];
+}
+// A sorted copy; ties keep the chart's marker order.
+export function sortSpikes(items, sort) {
+  const [key, dir] = parseSort(sort).split('-');
+  const val = (it) => (key === 'cost' ? it.excess_usd : new Date(it.start).getTime());
+  const sign = dir === 'asc' ? 1 : -1;
+  return [...items].sort((a, b) => sign * (val(a) - val(b)) || a.n - b.n);
+}
+
+// Once the redrawn page is in the document: the selected row scrolled into view
+// inside the list (never the page), and after a sort click its control focused again.
+let afterSort = null;
+function settle(list, controls) {
+  const job = afterSort;
+  afterSort = null;
+  const run = (tries) => {
+    if (!list.isConnected) { if (tries) requestAnimationFrame(() => run(tries - 1)); return; }
+    const btn = job ? controls.querySelector(job) : null;
+    if (btn) btn.focus({ preventScroll: true });
+    const on = list.querySelector('button[aria-pressed="true"]');
+    if (on) list.scrollTop = on.offsetTop - list.offsetTop - (list.clientHeight - on.offsetHeight) / 2;
+  };
+  requestAnimationFrame(() => run(30));
+}
+
 function when(ms) { const d = new Date(ms); return `${monthDay(d)}, ${hm(d)}`; }
 
 function thread(it) {
@@ -94,7 +128,20 @@ export async function renderSpikes(main, r) {
   if (bars.length) main.append(h('div.row-wrap', null, ...bars));
 
   // the list and the selected spike
-  const items = d.spikes;
+  const sort = parseSort(r.query.get('sort'));
+  const [sortKey, sortDir] = sort.split('-');
+  const items = sortSpikes(d.spikes, sort);
+  const setSort = (v, job) => { afterSort = job; setQuery({ sort: v === 'cost-desc' ? null : v }); };
+  const controls = h('div.sortbar', null,
+    seg('Sort by', [['cost', 'Cost'], ['date', 'Date']], sortKey, (k) => setSort(`${k}-${sortDir}`, `[data-sort="${k}"]`)),
+    h('button.sortdir', {
+      type: 'button', 'data-sort': 'dir', 'aria-pressed': String(sortDir === 'asc'),
+      'aria-label': sortDir === 'desc' ? 'Sort descending' : 'Sort ascending',
+      title: sortDir === 'desc' ? 'Highest or newest first: show the lowest or oldest first' : 'Lowest or oldest first: show the highest or newest first',
+      onclick: () => setSort(`${sortKey}-${sortDir === 'desc' ? 'asc' : 'desc'}`, '[data-sort="dir"]'),
+    }, h('span', { 'aria-hidden': 'true', text: sortDir === 'desc' ? '↓' : '↑' })),
+    h('span.note.sortstatus', { role: 'status', 'aria-live': 'polite', text: sortText(sort) }));
+  for (const b of controls.querySelectorAll('.seg button')) b.dataset.sort = b.textContent.toLowerCase();
   // the default selection: the window's largest spike
   const largest = items.find((it) => it.key === d.largest) || items.reduce((a, b) => (b.excess_usd > a.excess_usd ? b : a), items[0]);
   const wanted = r.query.get('spike');
@@ -108,7 +155,8 @@ export async function renderSpikes(main, r) {
         txt.rest ? h('span.rest', { text: txt.rest }) : null,
         h('span.meta', null, projectChip(it), h('span', { text: `${when(it.start)} · ${where(it)}` }))));
   }));
-  main.append(h('div.row-wrap', { style: 'align-items:flex-start' }, list, detail(sel)));
+  main.append(h('div.row-wrap', { style: 'align-items:flex-start' }, h('div.spikecol', null, controls, list), detail(sel)));
+  settle(list, controls);
   const hidden = d.count - items.length;
   if (wanted && !items.some((it) => it.key === wanted)) {
     main.append(h('p.note', { style: 'margin:0', text: 'The spike you followed is not among the largest of this window; the largest is shown.' }));

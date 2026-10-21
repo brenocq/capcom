@@ -189,10 +189,12 @@ export function errorBox(err) {
 }
 
 // A segmented control: options [[value, label]], onPick(value).
+// options: [value, text, why it is off (optional: the button is shown disabled with it as tooltip)]
 export function seg(label, options, current, onPick) {
   return h('div.seg', { role: 'group', 'aria-label': label },
-    options.map(([v, text]) => h('button', {
-      type: 'button', 'aria-pressed': String(String(v) === String(current)), onclick: () => onPick(v),
+    options.map(([v, text, off]) => h('button', {
+      type: 'button', 'aria-pressed': String(String(v) === String(current)), onclick: off ? null : () => onPick(v),
+      'aria-disabled': off ? 'true' : null, title: off || null,
     }, text)));
 }
 

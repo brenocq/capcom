@@ -75,6 +75,7 @@ button { font: inherit; color: inherit; }
 .sub strong { color: var(--text); font-weight: 600; }
 .seg { display: flex; gap: 2px; padding: 3px; background: var(--subtle); border-radius: 10px; }
 .seg button { min-height: 34px; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; font-size: 13px; color: var(--muted); cursor: pointer; }
+.seg button[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
 .seg button[aria-pressed="true"] { background: var(--card); box-shadow: var(--shadow); font-weight: 500; color: var(--text); }
 .controls { display: flex; flex-wrap: wrap; gap: 10px; }
 .card { background: var(--card); border: 0.5px solid var(--l15); border-radius: 14px; padding: 20px 22px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
@@ -123,6 +124,9 @@ button { font: inherit; color: inherit; }
 .guide { position: absolute; top: 0; bottom: 0; border-left: 1px dashed var(--l35); pointer-events: none; }
 .nowline { position: absolute; top: -6px; bottom: 0; border-left: 1px dashed var(--l35); }
 .spikemark { position: absolute; transform: translate(-50%, -135%); width: 26px; height: 26px; border-radius: 999px; background: var(--text); color: var(--inv); font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center; text-decoration: none; box-shadow: 0 0 0 3px var(--card); z-index: 2; }
+.rdot { position: absolute; width: 7px; height: 7px; border-radius: 999px; background: var(--text); transform: translate(-50%, -50%); box-shadow: 0 0 0 2px var(--card); z-index: 1; }
+.gaplab { position: absolute; transform: translate(-100%, -120%); font-size: 11px; color: var(--muted); white-space: nowrap; pointer-events: none;
+  text-shadow: 0 0 3px var(--card), 0 0 3px var(--card); }
 .enddot { position: absolute; width: 7px; height: 7px; border-radius: 999px; background: var(--text); transform: translate(-50%, -50%); box-shadow: 0 0 0 2px var(--card); z-index: 1; }
 .endlab { position: absolute; transform: translate(calc(-100% - 6px), calc(-100% - 6px)); font-size: 12px; font-weight: 600; color: var(--text); white-space: nowrap; z-index: 1;
   text-shadow: 0 0 3px var(--card), 0 0 3px var(--card), 0 0 3px var(--card); }
@@ -223,7 +227,12 @@ table.data a.title span:last-child { font-size: 12px; color: var(--muted); }
 .causes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: 10px 32px; }
 .cause { display: grid; grid-template-columns: 170px minmax(0, 1fr) 72px; align-items: center; gap: 12px; font-size: 13px; }
 .cause .mono { text-align: right; }
-.spikelist { flex: 1 1 320px; min-width: 0; padding: 8px; gap: 2px; max-height: 760px; overflow-y: auto; }
+.spikecol { flex: 1 1 320px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.sortbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.sortbar .sortdir { min-width: 40px; min-height: 40px; border: 0; border-radius: 10px; background: var(--subtle); font-size: 15px; color: var(--text); cursor: pointer; }
+.sortbar .sortdir:hover { background: var(--l07); }
+.sortbar .sortstatus { margin-left: 4px; }
+.spikelist { min-width: 0; padding: 8px; gap: 2px; max-height: 760px; overflow-y: auto; }
 .spikelist button { display: flex; gap: 12px; align-items: flex-start; width: 100%; text-align: left; border: 0; border-radius: 10px; padding: 12px; background: transparent; font: inherit; color: var(--text); cursor: pointer; }
 .spikelist button[aria-pressed="true"] { background: var(--sel); }
 .spikelist button:hover { background: var(--l07); }

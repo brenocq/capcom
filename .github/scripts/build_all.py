@@ -4,18 +4,21 @@
 
 1. demo/data.py writes two made-up weeks of Claude Code logs into a temporary
    folder and runs capcom on them there (never on ~/.claude or ~/.cache/capcom).
-2. banner/build.py and features/build.py draw banner.svg and the six
+2. banner/build.py and features/build.py draw banner.svg and the eight
    feature-*.svg from capcom's numbers.
 3. demo/record.py records the real `capcom serve` on that data in headless
    Chrome, once per GitHub theme: demo-light.webp, demo-dark.webp and a still
    of each, demo-light.png and demo-dark.png.
+4. social/build.py composes social.png, the 1280 x 640 social preview card, from
+   the banner and the dark still (uploaded by hand: Settings, Social preview).
 
 Everything lands in --out (default .github/assets/, gitignored); then
 .github/scripts/publish-assets.sh puts it on the `assets` branch. With --check,
 contact sheets of every SVG (several moments, light and dark), the demo's
 stills (each step's last frame, both themes) and screenshots of a local README
 preview go to that folder. Needs google-chrome (or CHROME=) and
-ffmpeg with libwebp for the demo; Chrome runs in a 2 GB memory-capped scope.
+ffmpeg with libwebp for the demo; Chrome runs in a memory-capped scope (2 GB, or
+CHROME_MEMORY_MAX).
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-for sub in ("", "demo", "banner", "features", "preview"):
+for sub in ("", "demo", "banner", "features", "preview", "social"):
     sys.path.insert(0, str(HERE / sub))
 
 MAX_SVG = 100 * 1024
@@ -84,6 +87,9 @@ def main() -> None:
                 ["--stills", str(stills)] if stills else []
             )
             record.main()
+        if (out / "demo-dark.png").exists():
+            social = load(HERE / "social" / "build.py", "social_build")
+            print(social.build(out))
 
         if stills:
             import page
