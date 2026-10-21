@@ -27,8 +27,12 @@ def _open_index(config: Config) -> Index | None:
         return None
 
 
-def _wrap(text: str, indent: str) -> str:
-    return textwrap.fill(text, WIDTH, initial_indent=indent, subsequent_indent=indent)
+def _wrap(text: str, indent: str, first: str | None = None) -> str:
+    """`text` filled to WIDTH; the first line starts with `first` (default `indent`),
+    the next ones with `indent`."""
+    return textwrap.fill(
+        text, WIDTH, initial_indent=indent if first is None else first, subsequent_indent=indent
+    )
 
 
 def format_findings(findings: list[Finding], limit: int) -> str:
@@ -41,7 +45,7 @@ def format_findings(findings: list[Finding], limit: int) -> str:
         lines.append(_wrap(f.advice, "    "))
         if f.change:
             lines.extend("      " + c for c in f.change.splitlines())
-        lines.extend(_wrap(e.label, "    - ") for e in f.evidence[:3])
+        lines.extend(_wrap(e.label, "      ", first="    - ") for e in f.evidence[:3])
         blocks.append("\n".join(lines))
     hidden = len(findings) - len(blocks)
     if hidden > 0:
