@@ -20,12 +20,14 @@ from pathlib import Path
 from typing import Any
 
 from capcom.config import load_config
-from capcom.cost.calibrate import check_session
 from capcom.cost.model import price
 from capcom.cost.prices import is_placeholder, normalize
 from capcom.cost.top import MAIN_THREAD, project_label
 from capcom.report.analysis import Analysis, Unavailable
+from capcom.report.calibration import calibration_json
+from capcom.report.story import latest_change, regime_json
 from capcom.report.tally import (
+    MIN_LISTED_USD_PER_WEEK,
     PAUSE_SECONDS,
     Tally,
     Window,
@@ -33,6 +35,7 @@ from capcom.report.tally import (
     finding_overlaps,
     iso,
     ms,
+    overlap_blockers,
     project_display,
     project_names,
     savings_total,
@@ -69,26 +72,15 @@ MAX_MARKERS = 12  # spike markers on a cumulative chart: the largest by excess
 MAX_POINTS = 4000  # per-request columns of a session above this are thinned
 MAX_SESSION_SPIKES = 8  # spikes listed on a session's page: the largest by excess
 
-# Why a session's totals cannot be compared with Claude Code's cost-state
-# (capcom.cost.calibrate reason ids), in words for the report.
-REASON_LABELS = {
-    "WebFetch": "WebFetch calls, whose page summaries Claude Code bills separately",
-    "WebSearch": "web searches, billed per search",
-    "away": "away summaries, which the log does not record",
-    "compaction": "compaction summaries, which the log does not record",
-    "calls not in the log": "model calls missing from the log",
-    "shares replies with another session": "replies shared with another session",
-    "model only in cost-state": "a model only Claude Code recorded",
-    "no startTime": "no process start time, so the window is a guess",
-    "below $0.10": "a total under $0.10, where fixed side calls weigh too much",
-    "estimated output": "estimated output tokens",
-}
-
 # Cumulative-chart step per window length, so a chart has a few hundred points.
 _STEPS = {1: timedelta(minutes=5), 7: timedelta(minutes=30), 14: timedelta(hours=1)}
 _STEPS |= {30: timedelta(hours=2), 90: timedelta(hours=6)}
 
 LIMITS_DAYS = (7, 14, 30, 90)
+
+# /api/spend?group=: other names accepted for a grouping (as `capcom top --by agent`
+# and the session rows' `agent_type` say it)
+GROUP_ALIASES = {"agent_type": GroupBy.AGENT.value}
 
 
 class ApiError(Exception):
@@ -254,8 +246,8 @@ def _spike_marks(
             {
                 "n": i + 1,
                 "key": spike_key(sp),
-                "t": ms(sp.start),
-                "end": ms(sp.end),
+                "t": iso(sp.start, ctx.tz),
+                "end": iso(sp.end, ctx.tz),
                 "kind": sp.kind.value,
                 "scope": sp.scope,
                 "session_id": sp.session_id,
@@ -270,6 +262,27 @@ def _spike_marks(
             for i, sp in enumerate(marks)
         ],
     }
+
+
+STORY_DAYS = 14  # Overview's "what changed": a change in the last two weeks
+
+
+def _regime(ctx: Context, first_day: date, unavailable: list[str]) -> dict[str, Any] | None:
+    """The latest change of the daily spend's level on or after `first_day`
+    (capcom.report.story), None without one."""
+    change = _try(
+        lambda: latest_change(
+            ctx.index,
+            ctx.table,
+            first_day,
+            ctx.now,
+            ctx.tz,
+            ctx.openclaw_root,
+            fn=ctx.analysis.regimes(),
+        ),
+        unavailable,
+    )
+    return regime_json(change)
 
 
 def _try(fn: Any, unavailable: list[str]) -> Any:
@@ -420,6 +433,7 @@ def overview(ctx: Context) -> dict[str, Any]:
         "spending_now": {"usd_last_hour": round(last_hour.usd, 6), "spark": spark_json},
         "cumulative_today": None if cum is None else _cumulative_json(cum, step, ctx.now),
         "spikes_today": marks,
+        "regime": _regime(ctx, ctx.today() - timedelta(days=STORY_DAYS - 1), unavailable),
         "limits": _limits(ctx, None, full=False),
         "unavailable": unavailable,
     }
@@ -429,10 +443,12 @@ def spend(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     days = _int(query, "days", 14, 1, 366)
     if days not in SPEND_DAYS:
         raise ApiError(400, "bad_query", f"days must be one of {', '.join(map(str, SPEND_DAYS))}")
+    raw = query.get("group") or GroupBy.CATEGORY.value
     try:
-        group = GroupBy(query.get("group") or GroupBy.CATEGORY.value)
+        group = GroupBy(GROUP_ALIASES.get(raw, raw))
     except ValueError:
-        raise ApiError(400, "bad_query", "group must be one of: " + ", ".join(GroupBy)) from None
+        names = ", ".join([*GroupBy, *GROUP_ALIASES])
+        raise ApiError(400, "bad_query", "group must be one of: " + names) from None
     since = ctx.midnight(days - 1)
     w = _window(ctx)
     for req in ctx.index.requests(since=since):
@@ -488,6 +504,7 @@ def spend(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
         "temporary_sessions": len(temporary),
         "cumulative": cum_json,
         "spikes": marks,
+        "regime": _regime(ctx, ctx.local(since).date(), unavailable),
         "daily": daily_json,
         "heatmap": heat_json,
         "context_buckets": w.context_json(),
@@ -570,6 +587,7 @@ def sessions(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     return {
         "window": {"days": days, "since": iso(since, ctx.tz), "until": iso(ctx.now, ctx.tz)},
         "total": len(rows),
+        "temporary": sum(1 for r in rows if r["temporary"]),
         "sessions": rows[:limit],
     }
 
@@ -631,12 +649,15 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
         by_type.setdefault(kind, []).append(span)
         agents_json.append(
             {"agent_id": aid, "agent_type": kind}
-            | span.to_json()
+            | span.to_json(ctx.tz)
             | {"finished": ai.finished if ai else None}
         )
     type_rows: list[dict[str, Any]] = []
     if main.requests:
-        type_rows.append(_type_row(MAIN_THREAD, [main], total) | {"spawns": 0})
+        # one main thread per session: no spawns, and its calls are a count, not a median
+        type_rows.append(
+            _type_row(MAIN_THREAD, [main], total) | {"spawns": None, "median_tool_calls": None}
+        )
     for kind, group in by_type.items():
         type_rows.append(_type_row(kind, group, total))
     type_rows.sort(key=lambda r: -float(r["usd"]))
@@ -647,8 +668,8 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
         if gap >= PAUSE_SECONDS:
             pauses.append(
                 {
-                    "start": ms(prev.timestamp),
-                    "end": ms(nxt.timestamp),
+                    "start": iso(prev.timestamp, ctx.tz),
+                    "end": iso(nxt.timestamp, ctx.tz),
                     "minutes": round(gap / 60, 1),
                     "next_usd": round(_price_total(ctx, nxt), 6),
                     "next_cache_write": nxt.usage.cache_write,
@@ -656,7 +677,7 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
             )
     compactions = [
         {
-            "t": ms(e.timestamp),
+            "t": iso(e.timestamp, ctx.tz),
             "agent_id": e.agent_id,
             "trigger": e.attrs.get("trigger"),
             "pre_tokens": e.attrs.get("pre_tokens"),
@@ -668,15 +689,7 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
     calibration = None
     for cs in ctx.index.last_cost_states():
         if cs.session_id == session_id:
-            c = check_session(ctx.index, cs, ctx.table)
-            calibration = {
-                "claude_code_usd": round(c.claude_code_usd, 6),
-                "capcom_usd": round(c.capcom_usd, 6),
-                "spread": None if c.claude_code_usd == 0 else round(c.spread, 6),
-                "comparable": c.comparable,
-                "reasons": list(c.reasons),
-                "reason_labels": [REASON_LABELS.get(r, r) for r in c.reasons],
-            }
+            calibration = calibration_json(ctx.index, cs, ctx.table, ctx.tz)
             break
 
     row = w.sessions.get(session_id)
@@ -720,7 +733,7 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
         "calibration": calibration,
         "requests": cols,
         "thinned": thinned,
-        "main": main.to_json() if main.requests else None,
+        "main": main.to_json(ctx.tz) if main.requests else None,
         "agents": agents_json,
         "agent_types": type_rows,
         "pauses": pauses,
@@ -748,10 +761,10 @@ class _Span:
         self.tool_calls += len(req.tool_calls)
         self.peak = max(self.peak, req.usage.context)
 
-    def to_json(self) -> dict[str, Any]:
+    def to_json(self, tz: tzinfo | None = None) -> dict[str, Any]:
         return {
-            "first": ms(self.first) if self.first else None,
-            "last": ms(self.last) if self.last else None,
+            "first": iso(self.first, tz),
+            "last": iso(self.last, tz),
             "requests": self.requests,
             "usd": round(self.usd, 6),
             "tool_calls": self.tool_calls,
@@ -764,6 +777,7 @@ def _type_row(kind: str, group: list[_Span], total: float) -> dict[str, Any]:
     return {
         "agent_type": kind,
         "spawns": len(group),
+        "tool_calls": sum(g.tool_calls for g in group),
         "median_tool_calls": statistics.median(g.tool_calls for g in group),
         "average_peak_context": round(sum(g.peak for g in group) / len(group)),
         "usd": round(usd, 6),
@@ -931,6 +945,27 @@ with contextlib.suppress(Exception):  # like Analysis, a broken module is only m
     CONFIDENCE_LABELS = {k.value: v for k, v in _fmt.CONFIDENCE_LABELS.items()}
 
 
+# The cause colors: the validated categorical palette (style.css --s1..--s6, in its
+# order) for the causes seen most, so a cause keeps its color across windows; the
+# others and the unexplained rest in gray.
+CAUSE_PALETTE = (
+    CauseKind.TOOL_WAIT_EXPIRY,
+    CauseKind.PARALLEL_SUBAGENTS,
+    CauseKind.IDLE_REWRITE,
+    CauseKind.CONTEXT_GROWTH,
+    CauseKind.LATE_RESUME_EXPIRY,
+    CauseKind.FAN_OUT,
+)
+
+
+def cause_color(cause: str) -> str:
+    """A cause's color as a CSS value (CAUSE_PALETTE)."""
+    for i, k in enumerate(CAUSE_PALETTE):
+        if k.value == cause:
+            return f"var(--s{i + 1})"
+    return "var(--gray)"
+
+
 def spike_key(sp: Spike) -> str:
     """A short stable id for a spike, for links (`/spikes?spike=<key>`)."""
     raw = "|".join(
@@ -983,7 +1018,8 @@ def _headline(causes: Sequence[Explanation], excess_usd: float) -> dict[str, Any
         "mostly_unexplained": bool(causes) and rest > excess_usd / 2,
     }
     if not causes:
-        return {"cause": None, "cause_label": None, "confidence": None, "headline": None} | out
+        none = {"cause": None, "cause_label": None, "cause_color": None, "confidence": None}
+        return none | {"headline": None} | out
     named = [e for e in causes if e.cause != CauseKind.UNEXPLAINED]
     top = max(named or causes, key=lambda e: e.excess_usd)
     cause = str(top.cause)
@@ -991,6 +1027,7 @@ def _headline(causes: Sequence[Explanation], excess_usd: float) -> dict[str, Any
     return {
         "cause": cause,
         "cause_label": label,
+        "cause_color": cause_color(cause),
         "confidence": str(top.confidence),
         "headline": top.title if named else label,
     } | out
@@ -1023,8 +1060,8 @@ def _spike_json(
         "key": spike_key(sp),
         "kind": sp.kind.value,
         "scope": sp.scope,
-        "start": ms(sp.start),
-        "end": ms(sp.end),
+        "start": iso(sp.start, ctx.tz),
+        "end": iso(sp.end, ctx.tz),
         "session_id": sp.session_id,
         "agent_id": sp.agent_id,
         "agent_type": agent.agent_type if agent else None,
@@ -1068,12 +1105,12 @@ def _spike_window(ctx: Context, sp: Spike) -> dict[str, Any]:
         extra[k] += x
         usual[k] += cost - x
     return {
-        "start": ms(lo),
+        "start": iso(lo, ctx.tz),
         "step_s": int(step.total_seconds()),
         "usual": [round(v, 6) for v in usual],
         "extra": [round(v, 6) for v in extra],
-        "spike_start": ms(sp.start),
-        "spike_end": ms(sp.end),
+        "spike_start": iso(sp.start, ctx.tz),
+        "spike_end": iso(sp.end, ctx.tz),
     }
 
 
@@ -1121,7 +1158,15 @@ def spikes(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     by_cause = sorted(
         totals.items(), key=lambda kv: (kv[0] == CauseKind.UNEXPLAINED.value, -kv[1][0])
     )
+    # ?cause= keeps the spikes with an explanation of that cause; `causes` still
+    # lists every cause (the page's filter chips)
+    cause = query.get("cause") or None
+    if cause is not None:
+        if cause not in {c.value for c in CauseKind}:
+            raise ApiError(400, "bad_query", "cause names no known cause")
+        found = [sp for sp in found if any(str(e.cause) == cause for e in causes.get(sp, ()))]
     shown = sorted(found, key=lambda sp: -sp.excess_usd)[:MAX_SPIKES]
+    largest = spike_key(shown[0]) if shown else None
     wanted = query.get("spike")  # a linked spike is listed even when it is not among the largest
     if wanted and not any(spike_key(sp) == wanted for sp in shown):
         shown += [sp for sp in found if spike_key(sp) == wanted][:1]
@@ -1148,6 +1193,8 @@ def spikes(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
         "count": len(found),
         "excess_usd": round(sum(sp.excess_usd for sp in found), 6),
         "explained": explained_count,
+        "largest": largest,
+        "cause": cause,
         "project": project,
         "project_path": projects[project][0] if project in projects else None,
         "by_project": [
@@ -1163,6 +1210,7 @@ def spikes(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
             {
                 "cause": k,
                 "label": CAUSE_LABELS.get(k, k),
+                "color": cause_color(k),
                 "excess_usd": round(v[0], 6),
                 "explanations": int(v[1]),
             }
@@ -1209,12 +1257,16 @@ def limits(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
 def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     days = _int(query, "days", 14, 1, 366)
     since = ctx.midnight(days - 1)
-    found = ctx.analysis.checks(ctx.index, ctx.table, since, ctx.now)
+    every = ctx.analysis.checks(ctx.index, ctx.table, since, ctx.now)
+    # as `capcom checks`: findings under the floor are counted in one line, not listed
+    found = [f for f in every if f.saving_usd_per_week >= MIN_LISTED_USD_PER_WEEK]
+    small = [f for f in every if f.saving_usd_per_week < MIN_LISTED_USD_PER_WEEK]
     kinds = {f.kind for f in found}
     infos = ctx.infos()
     names = ctx.names(infos)
     dirs = {info.project_dir for info in infos.values()}
     counted = counted_findings(found, dirs)
+    blockers = overlap_blockers(found, dirs)
     overlapping = any(finding_overlaps(f) for f in found)
     calls = _subagent_calls(ctx, since) if "one_command_subagents" in kinds else {}
     comps = _compactions(ctx, since) if "late_compactions" in kinds else {}
@@ -1238,6 +1290,8 @@ def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
                 "metrics": {k: _plain(v) for k, v in f.metrics.items()},
                 "overlaps": list(finding_overlaps(f)),
                 "counted": counted[i],
+                # the counted findings (their `n`) that kept this one out of the total
+                "overlapped_by": [j + 1 for j in blockers[i]],
                 "visual": _visual(f, calls, comps),
             }
         )
@@ -1246,10 +1300,87 @@ def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
         "days": days,
         "since": iso(since, ctx.tz),
         "until": iso(ctx.now, ctx.tz),
+        "rollups": _rollups(found, rows),
         "findings": rows,
         "overlapping": overlapping,
         "total": total,
+        "small": {
+            "findings": len(small),
+            "usd_per_week": round(sum(f.saving_usd_per_week for f in small), 6),
+            "below_usd_per_week": MIN_LISTED_USD_PER_WEEK,
+        },
+        "footer": _checks_footer(total, len(small)),
     }
+
+
+def _rollups(found: Sequence[Finding], rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """One row per kind (capcom.checks.rollup): its saving across its scopes, the
+    scopes' shares (labeled as the findings' rows) and the numbers of its findings
+    in `findings`. Judgement calls come last, apart: they are never in the total."""
+    from capcom.checks.rollup import rollup
+
+    judged = {f.kind for f in found if f.metrics.get("judgement_call")}
+    labels = {(r["kind"], r["scope"]): r for r in rows}
+    left_out = [{found[n - 1].kind for n in row["overlapped_by"]} for row in rows]
+    out = []
+    for r in sorted(rollup(found, left_out), key=lambda r: r.kind in judged):
+        members = [row for row in rows if row["kind"] == r.kind]
+        out.append(
+            {
+                "kind": r.kind,
+                "title": r.title,
+                "headline": r.headline,
+                "saving_usd_per_week": round(r.saving_usd_per_week, 6),
+                "scope_noun": r.scope_noun,
+                "scopes": [
+                    {
+                        "scope": sc.scope,
+                        "scope_label": labels[(r.kind, sc.scope)]["scope_label"]
+                        if (r.kind, sc.scope) in labels
+                        else sc.scope,
+                        "saving_usd_per_week": round(sc.saving_usd_per_week, 6),
+                        "share": round(sc.share, 4),
+                    }
+                    for sc in r.scopes
+                ],
+                "findings": [row["n"] for row in members],
+                "overlaps": list(r.overlaps),
+                "judgement_call": r.kind in judged,
+                # every finding of the kind counted in the total, some, or none
+                "counted": (
+                    "all"
+                    if all(row["counted"] for row in members)
+                    else "some"
+                    if any(row["counted"] for row in members)
+                    else "none"
+                ),
+            }
+        )
+    return out
+
+
+def _checks_footer(total: Mapping[str, Any] | None, small: int) -> str:
+    """What the checks total covers, in plain words, for the page's footer."""
+    parts = [
+        "Each saving is an estimate at this window's pace, net of the cost of a fresh "
+        "start where the advice means one, and an upper bound (\u201cup to\u201d)."
+    ]
+    if total is not None:
+        parts.append(
+            f"The total adds {total['findings']} of the {total['of']} listed findings: "
+            "where two findings may count the same dollars, only the larger is added."
+        )
+        if "judgement_calls" in total:
+            parts.append(
+                "Judgement calls on quality, such as a cheaper model for an agent, are "
+                "not in it: they would shrink the other savings on the same requests."
+            )
+    if small:
+        parts.append(
+            f"Findings under ${MIN_LISTED_USD_PER_WEEK:.2f}/week are not listed and not in it."
+        )
+    parts.append("The money is API-equivalent at list prices, not what your plan bills.")
+    return " ".join(parts)
 
 
 def _subagent_calls(ctx: Context, since: datetime) -> dict[str, list[int]]:

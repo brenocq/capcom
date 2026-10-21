@@ -4,7 +4,7 @@
 import {
   h, api, usd, tokens, pct, seg, legend, empty, errorBox, setQuery, monthDay, localDate, dayName, hm,
   outputUsd, estimateNote, lowerMark, SERIES, OTHER_COLOR, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor,
-  spikeText, spikeHref, projectChip,
+  spikeText, spikeHref, projectChip, storyLine,
 } from './lib.js';
 import { bandChart, dayBars, heatmap, heatScale } from './charts.js';
 import { sessionsTable } from './sessions.js';
@@ -32,16 +32,20 @@ function spikeWhen(m) {
   return [`${monthDay(d)} ${hm(d)}`, ...where].join(' · ');
 }
 
-// The markers that fit a chart from x0 to x1 (ms): the largest by excess first, at
-// least `gap` of the axis apart, at most `max`, renumbered in time order. The list
-// beside the chart uses the same set, so the numbers match.
-export function pickSpikes(sp, x0, x1, gap = 0.04, max = 8) {
+// The markers that fit a chart from x0 to x1 (ms): the `keep` largest by excess
+// always (the list beside the chart names them), then the next largest at least
+// `gap` of the axis apart, at most `max`, renumbered in time order. The list
+// beside the chart uses the same set, so the numbers match. Marker times come as
+// ISO strings and leave as epoch ms.
+export function pickSpikes(sp, x0, x1, gap = 0.04, max = 8, keep = 4) {
   if (!sp) return null;
   const span = Math.max(x1 - x0, 1);
   const chosen = [];
-  for (const m of [...sp.marks].sort((a, b) => b.excess_usd - a.excess_usd)) {
-    if (m.t < x0 || m.t > x1) continue;
-    if (chosen.every((c) => Math.abs(c.t - m.t) / span >= gap)) chosen.push(m);
+  const inRange = sp.marks.map((m) => ({ ...m, t: typeof m.t === 'number' ? m.t : Date.parse(m.t) }))
+    .filter((m) => m.t >= x0 && m.t <= x1)
+    .sort((a, b) => b.excess_usd - a.excess_usd);
+  for (const m of inRange) {
+    if (chosen.length < keep || chosen.every((c) => Math.abs(c.t - m.t) / span >= gap)) chosen.push(m);
     if (chosen.length >= max) break;
   }
   chosen.sort((a, b) => a.t - b.t);
@@ -65,7 +69,7 @@ export function spikeList(sp, days, limit = 4) {
       h('span.meta', null, projectChip(m), h('span', { text: spikeWhen(m) })),
       h('b', { text: spikeText(m).title }),
       spikeText(m).rest ? h('span.rest', { text: spikeText(m).rest }) : null,
-      h('span.tags', null, h('span.tag', { text: spikeText(m).tag }),
+      h('span.tags', null, spikeText(m).same ? null : h('span.tag', { text: spikeText(m).tag }),
         h('span.plus', { text: `+${usd(m.excess_usd)}` }),
         h('span.note', { text: `${m.requests} request${m.requests === 1 ? '' : 's'}, ${usd(m.cost_usd)} in all` })))));
   const more = sp.count > rows.length ? `${sp.count} spike${sp.count === 1 ? '' : 's'} in all, +${usd(sp.excess_usd)} over their baselines; the largest are marked. ` : '';
@@ -92,6 +96,8 @@ export async function renderSpend(main, r) {
     h('div.controls', null,
       seg('Range', RANGES, days, (v) => setQuery({ days: v })),
       seg('Split by', GROUPS, group, (v) => setQuery({ group: v })))));
+  const story = storyLine(d.regime);
+  if (story) main.append(story);
 
   // cumulative
   const cum = h('section.card', { style: 'padding-bottom:18px' });

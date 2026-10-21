@@ -711,6 +711,21 @@ class SqliteIndex:
                 _dt_opt(next_ts),
             )
 
+    def process_starts(self, session_id: str | None = None) -> dict[str, list[int]]:
+        """The distinct process start times (cost-state `startTime`, epoch ms) of
+        each session, oldest first: one per Claude Code process that wrote a
+        cost-state (a resumed session has several)."""
+        sql = "SELECT DISTINCT session_id, start_time_ms FROM cost_states "
+        sql += "WHERE start_time_ms IS NOT NULL"
+        args: list[Any] = []
+        if session_id is not None:
+            sql += " AND session_id = ?"
+            args.append(session_id)
+        out: dict[str, list[int]] = {}
+        for sid, start in self._con.execute(sql + " ORDER BY session_id, start_time_ms", args):
+            out.setdefault(sid, []).append(int(start))
+        return out
+
     def shared_replies(
         self, session_id: str, since: datetime | None = None, until: datetime | None = None
     ) -> int:

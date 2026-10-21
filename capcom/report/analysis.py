@@ -11,8 +11,9 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Protocol
+from typing import Any, Protocol
 
+from capcom.timeline.regimes import RegimeChange
 from capcom.types import (
     Explanation,
     Finding,
@@ -54,6 +55,8 @@ class SeriesFn(Protocol):
 SpikesFn = Callable[[Index, PriceTable, datetime, datetime, str | None], list[Spike]]
 ExplainFn = Callable[[Index, PriceTable, Sequence[Spike]], list[Explanation]]
 ChecksFn = Callable[[Index, PriceTable, datetime, datetime], list[Finding]]
+# capcom.timeline.regime_changes(index, table, since, until, tz, openclaw_root)
+RegimesFn = Callable[..., list[RegimeChange]]
 
 
 def _call[T](module: str, milestone: int, fn: Callable[[], T]) -> T:
@@ -72,6 +75,7 @@ class Analysis:
     find_spikes_fn: SpikesFn
     explain_fn: ExplainFn
     checks_fn: ChecksFn
+    regimes_fn: RegimesFn | None = None  # None: capcom.timeline.regime_changes
 
     def cumulative(
         self,
@@ -134,6 +138,20 @@ class Analysis:
         self, index: Index, table: PriceTable, since: datetime, until: datetime
     ) -> list[Finding]:
         return _call("checks", 4, lambda: self.checks_fn(index, table, since, until))
+
+    def regimes(self) -> RegimesFn:
+        """The function behind the "what changed" story (capcom.report.story)."""
+        if self.regimes_fn is not None:
+            fn = self.regimes_fn
+        else:
+            from capcom.timeline.regimes import regime_changes
+
+            fn = regime_changes
+
+        def call(*args: Any, **kwargs: Any) -> list[RegimeChange]:
+            return _call("timeline", 2, lambda: fn(*args, **kwargs))
+
+        return call
 
 
 def default_analysis() -> Analysis:

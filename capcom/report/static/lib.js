@@ -273,7 +273,10 @@ export const SPIKE_KINDS = {
 export function spikeText(m) {
   const kind = SPIKE_KINDS[m.kind] || [m.kind, m.kind];
   const rest = m.mostly_unexplained && m.cause !== 'unexplained' ? `mostly unexplained: ${usd(m.unexplained_usd)} of ${usd(m.excess_usd)}` : null;
-  return { title: m.headline || kind[0], tag: m.cause_label || kind[1], unexplained: m.cause === 'unexplained', rest };
+  const title = m.headline || kind[0], tag = m.cause_label || kind[1];
+  // `same`: the title already starts with the tag's words, so the tag would repeat it
+  const same = title.toLowerCase().startsWith(tag.toLowerCase());
+  return { title, tag, same, unexplained: m.cause === 'unexplained', rest };
 }
 
 // The Spikes page for one spike: a window of whole days that starts on or before it.
@@ -296,4 +299,26 @@ export function projectChip(it, onPick) {
   const title = it.project_path && it.project_path !== it.project ? `Project ${it.project_path}` : `Project ${it.project}`;
   if (!onPick) return h('span.tag.proj', { text: it.project, title });
   return h('button.tag.proj', { type: 'button', text: it.project, title: `${title}: show its spikes only`, onclick: (e) => { e.preventDefault(); e.stopPropagation(); onPick(it.project); } });
+}
+
+// The "what changed" line (/api/overview `regime`): the level the daily spend rose
+// to, from when, and the sessions behind it (each linked to its page) and the
+// agent type that rose most. Null without a change.
+export function storyLine(reg) {
+  if (!reg) return null;
+  const day = new Date(reg.day + 'T12:00:00');
+  const times = reg.ratio == null ? 'from nothing' : `×${reg.ratio.toFixed(1)}`;
+  const money = (x) => usd(x, x >= 10 ? 0 : 2);
+  const parts = [`Spend rose ${times} from ${monthDay(day)} (${money(reg.before_usd_per_day)} to ${money(reg.after_usd_per_day)} a day)`];
+  const named = reg.sessions.filter((x) => x.in_text);
+  const kids = [];
+  named.forEach((x, i) => {
+    if (i) kids.push(i === named.length - 1 ? ' and ' : ', ');
+    const label = `${x.project ? x.project + ' ' : ''}${x.key.slice(0, 8)}`;
+    kids.push(h('a', { href: sessionHref(x.key), text: label, title: x.title || x.key }), ` (${pct(x.share)})`);
+  });
+  const agent = reg.agent_types.find((a) => !a.rest);
+  const agentText = agent ? `${agent.key === 'main' ? 'main threads' : agent.key + ' subagents'} ${pct(agent.share)}` : null;
+  return h('p.story', { title: `Mean daily spend in the ${reg.after_days} days from ${monthDay(day)} against the 7 days before` },
+    parts[0], named.length || agentText ? ': ' : '', ...kids, named.length && agentText ? '; ' : '', agentText || '', '.');
 }

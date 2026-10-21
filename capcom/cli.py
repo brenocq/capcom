@@ -26,16 +26,28 @@ def _scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _story(days: int, show: bool) -> None:
+    """The "what changed" line (capcom.report.story) above a command's output."""
+    if not show:
+        return
+    from capcom.report.story import story_line
+
+    line = story_line(load_config(), days)
+    if line:
+        print(line + "\n", flush=True)
+
+
 def _top(args: argparse.Namespace) -> int:
     from capcom.cost.top import run_top
 
+    _story(args.days, not args.no_story)
     return run_top(load_config(), by=args.by, days=args.days, limit=args.limit)
 
 
 def _calibrate(args: argparse.Namespace) -> int:
-    from capcom.cost.top import run_calibrate
+    from capcom.report.calibration import run_calibrate
 
-    return run_calibrate(load_config(), limit=args.limit)
+    return run_calibrate(load_config(), limit=args.limit, days=args.days, project=args.project)
 
 
 def _serve(args: argparse.Namespace) -> int:
@@ -47,6 +59,7 @@ def _serve(args: argparse.Namespace) -> int:
 def _spikes(args: argparse.Namespace) -> int:
     from capcom.explain.cli import run_spikes
 
+    _story(args.days, not args.no_story)
     return run_spikes(load_config(), days=args.days, limit=args.limit)
 
 
@@ -77,10 +90,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     top.add_argument("--days", type=int, default=14, help="window, in days (0: all)")
     top.add_argument("--limit", type=int, default=20)
+    top.add_argument(
+        "--no-story", action="store_true", help="leave out the 'spend rose' line at the top"
+    )
     top.set_defaults(func=_top)
 
     cal = sub.add_parser("calibrate", help="capcom's totals against Claude Code's cost-state")
     cal.add_argument("--limit", type=int, default=20)
+    cal.add_argument(
+        "--days", type=int, default=0, help="sessions active in the last N days (0: all)"
+    )
+    cal.add_argument("--project", help="one project: its label, folder or project folder")
     cal.set_defaults(func=_calibrate)
 
     serve = sub.add_parser("serve", help="the local website, on 127.0.0.1")
@@ -94,6 +114,9 @@ def build_parser() -> argparse.ArgumentParser:
     spikes = sub.add_parser("spikes", help="spend spikes and their causes")
     spikes.add_argument("--days", type=int, default=14, help="window, in days (0: all)")
     spikes.add_argument("--limit", type=int, default=20)
+    spikes.add_argument(
+        "--no-story", action="store_true", help="leave out the 'spend rose' line at the top"
+    )
     spikes.set_defaults(func=_spikes)
 
     checks = sub.add_parser("checks", help="setup warnings with their weekly saving")

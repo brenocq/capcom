@@ -14,8 +14,10 @@ late compactions (two ways to the same rereads, so they overlap each other)
 against a simulated handoff or earlier compaction, while the rewrite findings
 (idle, tool waits, model switches; each request in at most one)
 count only a rewrite's premium above that read. Items carried in prompts are
-priced at the full prompt price, so they overlap those findings: `overlaps()` names
-the kinds a finding may share dollars with, and such findings are not to be added up.
+priced at the full prompt price: those at the start of the prompt overlap the
+rewrites (not the rereads above the line: a fresh start reloads them), those
+written into the conversation overlap both. `overlaps()` names the kinds a finding
+may share dollars with (`_OVERLAP_PAIRS`), and such findings are not to be added up.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from capcom.checks.facts import (
     Thread,
     heartbeat,
 )
+from capcom.checks.rollup import AGENT_KINDS
 from capcom.cost.top import TEMPORARY, project_label
 from capcom.explain.shared import (
     IDLE_EXPIRY,
@@ -1402,45 +1405,77 @@ def all_findings(
     found.extend(session_findings(facts, definitions, openclaw_root))
     found.sort(key=lambda f: (-f.saving_usd_per_week, f.kind, f.scope))
     present = {f.kind for f in found}
-    return [replace(f, metrics={**f.metrics, "overlaps": overlaps(f.kind, present)}) for f in found]
+    places = type_folders(facts)
+    return [
+        replace(
+            f,
+            metrics={
+                **f.metrics,
+                "overlaps": overlaps(f.kind, present),
+                # an agent type's finding shares dollars only with findings on the
+                # project folders the type ran in (capcom.report.tally)
+                **({"folders": places.get(f.scope, ())} if f.kind in AGENT_KINDS else {}),
+            },
+        )
+        for f in found
+    ]
 
 
-# Items carried in prompts: their cost includes the cache rewrites and the long
-# contexts they are part of, so those findings may count the same dollars. The
-# context and rewrite kinds among themselves are disjoint (module docstring).
-_PROMPT_ITEMS = (
+def type_folders(facts: Facts) -> dict[str, tuple[str, ...]]:
+    """The project folders (and their scope labels) each agent type ran in."""
+    out: dict[str, set[str]] = defaultdict(set)
+    for a in facts.agents.values():
+        project = facts.project_of(a.session_id)
+        if project:
+            out[a.agent_type or "(unknown agent)"].update({project, _group(project)})
+    return {k: tuple(sorted(v)) for k, v in out.items()}
+
+
+# Overlaps by the dollars a saving claims, not kind by kind:
+# - REREADS: rereads above a context line (a handoff, an earlier compaction, a
+#   fresh session); two ways to the same rereads overlap each other. A heartbeat
+#   that resumes one growing session claims its own sessions' rereads the same way.
+# - REWRITES: the premium of a cache rewrite after a gap (idle, a tool wait, a model
+#   or tool switch, a subagent's expiry or late resume); each request is in at most
+#   one, so they never overlap one another, nor the rereads (a rewrite's premium is
+#   above the read price the rereads count).
+# - PREFIX items, at the start of every prompt: below the line (a fresh start
+#   reloads them), so they share no rereads, but every rewrite rewrites them.
+# - TAIL items, written into the conversation: they ride in the rereads above the
+#   line and in the rewrites, so they overlap both.
+_REREADS = (
+    "long_running_agents",
+    "late_compactions",
+    "session_never_ended",
+    "heartbeat_growing_session",
+)
+_REWRITES = (
+    "idle_cache_rewrites",
+    "subagent_cache_expiry",
+    "subagent_resumed_late",
+    "model_switches",
+)
+_PREFIX = (
     "claudeai_connectors_unused",
     "mcp_servers_unused",
     "skills_unused",
     "large_memory",
     "agent_tools_unused",
-    "long_subagent_reports",
-    "images_in_tool_results",
 )
-_CONTEXT = (
-    "long_running_agents",
-    "late_compactions",
-    "idle_cache_rewrites",
-    "subagent_resumed_late",
-    "subagent_cache_expiry",
-    "model_switches",
-    "session_never_ended",
-    "heartbeat_growing_session",
-)
+_TAIL = ("images_in_tool_results", "long_subagent_reports")
+_PROMPT_ITEMS = (*_PREFIX, *_TAIL)
+_CONTEXT = (*_REREADS, *_REWRITES)
 _OVERLAP_PAIRS: frozenset[frozenset[str]] = frozenset(
-    {frozenset({a, b}) for a in _PROMPT_ITEMS for b in _CONTEXT}
-    | {frozenset({"agent_tools_unused", b}) for b in _PROMPT_ITEMS[:3]}
+    {frozenset({a, b}) for a in _REREADS for b in _REREADS if a != b}
+    | {frozenset({a, b}) for a in _PREFIX for b in _REWRITES}
+    | {frozenset({a, b}) for a in _TAIL for b in _CONTEXT}
+    # an agent's unused tools include the MCP tools, connectors and skills it was
+    # given: the same prefix tokens, counted by both
+    | {frozenset({"agent_tools_unused", b}) for b in _PREFIX[:3]}
+    # a one-command subagent's whole run is its saving, whatever it carried
     | {frozenset({"one_command_subagents", b}) for b in (*_PROMPT_ITEMS, *_CONTEXT)}
-    # two ways to the same rereads: a handoff, an earlier compaction, a fresh session
-    | {
-        frozenset(pair)
-        for pair in (
-            ("long_running_agents", "late_compactions"),
-            ("long_running_agents", "session_never_ended"),
-            ("late_compactions", "session_never_ended"),
-        )
-    }
-    # pricing a type's requests on Sonnet cuts every dollar they spent
+    # pricing a type's requests on Sonnet cuts every dollar they spent (a judgement
+    # call, never in the total)
     | {frozenset({"model_mix", b}) for b in (*_PROMPT_ITEMS, *_CONTEXT, "one_command_subagents")}
 )
 

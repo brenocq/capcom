@@ -2,7 +2,7 @@
 
 import {
   h, s, api, usd, tokens, pct, seg, legend, empty, setQuery, longDate, barList, hm,
-  outputUsd, estimateNote, lowerMark, LOWER_TITLE, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor,
+  outputUsd, estimateNote, lowerMark, LOWER_TITLE, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor, storyLine,
 } from './lib.js';
 import { bandChart, sparkline } from './charts.js';
 import { pendingBlock } from './sessions.js';
@@ -25,6 +25,8 @@ export async function renderOverview(main, r) {
     h('div.titles', null, h('h1', { text: greeting(now) }),
       h('p.sub', { text: `${longDate(now)} · ${d.running_sessions} session${d.running_sessions === 1 ? '' : 's'} running` })),
     seg('Range', [['today', 'Today'], ['7d', '7 days']], range, (v) => setQuery({ range: v === 'today' ? null : v }))));
+  const story = storyLine(d.regime);
+  if (story) main.append(story);
 
   const lim = d.limits || {};
   const wins = lim.windows || {};
@@ -110,10 +112,13 @@ export async function renderOverview(main, r) {
       (x) => (x.key === 'main' ? `${x.count} session${x.count === 1 ? '' : 's'}` : `${x.count} spawn${x.count === 1 ? '' : 's'}`)));
   const checks = h('section.card', null, h('div.split', null, h('h2.small', { text: 'Worth changing' }), h('a.link', { href: '/checks', text: 'All checks' })));
   const found = await pendingBlock('checks', 'days=14');
-  checks.append(found.block || (found.data.findings.length
-    ? h('div.blist', null, found.data.findings.slice(0, 3).map((f) => h('a', { href: '/checks', style: 'display:flex;justify-content:space-between;gap:12px;text-decoration:none' },
-      h('span', { style: 'display:flex;flex-direction:column;gap:2px' }, h('b', { text: f.title }), h('span.note', { text: f.summary })),
-      h('span.mono', { style: 'color:var(--clay);white-space:nowrap', text: 'up to ' + usd(f.saving_usd_per_week, 0) + '/wk' }))))
+  // the largest kinds across their scopes (judgement calls are not savings to count)
+  const kinds = found.block ? [] : (found.data.rollups || []).filter((k) => !k.judgement_call);
+  checks.append(found.block || (kinds.length
+    ? h('div.blist', null, kinds.slice(0, 3).map((k) => h('a', { href: '/checks', style: 'display:flex;justify-content:space-between;gap:12px;text-decoration:none' },
+      h('span', { style: 'display:flex;flex-direction:column;gap:2px' }, h('b', { text: k.title }),
+        h('span.note', { text: k.scopes.length === 1 && k.scopes[0].scope === 'all' ? 'across every project' : `across ${k.scopes.length} ${k.scope_noun}${k.scopes.length === 1 ? '' : 's'}, most in ${k.scopes[0].scope_label}` })),
+      h('span.mono', { style: 'color:var(--clay);white-space:nowrap', text: 'up to ' + usd(k.saving_usd_per_week, 0) + '/wk' }))))
     : empty(null, 'Nothing to change in the last 14 days.')));
   main.append(h('div.grid', { style: '--min:300px' }, projects, agents, checks));
   main.append(h('p.note', { style: 'margin:0', text: `Totals for ${label}, at list prices (API-equivalent). ${t.inexact_price_requests ? `${t.inexact_price_requests} requests priced as the closest model family.` : ''}` }));

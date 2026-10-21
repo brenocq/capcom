@@ -638,11 +638,13 @@ def test_a_project_definition_wins_over_the_user_one_for_its_sessions(tmp_path: 
 # --------------------------------------------------------------------------- overlaps
 
 
-def test_agent_tools_unused_overlaps_every_context_kind(tmp_path: Path) -> None:
-    from capcom.checks.rules import _CONTEXT, overlaps
+def test_agent_tools_unused_overlaps_the_rewrites_only(tmp_path: Path) -> None:
+    from capcom.checks.rules import _REREADS, _REWRITES, overlaps
     from tests.checks.test_usage import _tool_wait
 
-    assert set(_CONTEXT) <= set(overlaps("agent_tools_unused"))
+    # prefix tokens: rewritten after every gap, but below the line a handoff keeps
+    assert set(_REWRITES) <= set(overlaps("agent_tools_unused"))
+    assert not set(_REREADS) & set(overlaps("agent_tools_unused"))
     folder = _definition(tmp_path, "tools: Read, Bash, Write")
     reqs, agents = _coder_runs(("Read",))
     wait, evs, wait_agents = _tool_wait(12, agent_id="w1")
@@ -653,10 +655,46 @@ def test_agent_tools_unused_overlaps_every_context_kind(tmp_path: Path) -> None:
     assert "agent_tools_unused" in expiry.metrics["overlaps"]
 
 
-def test_findings_name_the_kinds_they_may_overlap_with() -> None:
+def test_prefix_items_do_not_overlap_the_rereads() -> None:
     reqs = run(100, cache_read=200_000)
     found = _checks(index(reqs, _connector_events()))
+    # connectors sit at the start of the prompt, below the line a handoff keeps:
+    # they share no dollars with the rereads above it
     f = only(found, "claudeai_connectors_unused")
-    assert f.metrics["overlaps"] == ("long_running_agents",)
+    assert f.metrics["overlaps"] == ()
     lr = only(found, "long_running_agents")
-    assert lr.metrics["overlaps"] == ("claudeai_connectors_unused",)
+    assert lr.metrics["overlaps"] == ()
+
+
+def test_overlaps_follow_the_claim_types() -> None:
+    from capcom.checks.rules import _PREFIX, _REREADS, _REWRITES, _TAIL, overlaps
+
+    for a in _REREADS:  # (a) x (a) overlap, (a) x (b) never
+        assert set(_REREADS) - {a} <= set(overlaps(a))
+        assert not set(_REWRITES) & set(overlaps(a))
+    for b in _REWRITES:  # each request is in one rewrite at most
+        assert not set(_REWRITES) & set(overlaps(b))
+        assert set(_PREFIX) | set(_TAIL) <= set(overlaps(b))
+    for t in _TAIL:
+        assert set(_REREADS) | set(_REWRITES) <= set(overlaps(t))
+    assert "model_mix" in overlaps("long_running_agents")
+
+
+def test_type_folders_are_where_each_agent_type_ran() -> None:
+    from datetime import UTC, datetime
+
+    from capcom.checks.facts import Facts
+    from capcom.checks.rules import type_folders
+    from capcom.types import AgentInfo
+
+    t = datetime(2026, 10, 1, tzinfo=UTC)
+    facts = Facts(t, t)
+    facts.agents = {
+        "a1": AgentInfo("a1", "s1", "coder"),
+        "a2": AgentInfo("a2", "s2", "coder"),
+        "a3": AgentInfo("a3", "s1"),
+    }
+    facts.session_project = {"s1": "-home-u-alpha", "s2": "-tmp-claude-1000--home-u-beta-x"}
+    got = type_folders(facts)
+    assert set(got["coder"]) >= {"-home-u-alpha", "-tmp-claude-1000--home-u-beta-x"}
+    assert got["(unknown agent)"] == ("-home-u-alpha",)

@@ -8,7 +8,7 @@ import io
 import threading
 import time
 from collections.abc import Sequence
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -127,7 +127,8 @@ def test_spikes_with_causes(spiky: Path) -> None:
     win = item["window"]
     assert len(win["usual"]) == len(win["extra"]) <= api.WINDOW_BARS + 1
     assert sum(win["extra"]) == pytest.approx(item["excess_usd"], abs=1e-4)
-    k = (win["spike_start"] - win["start"]) // (win["step_s"] * 1000)
+    gap = datetime.fromisoformat(win["spike_start"]) - datetime.fromisoformat(win["start"])
+    k = int(gap.total_seconds()) // win["step_s"]
     assert [i for i, x in enumerate(win["extra"]) if x > 0] == [k]
     assert sum(win["usual"]) > 0  # the cheap turns around it
 
@@ -192,7 +193,7 @@ def test_session_scope_spike_window_counts_every_thread(spiky: Path) -> None:
     assert sum(win["extra"]) == pytest.approx(0.75 * cost, rel=1e-3)
     # usual pace: the spike at its baseline, plus the main thread and the scout
     # inside the window
-    lo = win["start"]
+    lo = datetime.fromisoformat(win["start"]).timestamp() * 1000
     hi = lo + len(win["usual"]) * win["step_s"] * 1000
     main_and_scout = [
         r for r in reqs if r.agent_id != "a2" and lo <= r.timestamp.timestamp() * 1000 < hi

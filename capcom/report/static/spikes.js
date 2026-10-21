@@ -22,12 +22,14 @@ function where(it) {
 export async function renderSpikes(main, r) {
   const days = Number(r.query.get('days')) || 14;
   const project = r.query.get('project') || '';
+  const cause = r.query.get('cause') || '';
   const head = h('header.head', null,
     h('div.titles', null, h('h1', { text: 'Spikes' })),
     h('div.controls', null, seg('Range', RANGES, days, (v) => setQuery({ days: v, spike: null }))));
   main.append(head);
   const q = new URLSearchParams({ days: String(days) });
   if (project) q.set('project', project);
+  if (cause) q.set('cause', cause);
   const { data: d, block } = await pendingBlock('spikes', q.toString());
   if (block) {
     main.append(h('section.card', null, block));
@@ -35,12 +37,22 @@ export async function renderSpikes(main, r) {
   }
   const titles = head.firstChild;
   const pick = (p) => setQuery({ project: p, spike: null });
+  const pickCause = (c) => setQuery({ cause: c, spike: null });
   if (d.project) {
     titles.append(h('div.chips', null, h('span.note', { text: 'Project' }),
       h('button.tag.proj.filter', { type: 'button', title: `${d.project_path || d.project}: show every project`, 'aria-label': `Remove the filter on project ${d.project}`, onclick: () => pick(null) },
         d.project, h('span', { 'aria-hidden': 'true', text: ' ×' }))));
   }
-  const inProject = d.project ? ` in ${d.project}` : '';
+  // filter chips, one per cause of the window, in its color
+  if (d.causes.length > 1 || d.cause) {
+    main.append(h('div.chips.causechips', null, h('span.note', { text: 'Cause' }),
+      d.causes.map((c) => {
+        const on = d.cause === c.cause;
+        return h('button.tag.filter.causechip', { type: 'button', 'aria-pressed': String(on), title: on ? 'Show every cause' : `Show the spikes ${c.label.toLowerCase()} explains`, onclick: () => pickCause(on ? null : c.cause) },
+          h('i', { style: `background:${c.color || 'var(--gray)'}` }), c.label, on ? h('span', { 'aria-hidden': 'true', text: ' ×' }) : null);
+      })));
+  }
+  const inProject = (d.project ? ` in ${d.project}` : '') + (d.cause ? ` with ${(d.causes.find((c) => c.cause === d.cause) || { label: d.cause }).label.toLowerCase()}` : '');
   if (!d.count) {
     titles.append(h('p.sub', { text: `No spikes${inProject} in ${daysText(days)}: the spend rose at its usual pace.` }));
     main.append(h('section.card', null, empty('Nothing jumped', 'A spike is a request far above its recent median, or a rate that rose and stayed up. None did in this window.')));
@@ -56,10 +68,13 @@ export async function renderSpikes(main, r) {
   if (d.causes.length) {
     const max = maxOf(d.causes.map((c) => c.excess_usd), 1e-9);
     bars.push(h('section.card.grow1', null, h('h2', { text: d.project ? `Extra cost by cause in ${d.project}` : 'Extra cost by cause' }),
-      h('div.causes.one', null, d.causes.map((c) => h('div.cause', null,
-        h('span', { text: c.label }),
-        h('div.track', null, h('div', { style: `width:${(c.excess_usd / max * 100).toFixed(1)}%;background:${c.cause === 'unexplained' ? 'var(--gray)' : 'var(--accent)'}` })),
-        h('span.mono', { text: usd(c.excess_usd) }))))));
+      h('div.causes.one', null, d.causes.map((c) => {
+        const on = d.cause === c.cause;
+        return h('button.cause.pick', { type: 'button', 'aria-pressed': String(on), title: `${c.explanations} explanation${c.explanations === 1 ? '' : 's'}: show these spikes only`, onclick: () => pickCause(on ? null : c.cause) },
+          h('span.plabel', { text: c.label }),
+          h('div.track', null, h('div', { style: `width:${(c.excess_usd / max * 100).toFixed(1)}%;background:${d.cause && !on ? 'var(--gray)' : (c.color || 'var(--gray)')}` })),
+          h('span.mono', { text: usd(c.excess_usd) }));
+      }))));
   }
   const byProject = d.by_project || [];
   if (byProject.length) {
@@ -80,13 +95,14 @@ export async function renderSpikes(main, r) {
 
   // the list and the selected spike
   const items = d.spikes;
-  const largest = items.reduce((a, b) => (b.excess_usd > a.excess_usd ? b : a), items[0]);
+  // the default selection: the window's largest spike
+  const largest = items.find((it) => it.key === d.largest) || items.reduce((a, b) => (b.excess_usd > a.excess_usd ? b : a), items[0]);
   const wanted = r.query.get('spike');
   const sel = items.find((it) => it.key === wanted) || largest;
   const list = h('section.card.spikelist', { 'aria-label': 'Spikes' }, items.map((it) => {
     const txt = spikeText(it);
     return h('button', { type: 'button', 'aria-pressed': String(it === sel), onclick: () => setQuery({ spike: it.key }) },
-      h('span', { class: txt.unexplained || !it.cause ? 'n gray' : 'n', text: String(it.n) }),
+      h('span', { class: txt.unexplained || !it.cause ? 'n gray' : 'n', text: String(it.n), style: it.cause_color && !txt.unexplained ? `background:${it.cause_color};color:#fff` : null }),
       h('span.body', null,
         h('span.row', null, h('span.t', { text: txt.title }), h('span.plus', { text: '+' + usd(it.excess_usd) })),
         txt.rest ? h('span.rest', { text: txt.rest }) : null,
@@ -118,7 +134,7 @@ function detail(it) {
   const box = h('section.card.detail');
   box.append(h('div.tags', null,
     projectChip(it),
-    h('span.tag', { text: txt.tag }),
+    txt.same ? null : h('span.tag', { text: txt.tag }),
     conf ? h('span', { class: `tag conf ${conf}`, text: top.confidence_label || CONFIDENCE[conf] || conf }) : null,
     it.scope === 'session' ? h('span.tag', { text: 'session-wide', title: 'Found over all the threads of the session together, where a fan-out of subagents shows.' }) : null,
     h('span.note', { text: `${when(it.start)} · ${where(it)}` })));
@@ -130,13 +146,15 @@ function detail(it) {
   const others = causes.filter((c) => c !== top);
   if (others.length) {
     box.append(h('div.also', null, h('span.label', { text: 'Also behind it' }),
-      others.map((c) => h('span', null, h('b', { text: c.cause_label }), ` ${c.title} `, h('span.plus', { text: '+' + usd(c.excess_usd) })))));
+      others.map((c) => h('span', null, h('b', { text: c.title && c.title.toLowerCase().startsWith(c.cause_label.toLowerCase()) ? c.title : c.cause_label }), c.title && !c.title.toLowerCase().startsWith(c.cause_label.toLowerCase()) ? ` ${c.title} ` : ' ', h('span.plus', { text: '+' + usd(c.excess_usd) })))));
   }
   if (it.window) box.append(windowChart(it));
 
   const evidence = causes.flatMap((c) => c.evidence);
   const facts = h('div.facts', null, h('h3', { text: 'Evidence in the logs' }),
-    evidence.length ? h('ul.evidence', null, evidence.map((e) => h('li', null, h('span', { text: e.label }))))
+    // every row with its date: its own record's, else the spike's start
+    evidence.length ? h('ul.evidence', null, evidence.map((e) => h('li', null, h('span', { text: e.label }),
+      h('span.note', { text: ' · ' + when(e.timestamp || it.start) }))))
       : h('p.note', { text: causes.length ? 'No log record was cited.' : it.explanations ? 'No cause was matched.' : 'Causes are matched from milestone 3.' }));
   const fix = h('div.fix', null, h('h3', { text: 'What to change' }),
     spikeAdvice(causes).map((a) => h('p', { text: a })),
@@ -147,7 +165,8 @@ function detail(it) {
 
 // Bars around the spike: the usual pace in gray, the extra above it in the accent.
 function windowChart(it) {
-  const w = it.window;
+  // ISO times from the API, epoch ms for the bar arithmetic
+  const w = { ...it.window, start: Date.parse(it.window.start), spike_start: Date.parse(it.window.spike_start), spike_end: Date.parse(it.window.spike_end) };
   const n = w.usual.length;
   const totals = w.usual.map((u, i) => u + w.extra[i]);
   const ymax = maxOf(totals, 1e-6) * 1.1;
