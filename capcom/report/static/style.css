@@ -343,7 +343,6 @@ details.rollup .tags { display: flex; flex-wrap: wrap; gap: 6px; align-items: ba
 .causechip:hover { background: var(--l15); }
 .causechips { align-items: center; margin: -6px 0 0; }
 /* the limits charts: when the forecast runs out (marker on 100 %, guide, label, range band) */
-.runband { position: absolute; height: 8px; transform: translateY(-50%); background: var(--accent-strong); opacity: 0.28; border-radius: 4px; pointer-events: none; }
 .runguide { position: absolute; bottom: 0; border-left: 1px solid var(--l35); pointer-events: none; }
 .rundot { position: absolute; width: 10px; height: 10px; border-radius: 999px; background: var(--accent-strong); transform: translate(-50%, -50%); box-shadow: 0 0 0 2px var(--card); z-index: 2; }
 .runlab { position: absolute; display: flex; flex-direction: column; gap: 2px; white-space: nowrap; pointer-events: none; z-index: 2;

@@ -46,7 +46,8 @@ export function runsOut(fc, at) {
 // crossing of 100 % falls inside [x0, x1] (the reset). `f` is the crossing's place
 // across the plot (0 to 1), `side` where the label goes (left of the marker past the
 // middle, so it never runs off the right edge), `band` the earliest-latest range
-// as fractions clipped to the plot, or null.
+// as fractions clipped to the plot, or null (the chart shows that range as the
+// fan's own crossing of 100 %, not as a separate band).
 export function runoutMark(fc, x0, x1, weekly) {
   if (!fc || !fc.runs_out_at || !(x1 > x0)) return null;
   const t = (iso) => new Date(iso).getTime();
@@ -108,8 +109,10 @@ export function limitChart(opts) {
   const { x0, x1 } = opts;
   const fan = opts.fan || [];
   const runout = opts.runout || null;
-  // headroom above the limit when the fan crosses it; the fan is clipped at 100 %
-  // (usage stops there). With a run-out mark the headroom holds its label: 48 px.
+  // headroom above the limit when the fan crosses it: the fan and its median go on
+  // past 100 % along the forecast, clipped only by the plot's edges, so where the
+  // fan crosses the limit line shows the earliest-latest run-out. With a run-out
+  // mark the headroom holds its label: 48 px.
   const H = (opts.height || 160) + (runout ? 30 : 0);
   let top = 100;
   for (const p of fan) top = Math.max(top, p[3]);
@@ -121,7 +124,7 @@ export function limitChart(opts) {
     s('defs', null, s('linearGradient', { id, x1: 0, y1: 0, x2: 0, y2: 1 },
       s('stop', { offset: 0, style: 'stop-color:var(--accent);stop-opacity:0.34' }),
       s('stop', { offset: 1, style: 'stop-color:var(--accent);stop-opacity:0.06' })),
-      s('clipPath', { id: id + 'c' }, s('rect', { x: 0, y: Y(100), width: W, height: H - Y(100) }))));
+      s('clipPath', { id: id + 'c' }, s('rect', { x: 0, y: 0, width: W, height: H }))));
   const hover = [];
   const stroke = { fill: 'none', 'stroke-width': 2, 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke' };
   const gaps = [];
@@ -149,7 +152,7 @@ export function limitChart(opts) {
   if (fan.length > 1) {
     let band = fan.map((p, i) => (i ? 'L' : 'M') + X(p[0]) + ' ' + Y(p[3])).join('');
     for (let i = fan.length - 1; i >= 0; i--) band += 'L' + X(fan[i][0]) + ' ' + Y(fan[i][2]);
-    // clipped at the limit line, so the fan lies flat on it rather than breaking off
+    // clipped to the plot rectangle only: never flattened at the limit line
     svg.append(s('g', { 'clip-path': `url(#${id}c)` },
       s('path', { d: band + 'Z', fill: `url(#${id})` }),
       s('path', { d: fan.map((p, i) => (i ? 'L' : 'M') + X(p[0]) + ' ' + Y(p[1])).join(''), ...stroke, 'stroke-dasharray': '6 4', style: 'stroke:var(--accent)' })));
@@ -187,9 +190,6 @@ export function limitChart(opts) {
   }
   if (runout) {
     const y100 = yp(100), fx = (f) => (f * 100).toFixed(2) + '%';
-    if (runout.band && runout.band[1] > runout.band[0]) {
-      plot.append(h('div.runband', { style: `left:${fx(runout.band[0])};width:${fx(runout.band[1] - runout.band[0])};top:${y100}` }));
-    }
     plot.append(h('div.runguide', { style: `left:${fx(runout.f)};top:${y100}` }),
       h('span.rundot', { style: `left:${fx(runout.f)};top:${y100}`, title: runout.title }),
       h(`div.runlab.${runout.side}`, { style: `left:${fx(runout.f)};top:${y100}` },
