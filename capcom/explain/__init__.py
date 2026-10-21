@@ -81,6 +81,10 @@ def _explain_one(view: SpikeView) -> list[Explanation]:
         if share <= 0 and out:
             continue
         left -= share
+        summary = c.summary
+        if share < c.excess:
+            # an earlier cause took part of the excess: say what this one keeps
+            summary += f" {fmt.usd(share)} of that is above the usual pace and counted here."
         out.append(
             Explanation(
                 spike,
@@ -90,7 +94,7 @@ def _explain_one(view: SpikeView) -> list[Explanation]:
                 c.title,
                 tuple(c.evidence),
                 c.advice,
-                c.summary,
+                summary,
             )
         )
     if total > 0 and left > REMAINDER_SHARE * total:

@@ -17,6 +17,7 @@ from capcom.types import (
     AgentInfo,
     AttrValue,
     Batch,
+    CauseKind,
     CostState,
     Event,
     EventKind,
@@ -258,3 +259,22 @@ def check_claims(w: World, s: Spike) -> None:
             taken = sum(getattr(u, f) for _, u in view.ledger.claims.get(r.message_id, []))
             assert 0 <= taken <= getattr(r.usage, f), (r.message_id, f)
     assert sum(c.excess for c in found) <= view.cost + 1e-12
+    # every dollar a cause states comes from its own ledger claims: a rule that prices
+    # tokens without claiming them (or claims under another cause) fails here
+    rewrites = {(rw.request.message_id, rw.reason) for rw in view.rewrites}
+    by_id = {r.message_id: r for r in view.requests}
+    claimed: dict[CauseKind, float] = {}
+    for mid, claims in view.ledger.claims.items():
+        r = by_id[mid]
+        for cause, u in claims:
+            v = (
+                view.pricer.rewrite_value(r, u)
+                if (mid, cause) in rewrites
+                else view.pricer.value(r, u)
+            )
+            claimed[cause] = claimed.get(cause, 0.0) + v
+    stated: dict[CauseKind, float] = {}
+    for c in found:
+        stated[c.cause] = stated.get(c.cause, 0.0) + c.excess
+    for cause, x in stated.items():
+        assert abs(x - claimed.get(cause, 0.0)) <= 1e-9 * max(1.0, x), (cause, x, claimed)

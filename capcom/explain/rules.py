@@ -144,7 +144,8 @@ class Pricer:
             cache_read=per(Usage(cache_read=n), "cache_read", n),
             cache_write_5m=per(Usage(cache_write_5m=n), "cache_write", n),
             cache_write_1h=per(Usage(cache_write_1h=n), "cache_write", n),
-            output=per(Usage(output=n), "output", n),
+            # output is priced in the tier of the prompt it answers
+            output=per(Usage(output=n, input=r.usage.context), "output", n),
             web_searches=per(Usage(web_searches=1), "web", 1),
             web_fetches=per(Usage(web_fetches=1), "web", 1),
         )
@@ -349,6 +350,7 @@ class Rewrite:
     same_model: bool = True  # the price table prices both requests as one model
     waited_on: str | None = None  # the tool call that ran through the pause, if any
     ttl_change: tuple[str, str] | None = None  # cacheControl ttl before and after
+    shape_change: bool = False  # the tool list or prompt (shapeHash) changed too
 
 
 def rewritten_tokens(r: Request, prev: Request | None) -> int:
@@ -502,38 +504,40 @@ def classify(rw: Rewrite) -> None:
         return
 
     ttl_prev, ttl_now = _ttl(th, p), _ttl(th, r)
-    if ttl_prev and ttl_now and ttl_prev != ttl_now:
-        rw.reason, rw.confidence = CauseKind.TOOL_SET_CHANGE, Confidence.CLEAR
-        rw.ttl_change = (ttl_prev, ttl_now)
-        rw.evidence = [
-            _ev(
-                f"cacheControl ttl changed from {ttl_prev} to {ttl_now} between the requests "
-                f"at {fmt.clock(p.timestamp)} and {fmt.clock(r.timestamp)}",
-                m,
-                r,
-            ),
-            wrote,
-        ]
-        return
-
+    ttl_changed = bool(ttl_prev and ttl_now and ttl_prev != ttl_now)
     h_prev, h_now = _shape_hash(th, p), _shape_hash(th, r)
     shapes = [
         e for e in evs if e.kind is EventKind.TOOL_SET and e.attrs.get("source") == SHAPE_SOURCE
     ]
-    if (h_prev and h_now and h_prev != h_now) or (
-        shapes and h_prev and shapes[-1].attrs.get("shape_hash") not in (None, h_prev)
-    ):
+    shape_changed = bool(
+        (h_prev and h_now and h_prev != h_now)
+        or (shapes and h_prev and shapes[-1].attrs.get("shape_hash") not in (None, h_prev))
+    )
+    if ttl_changed or shape_changed:
         rw.reason, rw.confidence = CauseKind.TOOL_SET_CHANGE, Confidence.CLEAR
-        rw.evidence = [
-            _ev(
-                f"shapeHash changed between the requests at {fmt.clock(p.timestamp)} and "
-                f"{fmt.clock(r.timestamp)}",
-                m,
-                r,
+        rw.evidence = []
+        if ttl_prev and ttl_now and ttl_changed:
+            rw.ttl_change = (ttl_prev, ttl_now)
+            rw.evidence.append(
+                _ev(
+                    f"cacheControl ttl changed from {ttl_prev} to {ttl_now} between the "
+                    f"requests at {fmt.clock(p.timestamp)} and {fmt.clock(r.timestamp)}",
+                    m,
+                    r,
+                )
             )
-        ]
-        if shapes:
-            rw.evidence.extend(_shape_diff(m, shapes[-1], p.timestamp))
+        if shape_changed:
+            rw.shape_change = True
+            rw.evidence.append(
+                _ev(
+                    f"shapeHash changed between the requests at {fmt.clock(p.timestamp)} and "
+                    f"{fmt.clock(r.timestamp)}",
+                    m,
+                    r,
+                )
+            )
+            if shapes:
+                rw.evidence.extend(_shape_diff(m, shapes[-1], p.timestamp))
         rw.evidence.append(wrote)
         return
 
@@ -726,6 +730,8 @@ def rewrite_candidates(view: SpikeView) -> list[Candidate]:
                 "another, so a change of the cache lifetime mid-session rewrites the whole "
                 "context. Keep one lifetime for the session."
             )
+            if any(rw.shape_change for rw in group):
+                advice += " The tool list or prompt changed too: " + _REWRITE_ADVICE[reason]
         elif reason is CauseKind.TOOL_SET_CHANGE:
             title = "Tool or prompt change rewrote the cache" + (f" {k} times" if k > 1 else "")
             advice = _REWRITE_ADVICE[reason]
@@ -759,12 +765,14 @@ def _rewrite_summary(reason: CauseKind, group: list[Rewrite], excess: float) -> 
         lead = f"{fmt.count_word(len(group), True)} requests"
     if reason is CauseKind.IDLE_REWRITE:
         life = fmt.lifetime(top.lifetime or ONE_HOUR)
-        while_ = f" while {top.waited_on} ran" if top.waited_on else ""
+        # the longest pause, which need not be the costliest rewrite
+        lg = max(group, key=lambda rw: rw.gap)
+        while_ = f" while {lg.waited_on} ran" if lg.waited_on else ""
         why = (
             f"came {fmt.duration(top.gap)} after the previous one{while_}, past its cache "
             f"lifetime of {life}"
             if len(group) == 1
-            else f"came after pauses past the cache lifetime (the longest {fmt.duration(top.gap)}"
+            else f"came after pauses past the cache lifetime (the longest {fmt.duration(lg.gap)}"
             f"{while_})"
         )
     elif reason is CauseKind.COMPACTION:
@@ -774,6 +782,8 @@ def _rewrite_summary(reason: CauseKind, group: list[Rewrite], excess: float) -> 
     elif top.ttl_change:
         a, b = top.ttl_change
         why = f"asked for a {b} cache where the previous one asked for {a}"
+        if top.shape_change:
+            why += ", with a changed tool list or prompt"
     else:
         why = "followed a change of the tool list or the prompt"
     return (
@@ -1399,6 +1409,11 @@ def polling(view: SpikeView) -> list[Candidate]:
         sig: tuple[tuple[str, str], ...] = ()
         for r in m.requests:
             s = _signature(r)
+            if any(k[0] == "Read" for k in s):
+                # paging one file with offset and limit reads parts of different
+                # sizes; only the same result again is a reread
+                sizes = sorted(n for _, n in _results_of(m.thread, r))
+                s = (*s, ("size_tokens", ",".join(map(str, sizes))))
             if s and s == sig:
                 run.append(r)
                 continue
@@ -1442,6 +1457,12 @@ def polling(view: SpikeView) -> list[Candidate]:
         )
     longest = max(len(f[1]) for f in found)
     excess = sum(f[2] for f in found)
+    others = len(found) - 1
+    also = (
+        f", and {fmt.count_word(others)} other run{'s' if others > 1 else ''} like it"
+        if others
+        else ""
+    )
     advice = (
         "Read the file once and keep the part you need instead of rereading it."
         if first.name == "Read"
@@ -1457,7 +1478,7 @@ def polling(view: SpikeView) -> list[Candidate]:
             evidence,
             advice,
             f"The {_who(m)} made {calls} {label} calls in a row from "
-            f"{fmt.hm(run[0].timestamp)}. The repeats and the rereads of their results "
+            f"{fmt.hm(run[0].timestamp)}{also}. The repeats and the rereads of their results "
             f"cost {fmt.usd(excess)}.",
         )
     ]

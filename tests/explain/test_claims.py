@@ -4,10 +4,13 @@ a burst, and removed tokens are priced at the request's own rate."""
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import timedelta
 
 import pytest
 
 from capcom.explain import explain
+from capcom.explain.fmt import duration
+from capcom.explain.rules import Pricer
 from capcom.types import CauseKind, EventKind, Explanation, Spike, SpikeKind
 from tests.explain.helpers import LONG, TABLE, World, at, check_claims, cost, spike
 
@@ -206,3 +209,101 @@ def test_a_spike_inside_one_spawned_agent_is_not_its_fan_out() -> None:
     reqs = [w.req(6 + k, agent="a0", cache_read=200_000, output=8_000) for k in range(4)]
     out = run(w, spike(reqs, kind=SpikeKind.SLOPE_CHANGE, agent="a0"))
     assert all(e.cause is not CauseKind.FAN_OUT for e in out)
+
+
+# --------------------------------------------------------------------------- review fixes
+
+
+def test_the_pick_is_the_latest_same_source_record_before_the_reply() -> None:
+    # two records of the reply's own model and source within 5 minutes: the later one
+    # (1h) wins; a closer one from another source, and one after the reply, do not
+    w = World()
+    w.req(0, cache_write_5m=500_000)
+    p = w.req(0.2, cache_read=500_000)
+    w.api(p, seconds_before=3, cache_ttl="5m", shape_hash="h1")
+    r = w.req(5, cache_write_1h=500_000)
+    w.api(r, seconds_before=200, cache_ttl="5m", shape_hash="h1")
+    w.api(r, seconds_before=60, cache_ttl="1h", shape_hash="h1")
+    w.api(r, seconds_before=1, query_source="agent:custom", cache_ttl="5m", shape_hash="h1")
+    w.api(r, seconds_before=-0.5, cache_ttl="5m", shape_hash="h1")
+    e = run(w, spike([r]))[0]
+    assert e.cause is CauseKind.TOOL_SET_CHANGE
+    assert e.title == "Cache lifetime changed from 5m to 1h"
+
+
+def test_long_context_output_is_priced_at_the_long_rate() -> None:
+    w = World()
+    r = w.req(0, model=LONG, cache_read=300_000, output=20_000)
+    assert Pricer(TABLE).rates(r).output == pytest.approx(22.5 / 1e6)
+    # at the base rate (15) this turn's output would be under half its cost; at the
+    # long-context rate (22.5) it is over half, so it is a heavy-output turn
+    for k in range(1, 4):
+        w.req(k, model=LONG, cache_read=300_000)
+    out = causes(run(w, spike([r])))
+    assert out[CauseKind.THINKING_HEAVY] == pytest.approx(19_900 * 22.5 / 1e6)
+
+
+def test_a_capped_cause_states_its_share() -> None:
+    w = World()
+    p = w.req(0, cache_write_5m=100_000)
+    w.api(p, cache_ttl="5m")
+    r = w.req(30, cache_write_5m=100_000, output=10_000, thinking=8_000)
+    w.api(r, cache_ttl="5m")
+    out = run(w, spike([r], baseline=0.2))
+    by = {e.cause: e for e in out}
+    assert by[CauseKind.IDLE_REWRITE].excess_usd == pytest.approx(0.575)
+    thinking = by[CauseKind.THINKING_HEAVY]
+    assert thinking.excess_usd == pytest.approx(0.1)
+    assert "$0.20 of output" in thinking.summary
+    assert "$0.10 of that is above the usual pace" in thinking.summary
+    assert "of that" not in by[CauseKind.IDLE_REWRITE].summary
+
+
+def test_paging_one_file_is_not_polling() -> None:
+    w = World()
+    reqs = [w.call(k, "Read", "/p/big.py", 3_000 + 100 * k, cache_read=90_000) for k in range(6)]
+    out = run(w, spike(reqs, baseline=6 * 90_000 * 0.5 / 1e6, kind=SpikeKind.SLOPE_CHANGE))
+    assert all(e.cause is not CauseKind.POLLING for e in out)
+
+
+def test_polling_summary_counts_the_other_runs() -> None:
+    w = World()
+    reqs = [w.call(k, "Bash", "sleep", 2_000, cache_read=80_000) for k in range(6)]
+    reqs.append(w.req(6, cache_read=80_000, tools=[("Grep", "x")]))
+    reqs += [w.call(7 + k, "Bash", "sleep", 2_000, cache_read=80_000) for k in range(5)]
+    out = run(w, spike(reqs, kind=SpikeKind.SLOPE_CHANGE))
+    e = next(e for e in out if e.cause is CauseKind.POLLING)
+    assert "and one other run like it" in e.summary
+
+
+def test_a_ttl_and_a_tool_change_are_both_reported() -> None:
+    w = World()
+    w.req(0, cache_write_5m=500_000)
+    p = w.req(0.2, cache_read=500_000)
+    w.api(p, seconds_before=3, cache_ttl="5m", shape_hash="h1")
+    w.event(EventKind.TOOL_SET, 0.3, source="api-request-shape", shape_hash="h2")
+    r = w.req(0.4, cache_write_1h=500_000)
+    w.api(r, seconds_before=3, cache_ttl="1h", shape_hash="h2")
+    e = run(w, spike([r]))[0]
+    assert e.cause is CauseKind.TOOL_SET_CHANGE
+    labels = [ev.label for ev in e.evidence]
+    assert any("cacheControl ttl changed from 5m to 1h" in x for x in labels)
+    assert any("shapeHash changed" in x for x in labels)
+    assert "The tool list or prompt changed too" in e.advice
+    assert "with a changed tool list or prompt" in e.summary
+
+
+def test_idle_summary_names_the_longest_pause() -> None:
+    # the costliest rewrite follows a 30-minute pause; the longest pause is 2 hours
+    w = World()
+    a = w.req(0, cache_write_5m=100_000)
+    w.api(a, cache_ttl="5m")
+    b = w.req(120, cache_write_5m=100_000)
+    w.api(b, cache_ttl="5m")
+    c = w.req(121, cache_read=100_000, cache_write_5m=400_000)
+    w.api(c, cache_ttl="5m")
+    d = w.req(151, cache_write_5m=500_000)
+    w.api(d, cache_ttl="5m")
+    out = run(w, spike([b, c, d], kind=SpikeKind.SLOPE_CHANGE))
+    e = next(e for e in out if e.cause is CauseKind.IDLE_REWRITE)
+    assert f"the longest {duration(timedelta(hours=2))}" in e.summary
