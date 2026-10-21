@@ -255,6 +255,11 @@ class CostState:
     # The record has no time of its own: the time of the last timestamped record
     # before it in the same file (None when there is none).
     timestamp: datetime | None = None
+    # The time of the first timestamped record after it in the same file (None until
+    # one is written). Calibration ends the process's window there, exclusive: the
+    # records just before a cost-state can be out of order, and background subagents
+    # keep spending after the main log's last record.
+    next_timestamp: datetime | None = None
 
 
 Record = Request | Event | AgentInfo | SessionInfo | CostState
