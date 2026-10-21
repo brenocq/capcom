@@ -83,6 +83,18 @@ class RowSource(Protocol):
         """The highest rowid now, or None when the database cannot be read."""
         ...
 
+    def row_key(self, log: LogFile, rowid: int) -> str | None:
+        """The table's own key of the row at `rowid`, or None when there is none."""
+        ...
+
+    def reads_compressed(self) -> bool:
+        """True when this Python can read the compressed rows."""
+        ...
+
+    def unread_from(self, log: LogFile) -> int | None:
+        """The lowest rowid the last parse of `log` could not read (compressed)."""
+        ...
+
 
 def _default_source() -> Source:
     # The adapters live in capcom.sources; they are loaded by name when a scan starts,
@@ -118,19 +130,39 @@ def _head_hash(path: Path, length: int) -> str | None:
 
 def scan_database(index: SqliteIndex, source: Source, log: LogFile, stats: ScanStats) -> None:
     """Bring a database read by rowid up to date (FileState.offset is the last rowid
-    read). Updates `stats` in place."""
+    read). Updates `stats` in place.
+
+    A database has no head to hash, so its FileExtra holds other things: `head_hash`
+    is the table key of the cursor row (a VACUUM or deletes then inserts can renumber
+    or reuse rowids; a different key there means reading it all again), and `head_len`
+    the lowest compressed rowid left unread (0: none), read again from there once this
+    Python can decompress it. Rows upsert by id, so reading again is safe."""
     try:
         st = log.path.stat()
     except FileNotFoundError:
         return
     stats.files_seen += 1
+    rows = source if isinstance(source, RowSource) else None
     state = index.file_state(log.path)
+    extra = index.file_extra(log.path) if state is not None else None
+    unread = extra.head_len if extra is not None else 0
+    key = extra.head_hash if extra is not None else None
     start = 0 if state is None else state.offset
     if start > 0 and state is not None:
-        last = source.last_row(log) if isinstance(source, RowSource) else None
-        if st.st_ino != state.inode or (last is not None and last < start):
+        last = rows.last_row(log) if rows is not None else None
+        moved = (
+            rows is not None
+            and last is not None
+            and key is not None
+            and rows.row_key(log, start) != key
+        )
+        if st.st_ino != state.inode or (last is not None and last < start) or moved:
             start = 0  # replaced or rebuilt: read it all again; rows upsert by id
             stats.files_reset += 1
+            unread = 0
+    if unread and rows is not None and rows.reads_compressed():
+        start = min(start, unread - 1)  # compressed rows passed earlier: read them now
+        unread = 0
     cursor = start
     for batch in source.parse(log, start):
         cursor = batch.end_offset
@@ -145,6 +177,12 @@ def scan_database(index: SqliteIndex, source: Source, log: LogFile, stats: ScanS
             Batch([], cursor),
             FileState(log.path, st.st_ino, st.st_size, st.st_mtime_ns, cursor),
         )
+    if rows is not None:
+        now_unread = rows.unread_from(log)
+        if now_unread:
+            unread = min(unread, now_unread) if unread else now_unread
+        key = rows.row_key(log, cursor) if cursor > 0 else None
+        index.set_file_extra(log.path, FileExtra(unread, key, None))
     if cursor > start:
         stats.files_read += 1
 

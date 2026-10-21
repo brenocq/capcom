@@ -13,10 +13,16 @@ folders, with its message id prefixed "oc:" and its session id "openclaw:".
 
 The database changes in place while OpenClaw runs, so the position read so far is
 a rowid, not a byte offset (`LogKind.OPENCLAW_DB`): `parse` reads the rows above
-`start` in rowid order, in batches, each batch ending at its last rowid. The file is
-opened with `mode=ro` (never `immutable`: it is live). Compressed rows need Python
-3.14's `compression.zstd`; without it they are counted in `compressed_unread` and as
-skipped.
+`start` in rowid order, in batches, each batch ending at its last rowid. The table
+has no INTEGER PRIMARY KEY (its key is (session_id, seq)), so a VACUUM may renumber
+rowids: `row_key` gives the key at a rowid, which the store checks at its cursor.
+
+The file is opened read-only and nothing is ever created next to it: `mode=ro` while
+OpenClaw has it open (its -wal and -shm files exist), and `immutable=1` when a WAL
+database lacks them (OpenClaw is not running), since `mode=ro` would create them.
+Compressed rows need Python 3.14's `compression.zstd`; without it they are counted in
+`compressed_unread` and as skipped, and `unread_from` gives the lowest such rowid so
+the store can read them again once a Python that has it runs the scan.
 """
 
 from __future__ import annotations
@@ -152,9 +158,27 @@ def event_request(event: Mapping[str, Any], session_id: str, created_ms: object)
     )
 
 
+def _is_wal(path: Path) -> bool:
+    """True when the database header says WAL mode (write and read versions 2)."""
+    try:
+        with path.open("rb") as f:
+            header = f.read(20)
+    except OSError:
+        return False
+    return len(header) == 20 and header[18] == 2 and header[19] == 2
+
+
 def _connect(path: Path) -> sqlite3.Connection:
-    """Open the live database read-only (no `immutable`: OpenClaw writes to it)."""
-    con = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    """Open the database read-only, creating no file next to it. A WAL database
+    without its -wal or -shm file is closed (`mode=ro` would create them): it is opened
+    `immutable`. Otherwise OpenClaw may be writing it, so `mode=ro` without it."""
+    path = path.resolve()
+    mode = "ro"
+    if _is_wal(path):
+        sidecars = (path.with_name(path.name + "-wal"), path.with_name(path.name + "-shm"))
+        if not all(p.exists() for p in sidecars):
+            mode = "ro&immutable=1"
+    con = sqlite3.connect(f"{path.as_uri()}?mode={mode}", uri=True)
     con.execute("PRAGMA busy_timeout = 5000")
     return con
 
@@ -223,6 +247,8 @@ class OpenClawSource:
         self.batch_rows = batch_rows
         # Diagnostics: compressed rows this Python could not read (no compression.zstd).
         self.compressed_unread = 0
+        # The lowest such rowid of the last parse of each database.
+        self._unread_from: dict[Path, int] = {}
 
     def discover(self, root: Path) -> Iterator[LogFile]:
         """`agents/<agent>/agent/openclaw-agent.sqlite` under `root` (the OpenClaw state
@@ -261,11 +287,38 @@ class OpenClawSource:
         finally:
             con.close()
 
+    def row_key(self, log: LogFile, rowid: int) -> str | None:
+        """The table key (session_id and seq) of the row at `rowid`, or None when there
+        is no such row or the database cannot be read."""
+        try:
+            con = _connect(log.path)
+        except sqlite3.Error:
+            return None
+        try:
+            seq = "seq" if "seq" in _columns(con) else "NULL"
+            row = con.execute(
+                f"SELECT session_id, {seq} FROM {TABLE} WHERE rowid = ?", (rowid,)
+            ).fetchone()
+            return None if row is None else f"{row[0]}\x1f{row[1]}"
+        except sqlite3.Error:
+            return None
+        finally:
+            con.close()
+
+    def reads_compressed(self) -> bool:
+        """True when this Python can read the compressed rows."""
+        return _DECOMPRESS is not None
+
+    def unread_from(self, log: LogFile) -> int | None:
+        """The lowest rowid of a compressed row the last parse of `log` left unread."""
+        return self._unread_from.get(log.path)
+
     def parse(self, log: LogFile, start: int) -> Iterator[Batch]:
         """The direct replies in the rows above rowid `start`, in batches of at most
         `batch_rows` rows; each batch's end_offset is its last rowid. Yields nothing
         when there is no new row or the database cannot be read; a read error stops
         the stream after the batches already yielded."""
+        self._unread_from.pop(log.path, None)
         try:
             con = _connect(log.path)
         except sqlite3.Error:
@@ -285,7 +338,8 @@ class OpenClawSource:
                 ):
                     last = int(rowid)
                     b.rows += 1
-                    self._row(b, session, created, text, blob)
+                    if not self._row(b, session, created, text, blob):
+                        self._unread_from.setdefault(log.path, last)
                 if b.rows == 0:
                     return
                 yield b.batch(last)
@@ -299,9 +353,10 @@ class OpenClawSource:
 
     def _row(
         self, b: _BatchBuilder, session: object, created: object, text: object, blob: object
-    ) -> None:
+    ) -> bool:
+        """Read one row into `b`; False for a compressed row this Python cannot read."""
         if not isinstance(session, str) or not session:
-            return
+            return True
         data: str | bytes
         if isinstance(text, str):
             data = text
@@ -309,24 +364,25 @@ class OpenClawSource:
             if _DECOMPRESS is None:
                 self.compressed_unread += 1
                 b.skipped += 1
-                return
+                return False
             try:
                 data = _DECOMPRESS(blob)
             except Exception:  # a corrupt frame: skip the row, never the scan
                 b.skipped += 1
-                return
+                return True
             if _USAGE_KEY.encode() not in data:
-                return
+                return True
         else:
-            return  # no usage in this event
+            return True  # no usage in this event
         try:
             event = json.loads(data)
         except (ValueError, UnicodeDecodeError):
             b.skipped += 1
-            return
+            return True
         if not isinstance(event, dict):
             b.skipped += 1
-            return
+            return True
         req = event_request(event, session, created)
         if req is not None:
             b.add(req)
+        return True

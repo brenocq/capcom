@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import sqlite3
+import zlib
 from pathlib import Path
 
 import pytest
 
+import capcom.sources.openclaw as oc
 from capcom.config import Config
 from capcom.sources.openclaw import DIRECT_PROJECT
 from capcom.store import index as index_module
@@ -75,6 +77,50 @@ def test_a_rebuilt_table_is_read_again_and_keeps_history(config: Config) -> None
     assert _ids(config) == ["oc:e0", "oc:e1", "oc:e2", "oc:e3", "oc:n1"]
     with open_index(config.index_path, readonly=True) as ix:
         assert ix.file_state(db).offset == 2  # type: ignore[union-attr]
+
+
+def test_reused_rowids_at_the_cursor_mean_a_reread(config: Config) -> None:
+    db = db_path(config.openclaw_root)
+    create_db(db)
+    for i in range(4):
+        add(db, "s1", i, reply(f"e{i}"), at(i))
+    run_scan(config, quiet=True)
+
+    # the top rows go and new ones take their rowids: the highest rowid is unchanged
+    con = sqlite3.connect(db)
+    con.execute("DELETE FROM transcript_events WHERE rowid > 2")
+    con.commit()
+    con.close()
+    add(db, "s2", 1, reply("n1"), at(5), rowid=3)
+    add(db, "s2", 2, reply("n2"), at(6), rowid=4)
+    stats = run_scan(config, quiet=True)
+    assert stats.files_reset == 1 and stats.lines == 4
+    assert _ids(config) == ["oc:e0", "oc:e1", "oc:e2", "oc:e3", "oc:n1", "oc:n2"]
+    again = run_scan(config, quiet=True)
+    assert again.files_reset == 0 and again.lines == 0
+
+
+def test_compressed_rows_are_read_once_zstd_is_there(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = db_path(config.openclaw_root)
+    create_db(db)
+    monkeypatch.setattr(oc, "_DECOMPRESS", None)
+    add(db, "s1", 1, reply("e0"), at(0))
+    add(db, "s1", 2, reply("z1"), at(1), compress=zlib.compress)
+    add(db, "s1", 3, reply("e1"), at(2))
+    run_scan(config, quiet=True)
+    assert _ids(config) == ["oc:e0", "oc:e1"]
+    add(db, "s1", 4, reply("z2"), at(3), compress=zlib.compress)
+    run_scan(config, quiet=True)
+    assert _ids(config) == ["oc:e0", "oc:e1"]
+
+    # a Python that can decompress them (zlib stands in for zstd): read from the first
+    monkeypatch.setattr(oc, "_DECOMPRESS", zlib.decompress)
+    stats = run_scan(config, quiet=True)
+    assert stats.lines == 3 and stats.files_reset == 0
+    assert _ids(config) == ["oc:e0", "oc:e1", "oc:z1", "oc:z2"]
+    assert run_scan(config, quiet=True).lines == 0
 
 
 def test_claude_code_logs_still_scan_alongside(config: Config) -> None:

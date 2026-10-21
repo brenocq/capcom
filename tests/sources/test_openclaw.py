@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import zlib
 from pathlib import Path
 
@@ -133,14 +134,52 @@ def test_a_live_wal_database_that_grows_in_place(root: Path) -> None:
     assert second.end_offset == 3
 
 
-def test_parse_never_writes_to_the_database(root: Path, db: Path) -> None:
+def _read_everything(source: OpenClawSource, log: LogFile) -> int:
+    n = len(_requests(list(source.parse(log, 0))))
+    assert source.last_row(log) == 1 and source.row_key(log, 1) == "s1\x1f1"
+    return n
+
+
+def _folder(path: Path) -> list[tuple[str, int, int]]:
+    return sorted((p.name, p.stat().st_size, p.stat().st_mtime_ns) for p in path.parent.iterdir())
+
+
+def test_a_closed_wal_database_is_read_without_creating_files(root: Path) -> None:
+    # OpenClaw not running: its WAL database has no -wal or -shm file, and `mode=ro`
+    # alone would create them next to it
+    path = db_path(root)
+    create_db(path, wal=True)
+    add(path, "s1", 1, reply("e1"), at(0))
+    before = _folder(path)
+    assert [name for name, _, _ in before] == [path.name]
+    source = OpenClawSource()
+    assert _read_everything(source, _log(source, root)) == 1
+    assert _folder(path) == before
+
+
+def test_a_live_wal_database_is_read_without_touching_its_files(root: Path) -> None:
+    path = db_path(root)
+    create_db(path, wal=True)
+    add(path, "s1", 1, reply("e1"), at(0))
+    writer = sqlite3.connect(path)  # OpenClaw running: it holds the -wal and -shm files
+    try:
+        writer.execute("SELECT COUNT(*) FROM transcript_events").fetchone()
+        before = _folder(path)
+        assert {name for name, _, _ in before} >= {path.name + "-wal", path.name + "-shm"}
+        source = OpenClawSource()
+        assert _read_everything(source, _log(source, root)) == 1
+        assert _folder(path) == before
+    finally:
+        writer.close()
+
+
+def test_parse_never_writes_to_a_rollback_journal_database(root: Path, db: Path) -> None:
     add(db, "s1", 1, reply("e1"), at(0))
-    before = (db.read_bytes(), db.stat().st_mtime_ns)
+    before = (db.read_bytes(), _folder(db))
     db.chmod(0o444)
     source = OpenClawSource()
-    log = _log(source, root)
-    assert len(_requests(list(source.parse(log, 0)))) == 1
-    assert (db.read_bytes(), db.stat().st_mtime_ns) == before
+    assert _read_everything(source, _log(source, root)) == 1
+    assert (db.read_bytes(), _folder(db)) == before
 
 
 def test_unreadable_database_yields_nothing(root: Path) -> None:
@@ -160,10 +199,13 @@ def test_compressed_rows_without_zstd_are_counted_unread(
     add(db, "s1", 1, reply("z1"), at(0), compress=zlib.compress)
     add(db, "s1", 2, reply("e1"), at(1))
     source = OpenClawSource()
-    (batch,) = source.parse(_log(source, root), 0)
+    log = _log(source, root)
+    (batch,) = source.parse(log, 0)
     assert [r.message_id for r in _requests([batch])] == ["oc:e1"]
     assert batch.skipped == 1 and source.compressed_unread == 1
-    assert batch.end_offset == 2  # the cursor moves past them
+    assert not source.reads_compressed()
+    # the batch ends past them; the lowest one is kept for a later reread
+    assert batch.end_offset == 2 and source.unread_from(log) == 1
 
 
 def test_compressed_rows_are_decoded(root: Path, db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
