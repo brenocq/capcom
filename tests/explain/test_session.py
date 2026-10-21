@@ -244,3 +244,31 @@ def test_spikes_view_totals_by_cause_add_up() -> None:
     by_cause = sum(float(row.split("$")[1].replace(",", "")) for row in rows)
     assert by_cause == pytest.approx(sum(s.excess_usd for s in spikes), abs=0.01 * len(rows))
     assert "2 spikes; 2 matched to a cause" in text
+
+
+def test_small_fan_out_shows_beside_growth_and_the_rest() -> None:
+    # the bcbbaac4 shape: eleven verifiers whose prefixes are under a tenth of a spike
+    # mostly made of their own long work
+    w = World()
+    main = steady_main(w, 60)
+    call = w.req(10, cache_read=40_000, tools=[("Agent", None)] * 11)
+    firsts: list[Request] = []
+    for k, tc in enumerate(call.tool_calls):
+        w.event(EventKind.SPAWN, 10.02, tool_use_id=tc.tool_use_id, agent_type="paper-verifier")
+        w.agent(f"v{k}", "paper-verifier", tc.tool_use_id)
+        firsts.append(w.req(10.1 + 0.05 * k, agent=f"v{k}", cache_write_5m=43_000))
+        ctx = 43_000
+        for j in range(40):
+            w.req(11 + k * 0.02 + j, agent=f"v{k}", cache_read=ctx, cache_write_5m=4_000,
+                  tools=[("Read", f"paper/sec{j}.tex")])  # fmt: skip
+            ctx += 4_000
+    in_span = [r for r in [*main, call] if at(10) <= r.timestamp < at(60)]
+    s = session_spike(w, 10, 60, baseline=sum(cost(r) for r in in_span))
+    out = run(w, s)
+    found = by_cause(out)
+    fan = found[CauseKind.FAN_OUT]
+    assert fan.excess_usd == pytest.approx(sum(prefix(r) for r in firsts))
+    assert fan.excess_usd < 0.1 * s.excess_usd
+    assert fan.confidence is Confidence.CLEAR
+    assert set(found) == {CauseKind.FAN_OUT, CauseKind.CONTEXT_GROWTH, CauseKind.UNEXPLAINED}
+    assert sum(e.excess_usd for e in out) == pytest.approx(s.excess_usd)

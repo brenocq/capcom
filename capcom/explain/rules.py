@@ -1342,7 +1342,7 @@ def fan_out(view: SpikeView) -> list[Candidate]:
             )
         if agents:
             evidence.append(_ev(f"{small} of them made two tool calls or fewer", m0))
-        conf = Confidence.CLEAR if excess >= 0.5 * view.cost else Confidence.LIKELY
+        conf = Confidence.CLEAR  # the prefixes are writes of agents its Agent calls started
         kinds = ", ".join(f"{v} {k}" for k, v in types.most_common(3))
         out.append(
             Candidate(
@@ -1465,7 +1465,10 @@ def session_fan_out(view: SpikeView) -> list[Candidate]:
             ),
             _ev(f"{small} of them made two tool calls or fewer", m0),
         ]
-        conf = Confidence.CLEAR if excess >= 0.5 * view.cost else Confidence.LIKELY
+        # the prefixes are logged writes: CLEAR when most agents came from Agent calls
+        # or a workflow, LIKELY when most started without a call capcom can see
+        known = origins["agent"] + origins["workflow"]
+        conf = Confidence.CLEAR if known * 2 > n else Confidence.LIKELY
         advice = _fan_out_advice(small, n, origins.most_common(1)[0][0] == "workflow")
         kinds = ", ".join(f"{v} {k}" for k, v in types.most_common(3))
         out.append(

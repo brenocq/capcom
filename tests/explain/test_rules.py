@@ -630,3 +630,44 @@ def test_unknown_messages_are_unexplained() -> None:
     e = only(w, s)
     assert e.cause is CauseKind.UNEXPLAINED
     assert has(e, "No request of the spike is in the index")
+
+
+def _idle_world(tokens: int, ttl_known: bool = True) -> tuple[World, Spike]:
+    """One idle rewrite of `tokens` (1-hour entries, CLEAR; or 5-minute entries on the
+    assumed lifetime, LIKELY), in a spike made to cost $25."""
+    w = World()
+    if ttl_known:
+        w.req(0, cache_write_1h=tokens)
+        w.req(2, cache_read=tokens)
+        r = w.req(80, cache_write_1h=tokens)
+    else:
+        w.req(0, cache_write_5m=tokens)
+        w.req(1, cache_read=tokens)  # reads only: the lifetime is assumed
+        r = w.req(30, cache_write_5m=tokens)
+    return w, replace(spike([r]), cost_usd=25.0, baseline_usd=0.0)
+
+
+def test_a_small_clear_cause_is_kept() -> None:
+    w, s = _idle_world(200_000)  # $1.90 of $25: under a tenth, but CLEAR and over $0.50
+    out = run(w, s)
+    assert [(e.cause, e.confidence) for e in out] == [
+        (CauseKind.IDLE_REWRITE, Confidence.CLEAR),
+        (CauseKind.UNEXPLAINED, Confidence.UNEXPLAINED),
+    ]
+    assert out[0].excess_usd == pytest.approx(1.90)
+    assert out[1].excess_usd == pytest.approx(25.0 - 1.90)
+
+
+@pytest.mark.parametrize(
+    ("tokens", "ttl_known"),
+    [
+        (40_000, True),  # CLEAR, but $0.38
+        (100_000, False),  # $0.58, but LIKELY
+    ],
+)
+def test_a_small_cause_under_the_floor_folds_into_the_rest(tokens: int, ttl_known: bool) -> None:
+    w, s = _idle_world(tokens, ttl_known)
+    e = only(w, s)
+    assert e.cause is CauseKind.UNEXPLAINED
+    assert e.excess_usd == pytest.approx(25.0)
+    assert has(e, "Closest: ")
