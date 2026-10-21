@@ -100,6 +100,14 @@ export async function renderSpikes(main, r) {
   if (hidden > 0) main.append(h('p.note', { style: 'margin:0', text: `The ${items.length} largest of ${d.count} spikes are listed; the causes above count them all.` }));
 }
 
+// What to change: the advice of the named causes only; the unexplained rest's advice
+// ("nothing to change yet") shows only when no cause was named.
+export function spikeAdvice(causes) {
+  const named = causes.filter((c) => c.cause !== 'unexplained');
+  const advice = (named.length ? named : causes).map((c) => c.advice).filter(Boolean);
+  return advice.length ? advice : ['Nothing to change yet. If this pattern comes back, look at the session around this time.'];
+}
+
 function detail(it) {
   const txt = spikeText(it);
   const causes = it.explanations || [];
@@ -130,9 +138,8 @@ function detail(it) {
   const facts = h('div.facts', null, h('h3', { text: 'Evidence in the logs' }),
     evidence.length ? h('ul.evidence', null, evidence.map((e) => h('li', null, h('span', { text: e.label }))))
       : h('p.note', { text: causes.length ? 'No log record was cited.' : it.explanations ? 'No cause was matched.' : 'Causes are matched from milestone 3.' }));
-  const advice = causes.map((c) => c.advice).filter(Boolean);
   const fix = h('div.fix', null, h('h3', { text: 'What to change' }),
-    advice.length ? advice.map((a) => h('p', { text: a })) : h('p', { text: 'Nothing to change yet. If this pattern comes back, look at the session around this time.' }),
+    spikeAdvice(causes).map((a) => h('p', { text: a })),
     it.session_id ? h('a.link', { href: sessionHref(it.session_id), text: 'Open the session' }) : null);
   box.append(h('div.row-wrap', { style: 'gap:24px' }, facts, fix));
   return box;
