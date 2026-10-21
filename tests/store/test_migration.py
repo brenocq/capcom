@@ -178,7 +178,7 @@ def test_v3_index_is_migrated_in_place_and_reread(config: Config) -> None:
         assert next(ix.last_cost_states()).next_timestamp is None
     con = sqlite3.connect(config.index_path)
     assert con.execute("SELECT version FROM schema_version").fetchall() == [(SCHEMA_VERSION,)]
-    assert SCHEMA_VERSION == 5
+    assert SCHEMA_VERSION == 6
     con.close()
 
     source = FakeSource(batch_lines=2)  # the cost-state ends a batch

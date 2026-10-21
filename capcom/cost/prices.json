@@ -8,7 +8,8 @@
     "https://platform.claude.com/docs/en/build-with-claude/fast-mode",
     "https://platform.claude.com/docs/en/build-with-claude/extended-thinking",
     "https://platform.claude.com/docs/en/build-with-claude/context-windows",
-    "https://claude.com/pricing"
+    "https://claude.com/pricing",
+    "https://ai.google.dev/gemini-api/docs/pricing"
   ],
   "unit": "USD per million tokens",
   "web_search_per_1k": 10.0,
@@ -26,7 +27,8 @@
     "geo_multipliers apply to every token category when usage.inference_geo matches, on models marked geo (4.6 and later).",
     "fast_multiplier applies to every token category when usage.speed is 'fast', with the cache rates on top.",
     "long_context: when the prompt (input + cache reads + cache writes) is above threshold_tokens, the whole request uses those rates.",
-    "previous: older prices per model, newest first; a request before valid_until (UTC date, exclusive) uses the row with these fields replaced."
+    "previous: older prices per model, newest first; a request before valid_until (UTC date, exclusive) uses the row with these fields replaced.",
+    "Gemini (checked 2026-10-21, ai.google.dev/gemini-api/docs/pricing, paid Standard tier, text): cached input is cache_read; Gemini has no cache-write premium, so cache writes price at the input rate; cache storage per hour is not priced (the logs give no duration). gemini-3.8-flash's row is the price from 2027-01-01 (announced doubling); its previous entry holds today's."
   ],
   "models": {
     "claude-fable-5-1": {"input": 10, "output": 50, "cache_write_5m": 12.5, "cache_write_1h": 20, "cache_read": 0.25, "geo": true},
@@ -46,9 +48,23 @@
     "claude-sonnet-4-20250514": {"input": 3, "output": 15, "cache_write_5m": 3.75, "cache_write_1h": 6, "cache_read": 0.3, "aliases": ["claude-sonnet-4-0", "claude-sonnet-4"]},
     "claude-haiku-5-5": {"input": 0.1, "output": 0.5, "cache_write_5m": 0.125, "cache_write_1h": 0.2, "cache_read": 0.01, "long_context": {"threshold_tokens": 100000, "input": 0.5, "output": 2.5, "cache_write_5m": 0.625, "cache_write_1h": 1.0, "cache_read": 0.05}, "geo": true},
     "claude-haiku-4-5-20251001": {"input": 1, "output": 5, "cache_write_5m": 1.25, "cache_write_1h": 2, "cache_read": 0.1, "aliases": ["claude-haiku-4-5"]},
-    "claude-3-5-haiku-20241022": {"input": 0.8, "output": 4, "cache_write_5m": 1.0, "cache_write_1h": 1.6, "cache_read": 0.08, "aliases": ["claude-3-5-haiku-latest"]}
+    "claude-3-5-haiku-20241022": {"input": 0.8, "output": 4, "cache_write_5m": 1.0, "cache_write_1h": 1.6, "cache_read": 0.08, "aliases": ["claude-3-5-haiku-latest"]},
+    "gemini-3.8-flash": {"input": 1.5, "output": 7.5, "cache_write_5m": 1.5, "cache_write_1h": 1.5, "cache_read": 0.15},
+    "gemini-3.1-pro-preview": {"input": 2, "output": 12, "cache_write_5m": 2, "cache_write_1h": 2, "cache_read": 0.2, "long_context": {"threshold_tokens": 200000, "input": 4, "output": 18, "cache_write_5m": 4, "cache_write_1h": 4, "cache_read": 0.4}, "aliases": ["gemini-3.1-pro-preview-customtools"]},
+    "gemini-2.5-flash": {"input": 0.3, "output": 2.5, "cache_write_5m": 0.3, "cache_write_1h": 0.3, "cache_read": 0.03}
   },
   "previous": {
+    "gemini-3.8-flash": [
+      {
+        "valid_until": "2027-01-01",
+        "input": 0.75,
+        "output": 3.75,
+        "cache_write_5m": 0.75,
+        "cache_write_1h": 0.75,
+        "cache_read": 0.075,
+        "why": "Google's price until the doubling it announced for 2027-01-01 (checked 2026-10-21)"
+      }
+    ],
     "claude-sonnet-5-5": [
       {
         "valid_until": "2026-10-08",

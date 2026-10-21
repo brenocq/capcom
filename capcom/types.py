@@ -141,6 +141,10 @@ class Request:
     is_api_error: bool = False
     output_estimated: bool = False
     tool_calls: tuple[ToolCall, ...] = ()
+    # The cost the source itself reported (OpenClaw's usage.cost.total for its direct
+    # provider calls), in USD. capcom prices from its own table first and uses this
+    # only for a model the table lacks (flagged inexact, priced_as "openclaw-estimate").
+    reported_cost_usd: float | None = None
 
 
 class EventKind(StrEnum):

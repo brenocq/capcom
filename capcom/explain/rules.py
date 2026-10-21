@@ -17,7 +17,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
-from capcom.cost.model import price_usage
+from capcom.cost.model import price, price_usage
 from capcom.cost.prices import canonical, lookup, price_at
 from capcom.explain import fmt
 from capcom.explain.data import (
@@ -122,9 +122,7 @@ class Pricer:
     def cost(self, r: Request) -> float:
         c = self._costs.get(r.message_id)
         if c is None:
-            c = self._costs[r.message_id] = price_usage(
-                r.model, r.usage, self.table, r.speed, r.inference_geo, r.timestamp
-            ).total
+            c = self._costs[r.message_id] = price(r, self.table).total
         return c
 
     def rates(self, r: Request) -> _Rates:
