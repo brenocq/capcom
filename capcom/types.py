@@ -41,6 +41,10 @@ def estimate_tokens(chars: int) -> int:
 class LogKind(StrEnum):
     SESSION = "session"  # <project>/<session_id>.jsonl
     SUBAGENT = "subagent"  # <project>/<session_id>/subagents/agent-<agent_id>.jsonl
+    # OpenClaw's own database (agents/main/agent/openclaw-agent.sqlite). For this
+    # kind, FileState.offset is the last rowid read, not a byte offset, and the file
+    # changes in place: the store keeps the cursor instead of the head-hash checks.
+    OPENCLAW_DB = "openclaw_db"
 
 
 @dataclass(frozen=True, slots=True)
@@ -634,3 +638,26 @@ class ChecksModule(Protocol):
     ) -> list[Finding]:
         """Findings ranked by saving_usd_per_week, largest first."""
         ...
+
+
+# --------------------------------------------------------------------------- limits
+
+
+class LimitWindow(StrEnum):
+    """The subscription's usage windows, as Claude Code's status line reports them."""
+
+    FIVE_HOUR = "five_hour"
+    SEVEN_DAY = "seven_day"
+
+
+@dataclass(frozen=True, slots=True)
+class LimitSample:
+    """One reading of a usage window, recorded by `capcom record-limits` from the
+    status line's stdin (rate_limits.<window>.used_percentage and resets_at)."""
+
+    time: datetime
+    window: LimitWindow
+    used_percentage: float
+    resets_at: datetime | None = None
+    session_id: str | None = None
+    source: str = "statusline"  # "statusline", "usage-cache" (seed), "rate_limit_error"
