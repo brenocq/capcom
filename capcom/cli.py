@@ -41,7 +41,7 @@ def _calibrate(args: argparse.Namespace) -> int:
 def _serve(args: argparse.Namespace) -> int:
     from capcom.report.server import run_serve
 
-    return run_serve(load_config(), port=args.port, open_browser=args.open)
+    return run_serve(load_config(), port=args.port, open_browser=args.open, scan=not args.no_scan)
 
 
 def _spikes(args: argparse.Namespace) -> int:
@@ -80,6 +80,9 @@ def build_parser() -> argparse.ArgumentParser:
     serve = sub.add_parser("serve", help="the local website, on 127.0.0.1")
     serve.add_argument("--port", type=int, default=8787)
     serve.add_argument("--open", action="store_true", help="open it in the browser")
+    serve.add_argument(
+        "--no-scan", action="store_true", help="do not rescan the logs in the background"
+    )
     serve.set_defaults(func=_serve)
 
     spikes = sub.add_parser("spikes", help="spend spikes and their causes")
