@@ -108,3 +108,19 @@ def find_definitions(dirs: Iterable[Path]) -> dict[str, AgentDefinition]:
             if kind not in out:
                 out[kind] = AgentDefinition(kind, path, tools)
     return out
+
+
+def find_all_definitions(dirs: Iterable[Path]) -> dict[str, list[AgentDefinition]]:
+    """Agent type -> every definition of it in `dirs`, in the order found (a type
+    may be defined at user level and in several projects)."""
+    out: dict[str, list[AgentDefinition]] = {}
+    for folder in dirs:
+        try:
+            files = sorted(p for p in folder.glob("*.md") if p.is_file())
+        except OSError:
+            continue
+        for path in files:
+            name, tools = read_frontmatter(path)
+            kind = name or path.stem
+            out.setdefault(kind, []).append(AgentDefinition(kind, path, tools))
+    return out

@@ -4,6 +4,7 @@ reports and images. All sessions are synthetic."""
 from __future__ import annotations
 
 import io
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from capcom.checks import run_checks
 from capcom.checks.agents import find_definitions, read_tools
 from capcom.checks.cli import run_checks_view
 from capcom.config import Config
-from capcom.types import EventKind, Finding
+from capcom.types import EventKind, Finding, ToolCall
 from tests.checks.helpers import (
     READ_RATE,
     SINCE,
@@ -114,6 +115,103 @@ def test_same_model_and_no_rewrite_gives_no_switch() -> None:
     reqs = run(1) + run(1, start=2, model="claude-sonnet-5-5", cache_read=100_000)
     assert "model_switches" not in kinds(_checks(index(reqs)))
     assert "model_switches" not in kinds(_checks(index(_rewrite_after(1, cache_write_5m=100_000))))
+
+
+def test_long_contexts_are_priced_at_the_read_price_apart_from_rewrites() -> None:
+    # a 200k thread that idled and rewrote its whole prompt: the rewrite finding
+    # counts the write premium, long-running only the read of the tokens past 150k
+    reqs = run(1, cache_read=200_000) + run(1, start=31, cache_read=0, cache_write_5m=200_000)
+    found = _checks(index(reqs))
+    idle = only(found, "idle_cache_rewrites")
+    long = only(found, "long_running_agents")
+    assert idle.saving_usd_per_week == pytest.approx(200_000 * (5 - 0.2) / 1e6)
+    assert long.saving_usd_per_week == pytest.approx(2 * 50_000 * READ_RATE)
+    # together no more than what the tokens past 150k and the rewrite premium cost
+    assert idle.metrics["overlaps"] == () and long.metrics["overlaps"] == ()
+
+
+def test_a_late_compaction_and_long_running_split_the_same_turns() -> None:
+    reqs = run(10, cache_read=500_000, cache_write_5m=20_000)
+    evs = [ev(EventKind.COMPACTION, 15, pre_tokens=520_000)]
+    found = _checks(index(reqs, evs))
+    late, long = only(found, "late_compactions"), only(found, "long_running_agents")
+    # 520k each: 250k in the band, 120k above it, all at the read price
+    assert long.saving_usd_per_week == pytest.approx(10 * 250_000 * READ_RATE)
+    assert late.saving_usd_per_week == pytest.approx(10 * 120_000 * READ_RATE)
+    assert "late_compactions" not in long.metrics["overlaps"]
+
+
+def test_the_checks_view_says_not_to_add_up_only_when_findings_overlap(tmp_path: Path) -> None:
+    def view(idx) -> str:  # type: ignore[no-untyped-def]
+        out = io.StringIO()
+        config = Config(tmp_path / "claude", tmp_path / "openclaw", tmp_path / "cache")
+        run_checks_view(config, 7, 10, index=idx, out=out, now=at(60 * 24))
+        return out.getvalue()
+
+    reqs = run(1, cache_read=200_000) + run(1, start=31, cache_read=0, cache_write_5m=200_000)
+    text = view(index(reqs))
+    assert "Long-running agents" in text and "Cache rewrites after idling" in text
+    assert "do not add them up" not in text and "different dollars" in text
+    # an unused connector rides in those same prompts: its dollars overlap them
+    evs = [
+        ev(
+            EventKind.TOOL_SET,
+            0,
+            source="deferred_tools_delta",
+            added=("mcp__claude_ai_Docs__read",),
+            size_tokens=5_000,
+        )
+    ]
+    text = view(index(reqs, evs))
+    assert "claude.ai connectors" in text and "do not add them up" in text
+
+
+# --------------------------------------------------------------------------- tool waits
+
+
+def _tool_wait(  # type: ignore[no-untyped-def]
+    ran: float, then: float = 0.5, agent_id: str | None = "a1", tool: str = "Bash"
+):
+    """A thread whose request at minute 1 calls `tool`; its result comes `ran`
+    minutes later and the next request, `then` minutes after it, rewrites 100k."""
+    first = run(1, agent=agent_id)[0]
+    call = ToolCall(f"tu_{first.message_id}", tool, "pytest")
+    first = replace(first, tool_calls=(call,))
+    result = ev(
+        EventKind.TOOL_RESULT, 1 + ran, agent=agent_id, tool_use_id=call.tool_use_id, tool=tool
+    )
+    second = run(1, start=1 + ran + then, agent=agent_id, cache_read=0, cache_write_5m=100_000)
+    agents = [agent(agent_id, "coder")] if agent_id else []
+    return [first, *second], [result], agents
+
+
+def test_a_subagent_cache_expiring_during_a_tool_call_is_its_own_finding() -> None:
+    reqs, evs, agents = _tool_wait(12)
+    found = _checks(index(reqs, evs, agents))
+    f = only(found, "subagent_cache_expiry")
+    assert f.saving_usd_per_week == pytest.approx(100_000 * (5 - 0.2) / 1e6)
+    assert f.change is None  # no setting changes a subagent's cache lifetime
+    assert "background" in f.advice
+    assert "approve the command sooner" in f.advice  # a permission wait looks the same
+    assert "Bash (1)" in f.summary and "12 min" in f.summary
+    assert f.metrics["rewrites"] == 1 and f.metrics["tools"] == ("Bash",)
+    assert "Bash (pytest)" in f.evidence[0].label
+    assert "idle_cache_rewrites" not in kinds(found)  # counted once
+
+
+@pytest.mark.parametrize(
+    ("ran", "then", "agent_id"),
+    [
+        (3, 20, "a1"),  # the tool came back in time; the subagent then sat idle
+        (12, 5, "a1"),  # the result came long before the rewrite
+        (12, 0.5, None),  # the main thread: an idle rewrite, as before
+    ],
+)
+def test_other_pauses_stay_idle_rewrites(ran: float, then: float, agent_id: str | None) -> None:
+    reqs, evs, agents = _tool_wait(ran, then, agent_id)
+    found = _checks(index(reqs, evs, agents))
+    assert "subagent_cache_expiry" not in kinds(found)
+    assert "idle_cache_rewrites" in kinds(found)
 
 
 # --------------------------------------------------------------------------- subagents

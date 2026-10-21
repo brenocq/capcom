@@ -83,11 +83,20 @@ def run_checks_view(
         f"(prices checked {table.checked})",
         file=out,
     )
-    print(
-        "Savings are weekly at this window's pace; some overlap, so do not add them up.\n",
-        file=out,
+    findings = run_checks(
+        index,
+        table,
+        since,
+        until,
+        claude_root=config.claude_root,
+        openclaw_root=config.openclaw_root,
     )
-    findings = run_checks(index, table, since, until, claude_root=config.claude_root)
+    shown = findings[: max(limit, 0)]
+    if any(f.metrics.get("overlaps") for f in shown):
+        note = "some overlap, so do not add them up"
+    else:
+        note = "they count different dollars"
+    print(f"Savings are weekly at this window's pace; {note}.\n", file=out)
     if not findings:
         print("no findings in this window", file=out)
         return 0

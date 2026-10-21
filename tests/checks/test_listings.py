@@ -3,6 +3,7 @@ agent tools. All sessions are synthetic."""
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from capcom.checks import run_checks
 from capcom.types import EventKind, ToolCall
 from tests.checks.helpers import (
     CWD,
+    PROJECT,
     READ_RATE,
     SINCE,
     TABLE,
@@ -213,6 +215,22 @@ def test_skills_never_invoked_are_flagged() -> None:
     assert f.change == "disable-model-invocation: true"
 
 
+def test_a_plugin_skill_is_advised_off_by_plugin_not_by_skill_md() -> None:
+    evs = [*_skills(), ev(EventKind.SKILLS_INVOKED, 3, names=("pdf", "xlsx", "slides"))]
+    f = only(_checks(index(run(100), evs)), "skills_unused")
+    assert f.change is None  # a plugin update would overwrite an edited SKILL.md
+    assert "plugin:docx comes from the plugin plugin" in f.advice
+    assert "disable it here" in f.advice and "enabledPlugins" in f.advice
+    assert "SKILL.md frontmatter" not in f.advice
+    assert f.metrics["plugin_skills"] == 1
+    assert f.saving_usd_per_week == pytest.approx(1_000 * 100 * READ_RATE)
+    # with a plain skill unused too, only that one gets the SKILL.md line
+    evs[-1] = ev(EventKind.SKILLS_INVOKED, 3, names=("pdf", "xlsx"))
+    f = only(_checks(index(run(100), evs)), "skills_unused")
+    assert f.change == "disable-model-invocation: true"
+    assert "No project invoked slides:" in f.advice and "plugin:docx comes" in f.advice
+
+
 def test_all_skills_invoked_gives_no_finding() -> None:
     evs = [*_skills(), ev(EventKind.SKILLS_INVOKED, 3, names=("pdf", "docx", "xlsx", "slides"))]
     assert "skills_unused" not in kinds(_checks(index(run(100), evs)))
@@ -324,12 +342,19 @@ def test_worktree_copies_of_a_file_count_as_the_file() -> None:
 # --------------------------------------------------------------------------- agent tools
 
 
-def _coder_runs(calls: tuple[str, ...], kind: str = "coder", built_in: bool | None = None):  # type: ignore[no-untyped-def]
+def _coder_runs(  # type: ignore[no-untyped-def]
+    calls: tuple[str, ...],
+    kind: str = "coder",
+    built_in: bool | None = None,
+    spawns: int = 3,
+    session: str = "s1",
+    project: str = PROJECT,
+):
     reqs, agents = [], []
-    for i in range(3):
-        aid = f"a{i}"
-        reqs += run(40, start=10 + i, agent=aid, calls={0: calls})
-        agents.append(agent(aid, kind, is_built_in=built_in))
+    for i in range(spawns):
+        aid = f"{session}a{i}" if session != "s1" else f"a{i}"
+        reqs += run(40, start=10 + i, session=session, agent=aid, project=project, calls={0: calls})
+        agents.append(agent(aid, kind, session=session, is_built_in=built_in))
     return reqs, agents
 
 
@@ -340,59 +365,130 @@ def _definition(tmp_path: Path, tools: str) -> Path:
     return folder
 
 
+def _listing(names: tuple[str, ...], spawns: int = 3, session: str = "s1") -> list:  # type: ignore[type-arg]
+    return [
+        ev(
+            EventKind.TOOL_SET,
+            9,
+            session,
+            f"{session}a{i}" if session != "s1" else f"a{i}",
+            source="api-request-shape",
+            names=names,
+            size_tokens=4000,
+            tools_size_tokens=2000,
+        )
+        for i in range(spawns)
+    ]
+
+
 def test_agent_tools_never_used_get_a_tools_line(tmp_path: Path) -> None:
     folder = _definition(tmp_path, "tools: Read, Edit, Bash, WebFetch, WebSearch")
     reqs, agents = _coder_runs(("Read", "Bash"))
     f = only(_checks(index(reqs, agents=agents), [folder]), "agent_tools_unused")
     assert f.scope == "coder"
     assert f.change == "tools: Read, Bash"  # in the file's order
-    assert str(folder / "coder.md") in f.advice
+    assert f"frontmatter of {folder / 'coder.md'} (between its --- lines)" in f.advice
     # three tools without a listing: the default 600 tokens each, 120 requests
     assert f.saving_usd_per_week == pytest.approx(3 * 600 * 120 * READ_RATE)
     assert f.metrics["tools_given"] == 5 and f.metrics["tools_called"] == 2
 
 
-def test_agent_tools_from_its_own_listing_when_the_definition_has_none(tmp_path: Path) -> None:
+def test_an_agent_without_a_tools_line_gets_a_line_marked_as_a_restriction(
+    tmp_path: Path,
+) -> None:
+    folder = _definition(tmp_path, "model: opus")
+    reqs, agents = _coder_runs(("Read",), spawns=10)
+    evs = _listing(("Read", "Write"), spawns=10)
+    f = only(_checks(index(reqs, evs, agents), [folder]), "agent_tools_unused")
+    assert f.change is not None
+    comment, line = f.change.splitlines()
+    assert line == "tools: Read"
+    assert comment.startswith("# adds a tools: line")  # a YAML comment: safe to paste
+    assert "only these 1 tools" in comment and "inherits all 2" in comment
+    assert "no tools: line" in f.advice and "restricts it" in f.advice
+    assert f.metrics["restricts"] is True
+    assert f.saving_usd_per_week == pytest.approx(1_000 * 400 * READ_RATE)
+
+
+def test_few_spawns_without_a_tools_line_get_advice_but_no_line(tmp_path: Path) -> None:
     folder = _definition(tmp_path, "model: opus")
     reqs, agents = _coder_runs(("Read",))
-    evs = [
+    evs = _listing(("Read", "Write"))
+    f = only(_checks(index(reqs, evs, agents), [folder]), "agent_tools_unused")
+    assert f.change is None
+    assert "thin sample" in f.advice
+    assert f"{folder / 'coder.md'} has no tools: line in its frontmatter" in f.advice
+    assert f.saving_usd_per_week == pytest.approx(1_000 * 120 * READ_RATE)
+
+
+def test_the_restricting_line_holds_only_tools_from_its_claude_code_listings(
+    tmp_path: Path,
+) -> None:
+    folder = _definition(tmp_path, "model: opus")
+    root = tmp_path / ".openclaw"
+    claw = re.sub(r"[^A-Za-z0-9]", "-", str(root)) + "-workspace"  # Claude Code's naming
+    # Claude Code spawns: Read listed and called; "ghost" called but in no listing
+    reqs, agents = _coder_runs(("Read", "ghost"), spawns=10)
+    evs = _listing(("Read", "Write", "Bash"), spawns=10)
+    # OpenClaw spawns call its own tools, listed in their own sessions only
+    more, more_agents = _coder_runs(("process", "mcp__claw__exec"), session="s9", project=claw)
+    evs += [
         ev(
             EventKind.TOOL_SET,
             9,
-            "s1",
-            f"a{i}",
+            "s9",
+            a.agent_id,
             source="api-request-shape",
-            names=("Read", "Write"),
+            names=("Read", "process", "mcp__claw__exec"),
             size_tokens=4000,
             tools_size_tokens=2000,
         )
-        for i in range(3)
+        for a in more_agents
     ]
-    f = only(_checks(index(reqs, evs, agents), [folder]), "agent_tools_unused")
-    assert f.change == "tools: Read"
-    assert f.saving_usd_per_week == pytest.approx(1_000 * 120 * READ_RATE)
+    idx = index(reqs + more, evs, agents + more_agents)
+    found = run_checks(idx, TABLE, SINCE, UNTIL, agent_dirs=[folder], openclaw_root=root)
+    f = only(found, "agent_tools_unused")
+    assert f.change is not None and f.change.splitlines()[-1] == "tools: Read"
+    for name in ("process", "mcp__claw__exec", "ghost"):
+        assert name not in f.change and name in f.advice  # named as left out
+    assert f.metrics["spawns"] == 10 and f.metrics["tools_given"] == 3
+
+
+def test_a_project_level_definition_counts_only_its_own_project(tmp_path: Path) -> None:
+    folder = tmp_path / "proj" / ".claude" / "agents"
+    folder.mkdir(parents=True)
+    (folder / "coder.md").write_text("---\nname: coder\n---\n")
+    other = "-home-user-other"
+    reqs, agents = _coder_runs(("Read",), spawns=10)
+    # main-thread turns give the project its cwd, where the definition lives
+    reqs += [replace(r, cwd=str(tmp_path / "proj")) for r in run(2)]
+    evs = _listing(("Read", "Write"), spawns=10)
+    more, more_agents = _coder_runs(("Write",), session="s7", project=other)
+    evs += _listing(("Read", "Write"), spawns=3, session="s7")
+    f = only(_checks(index(reqs + more, evs, agents + more_agents), [folder]), "agent_tools_unused")
+    assert f.change is not None and f.change.splitlines()[-1] == "tools: Read"
+    assert f.metrics["spawns"] == 10
+
+
+def test_the_user_agents_folder_is_user_level_even_for_a_home_project(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    folder = home / ".claude" / "agents"
+    folder.mkdir(parents=True)
+    (folder / "coder.md").write_text("---\nname: coder\n---\n")
+    reqs, agents = _coder_runs(("Read",), spawns=10)
+    # a session run from the home folder, whose .claude/agents is the user's folder
+    home_reqs = [replace(r, cwd=str(home)) for r in run(2, session="s5", project="-home")]
+    evs = _listing(("Read", "Write"), spawns=10)
+    idx = index(reqs + home_reqs, evs, agents)
+    found = run_checks(idx, TABLE, SINCE, UNTIL, agent_dirs=[folder], claude_root=home / ".claude")
+    f = only(found, "agent_tools_unused")
+    assert f.metrics["spawns"] == 10
 
 
 def test_an_agent_using_all_its_tools_is_not_flagged(tmp_path: Path) -> None:
     folder = _definition(tmp_path, "tools: Read, Bash")
     reqs, agents = _coder_runs(("Read", "Bash"))
     assert "agent_tools_unused" not in kinds(_checks(index(reqs, agents=agents), [folder]))
-
-
-def _listing(names: tuple[str, ...]) -> list:  # type: ignore[type-arg]
-    return [
-        ev(
-            EventKind.TOOL_SET,
-            9,
-            "s1",
-            f"a{i}",
-            source="api-request-shape",
-            names=names,
-            size_tokens=4000,
-            tools_size_tokens=2000,
-        )
-        for i in range(3)
-    ]
 
 
 def test_built_in_agents_are_not_flagged(tmp_path: Path) -> None:
@@ -427,7 +523,70 @@ def test_the_tools_line_keeps_servers_patterns_and_the_agent_tool(tmp_path: Path
     assert f.metrics["tools_given"] == 6 and f.metrics["tools_called"] == 4
 
 
+def test_the_deferred_tool_placeholder_is_not_a_tool_given(tmp_path: Path) -> None:
+    folder = _definition(tmp_path, "model: opus")
+    reqs, agents = _coder_runs(("Read",), spawns=10)
+    evs = _listing(("Read", "Write", "DeferredToolPlaceholder"), spawns=10)
+    f = only(_checks(index(reqs, evs, agents), [folder]), "agent_tools_unused")
+    assert [e.label for e in f.evidence] == ["never called: Write"]
+    assert f.metrics["tools_given"] == 2
+    assert f.change is not None and "DeferredToolPlaceholder" not in f.change
+
+
+def test_a_called_mcp_tool_keeps_its_whole_server(tmp_path: Path) -> None:
+    folder = _definition(tmp_path, "model: opus")
+    reqs, agents = _coder_runs(("Read", "mcp__gh__get_issue"), spawns=10)
+    evs = _listing(("Read", "Write", "mcp__gh__get_issue", "mcp__gh__list_prs"), spawns=10)
+    f = only(_checks(index(reqs, evs, agents), [folder]), "agent_tools_unused")
+    assert f.change is not None and f.change.splitlines()[-1] == "tools: Read, mcp__gh"
+    assert [e.label for e in f.evidence] == ["never called: Write"]
+    # the listing's 2,000 tool tokens over four names: Write alone is priced
+    assert f.saving_usd_per_week == pytest.approx(500 * 400 * READ_RATE)
+
+
+def test_a_project_definition_wins_over_the_user_one_for_its_sessions(tmp_path: Path) -> None:
+    repo = tmp_path / "proj"
+    main = repo / ".claude" / "agents"
+    tree = repo / ".worktrees" / "b" / ".claude" / "agents"
+    user = tmp_path / "home" / ".claude" / "agents"
+    for folder, tools in ((main, "Read, Write"), (tree, "Read, Edit"), (user, "Read, Grep")):
+        folder.mkdir(parents=True)
+        (folder / "coder.md").write_text(f"---\nname: coder\ntools: {tools}\n---\n")
+    # sessions of a worktree of the repository, and of another project
+    reqs, agents = _coder_runs(("Read",))
+    reqs += [replace(r, cwd=str(repo / ".worktrees" / "b")) for r in run(2)]
+    more, more_agents = _coder_runs(("Read",), session="s7", project="-home-user-other")
+    idx = index(reqs + more, agents=agents + more_agents)
+    found = run_checks(
+        idx, TABLE, SINCE, UNTIL, agent_dirs=[tree, main, user], claude_root=user.parent
+    )
+    by_file = {
+        f.advice.split("frontmatter of ")[1].split(" ")[0]: f
+        for f in found
+        if f.kind == "agent_tools_unused"
+    }
+    assert set(by_file) == {str(main / "coder.md"), str(user / "coder.md")}
+    assert by_file[str(main / "coder.md")].evidence[0].label == "never called: Write"
+    assert by_file[str(user / "coder.md")].evidence[0].label == "never called: Grep"
+    assert all(f.metrics["spawns"] == 3 for f in by_file.values())
+
+
 # --------------------------------------------------------------------------- overlaps
+
+
+def test_agent_tools_unused_overlaps_every_context_kind(tmp_path: Path) -> None:
+    from capcom.checks.rules import _CONTEXT, overlaps
+    from tests.checks.test_usage import _tool_wait
+
+    assert set(_CONTEXT) <= set(overlaps("agent_tools_unused"))
+    folder = _definition(tmp_path, "tools: Read, Bash, Write")
+    reqs, agents = _coder_runs(("Read",))
+    wait, evs, wait_agents = _tool_wait(12, agent_id="w1")
+    found = _checks(index(reqs + wait, evs, agents + wait_agents), [folder])
+    coder = only(found, "agent_tools_unused")
+    expiry = only(found, "subagent_cache_expiry")
+    assert "subagent_cache_expiry" in coder.metrics["overlaps"]
+    assert "agent_tools_unused" in expiry.metrics["overlaps"]
 
 
 def test_findings_name_the_kinds_they_may_overlap_with() -> None:
