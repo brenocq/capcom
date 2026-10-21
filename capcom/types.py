@@ -271,6 +271,11 @@ class CostState:
     # records just before a cost-state can be out of order, and background subagents
     # keep spending after the main log's last record.
     next_timestamp: datetime | None = None
+    # `totalDuration`: the wall-clock milliseconds of the processes these totals
+    # cover. A resumed process that restores the totals carries `startTime` and this
+    # on, so the growth from one record to the next is the span of the process that
+    # wrote the later one (calibration compares per such step).
+    total_duration_ms: int | None = None
 
 
 Record = Request | Event | AgentInfo | SessionInfo | CostState
@@ -369,6 +374,33 @@ class Calibration:
     # names them. The 2 % target applies to comparable sessions only.
     comparable: bool = True
     reasons: tuple[str, ...] = ()
+    # Logged spend in no process step a cost-state covers: a Claude Code process
+    # that wrote no cost-state (crashed, killed, or still running). Not in
+    # `capcom_usd` and never a mismatch: cost-state cannot count it.
+    outside_usd: float = 0.0
+    # Per model, cost-state's output tokens above capcom's where capcom estimated
+    # output, priced at the output rate: the true output can reach this much more
+    # (the log has no true count). So capcom's total is "at least capcom_usd, up to
+    # capcom_usd + output_above_usd".
+    output_above: Mapping[str, float] = field(default_factory=dict, hash=False)
+    # Per model, then per category ("cache_read", "input", "output", "cache_write"),
+    # cost-state's tokens above the log's in the compared window, priced: calls
+    # Claude Code counted that the log does not record.
+    unlogged: Mapping[str, Mapping[str, float]] = field(default_factory=dict, hash=False)
+
+    @property
+    def output_above_usd(self) -> float:
+        return sum(self.output_above.values())
+
+    @property
+    def unlogged_usd(self) -> float:
+        return sum(sum(v.values()) for v in self.unlogged.values())
+
+    @property
+    def rest_usd(self) -> float:
+        """cost-state's total less capcom's, the output above its estimate and the
+        calls the log does not record: the gap nothing here explains."""
+        return self.claude_code_usd - self.capcom_usd - self.output_above_usd - self.unlogged_usd
 
     @property
     def spread(self) -> float:
@@ -457,6 +489,11 @@ class Index(Protocol):
 
     def last_cost_states(self) -> Iterator[CostState]:
         """The last cost-state of each session that has one."""
+        ...
+
+    def cost_states(self, session_id: str) -> Iterator[CostState]:
+        """Every cost-state of the file holding the session's last one, in file
+        order (one per process exit, totals carried on through resumes)."""
         ...
 
 
