@@ -97,7 +97,7 @@ function detail(it) {
   const evidence = causes.flatMap((c) => c.evidence);
   const facts = h('div.facts', null, h('h3', { text: 'Evidence in the logs' }),
     evidence.length ? h('ul.evidence', null, evidence.map((e) => h('li', null, h('span', { text: e.label }))))
-      : h('p.note', { text: causes.length ? 'No log record was cited.' : 'Causes are matched from milestone 3.' }));
+      : h('p.note', { text: causes.length ? 'No log record was cited.' : it.explanations ? 'No cause was matched.' : 'Causes are matched from milestone 3.' }));
   const advice = causes.map((c) => c.advice).filter(Boolean);
   const fix = h('div.fix', null, h('h3', { text: 'What to change' }),
     advice.length ? advice.map((a) => h('p', { text: a })) : h('p', { text: 'Nothing to change yet. If this pattern comes back, look at the session around this time.' }),

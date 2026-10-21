@@ -275,7 +275,13 @@ export function spikeText(m) {
 
 // The Spikes page for one spike: a window of whole days that starts on or before it.
 export function spikeHref(key, startMs, days) {
-  const back = Math.floor((Date.now() - startMs) / 864e5) + 1;
+  // Local calendar days from the spike's day to today, inclusive: a spike at
+  // 23:30 seen at 00:30 needs days=2, not 1.
+  const day0 = new Date(startMs);
+  day0.setHours(0, 0, 0, 0);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const back = Math.round((today - day0) / 864e5) + 1;
   const d = days || [1, 7, 14, 30, 90].find((x) => x >= back) || Math.min(366, back + 1);
   return `/spikes?days=${d}` + (key ? '&spike=' + encodeURIComponent(key) : '');
 }

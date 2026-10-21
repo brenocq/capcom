@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 import capcom.timeline
+from capcom.explain import fmt
 from capcom.report import api
 from capcom.report.analysis import Analysis
 from capcom.report.server import FailuresOnly, Scanner
@@ -33,6 +34,7 @@ from capcom.types import (
 )
 from tests.report.conftest import (
     ALPHA,
+    BETA,
     NOW,
     _log,
     _put,
@@ -167,7 +169,6 @@ def test_session_spikes_without_explain(spiky: Path) -> None:
 
 
 def test_session_scope_spike_window_counts_every_thread(spiky: Path) -> None:
-    start = NOW - timedelta(hours=3)
     with open_index(spiky, readonly=True) as ix:
         reqs = list(ix.requests(session_id="sp"))
     coder = [r for r in reqs if r.agent_id == "a2"]
@@ -189,9 +190,51 @@ def test_session_scope_spike_window_counts_every_thread(spiky: Path) -> None:
     assert item["scope"] == "session"
     win = item["window"]
     assert sum(win["extra"]) == pytest.approx(0.75 * cost, rel=1e-3)
-    # usual pace counts the main thread and the scout around it too
-    main_and_scout = [r for r in reqs if r.agent_id != "a2" and r.timestamp >= start]
-    assert main_and_scout and sum(win["usual"]) > 0
+    # usual pace: the spike at its baseline, plus the main thread and the scout
+    # inside the window
+    lo = win["start"]
+    hi = lo + len(win["usual"]) * win["step_s"] * 1000
+    main_and_scout = [
+        r for r in reqs if r.agent_id != "a2" and lo <= r.timestamp.timestamp() * 1000 < hi
+    ]
+    assert main_and_scout
+    assert sum(win["usual"]) == pytest.approx(cost / 4 + usd(main_and_scout), rel=1e-3)
+
+
+def test_linked_spike_is_listed_beyond_the_largest(spiky: Path) -> None:
+    """`?spike=<key>` lists that spike even when 40 larger ones push it out."""
+    with open_index(spiky, readonly=True) as ix:
+        main = [r for r in ix.requests(session_id="sp") if r.agent_id is None]
+    many = [
+        Spike(
+            SpikeKind.SINGLE_REQUEST,
+            r.timestamp,
+            r.timestamp,
+            cost_usd=1.0 + i,
+            baseline_usd=0.5,
+            session_id="sp",
+            message_ids=(r.message_id,),
+        )
+        for i, r in enumerate(main[: api.MAX_SPIKES + 2])
+    ]
+    small = many[0]  # the smallest excess
+    analysis = Analysis(
+        capcom.timeline.cumulative, capcom.timeline.per_step, lambda *a: many, explain_all,
+        fake_checks,
+    )  # fmt: skip
+    key = api.spike_key(small)
+    for client in _client(spiky, analysis):
+        plain = client.get("/api/spikes")[1]["spikes"]
+        linked = client.get(f"/api/spikes?spike={key}")[1]["spikes"]
+    assert len(plain) == api.MAX_SPIKES and key not in {s["key"] for s in plain}
+    assert len(linked) == api.MAX_SPIKES + 1 and key in {s["key"] for s in linked}
+
+
+def test_cause_labels_match_the_cli(spiky: Path) -> None:
+    for kind, label in fmt.CAUSE_LABELS.items():
+        assert api.CAUSE_LABELS[kind.value] == label
+    for conf, label in fmt.CONFIDENCE_LABELS.items():
+        assert api.CONFIDENCE_LABELS[conf.value] == label
 
 
 # --------------------------------------------------------------------------- checks
@@ -264,6 +307,29 @@ def test_checks_total_when_nothing_overlaps(spiky: Path) -> None:
         data = client.get("/api/checks")[1]
     assert data["total"] == {"usd_per_week": 7.5, "findings": 2, "all": True}
     assert data["overlapping"] is False
+
+
+def test_overlap_needs_the_same_project(tmp_path: Path) -> None:
+    """Idle rewrites in project A still count when only project B has long-running
+    agents; in the same project, or against "all", they overlap."""
+    ix = open_index(tmp_path / "index.sqlite")
+    for proj, sid in ((ALPHA, "sa"), (BETA, "sb")):
+        info = SessionInfo(sid, proj, cwd="/" + sid, title=sid)
+        _put(ix, _log(proj, sid), [info, req(sid, NOW - timedelta(hours=1), proj, output=10)])
+    ix.close()
+    cases = [
+        (BETA, [True, True]),
+        (ALPHA, [True, False]),
+        ("all", [True, False]),
+    ]
+    for scope, want in cases:
+        found = [
+            finding("long_running_agents", 20.0, scope, overlaps=("idle_rewrites",)),
+            finding("idle_rewrites", 10.0, ALPHA, overlaps=("long_running_agents",)),
+        ]
+        for client in _client(tmp_path / "index.sqlite", _analysis(checks=lambda *a, f=found: f)):
+            data = client.get("/api/checks")[1]
+        assert [r["counted"] for r in data["findings"]] == want, scope
 
 
 # --------------------------------------------------------------------------- scanning

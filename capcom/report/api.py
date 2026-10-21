@@ -872,21 +872,15 @@ MAX_SPIKES = 40  # spikes listed on the Spikes page: the largest by excess
 WINDOW_BARS = 36  # about this many bars in a spike's window chart
 _BAR_STEPS = tuple(timedelta(minutes=m) for m in (1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720))
 
-# capcom.types.CauseKind and Confidence in words (an unknown id is shown as it is)
-CAUSE_LABELS = {
-    "idle_rewrite": "Idle past cache lifetime",
-    "compaction": "Compaction",
-    "model_switch": "Model switch",
-    "tool_set_change": "Tools changed",
-    "large_tool_result": "Large tool result",
-    "context_growth": "Context growth",
-    "fan_out": "Subagent fan-out",
-    "long_report": "Long subagent report",
-    "thinking_heavy": "Heavy thinking",
-    "polling": "Polling loop",
-    "unexplained": "Unexplained",
-}
-CONFIDENCE_LABELS = {"clear": "clear cause", "likely": "likely cause", "unexplained": "unexplained"}
+# capcom.types.CauseKind and Confidence in words, as the CLI says them (an
+# unknown id is shown as it is; without capcom.explain there are no causes to name)
+CAUSE_LABELS: dict[str, str] = {}
+CONFIDENCE_LABELS: dict[str, str] = {}
+with contextlib.suppress(Exception):  # like Analysis, a broken module is only missing
+    from capcom.explain import fmt as _fmt
+
+    CAUSE_LABELS = {k.value: v for k, v in _fmt.CAUSE_LABELS.items()}
+    CONFIDENCE_LABELS = {k.value: v for k, v in _fmt.CONFIDENCE_LABELS.items()}
 
 
 def spike_key(sp: Spike) -> str:
@@ -1026,6 +1020,9 @@ def spikes(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
         totals.items(), key=lambda kv: (kv[0] == CauseKind.UNEXPLAINED.value, -kv[1][0])
     )
     shown = sorted(found, key=lambda sp: -sp.excess_usd)[:MAX_SPIKES]
+    wanted = query.get("spike")  # a linked spike is listed even when it is not among the largest
+    if wanted and not any(spike_key(sp) == wanted for sp in shown):
+        shown += [sp for sp in found if spike_key(sp) == wanted][:1]
     shown.sort(key=lambda sp: (sp.start, sp.session_id or "", sp.agent_id or ""))
     infos = ctx.infos()
     names = project_names(infos.values())
@@ -1070,19 +1067,25 @@ def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     since = ctx.midnight(days - 1)
     found = ctx.analysis.checks(ctx.index, ctx.table, since, ctx.now)
     kinds = {f.kind for f in found}
-    counted_kinds: set[str] = set()
+    infos = ctx.infos()
+    names = project_names(infos.values())
+    dirs = {info.project_dir for info in infos.values()}
+
+    def same_place(a: str, b: str) -> bool:
+        # two project folders are apart; "all" or an agent type may cover any folder
+        return a == b or a not in dirs or b not in dirs
+
+    kept: list[tuple[str, str]] = []  # (kind, scope) of the findings counted so far
     counted: list[bool] = []
     for f in found:  # largest first: keep each that counts dollars none kept so far does
-        ok = not counted_kinds.intersection(_overlaps(f))
+        over = _overlaps(f)
+        ok = not any(k in over and same_place(sc, f.scope) for k, sc in kept)
         if ok:
-            counted_kinds.add(f.kind)
+            kept.append((f.kind, f.scope))
         counted.append(ok)
     overlapping = any(_overlaps(f) for f in found)
     calls = _subagent_calls(ctx, since) if "one_command_subagents" in kinds else {}
     comps = _compactions(ctx, since) if "late_compactions" in kinds else {}
-    infos = ctx.infos()
-    names = project_names(infos.values())
-    dirs = {info.project_dir for info in infos.values()}
     rows = []
     for i, f in enumerate(found):
         label = project_display(f.scope, names, ctx.openclaw_dir) if f.scope in dirs else f.scope

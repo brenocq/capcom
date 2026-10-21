@@ -167,9 +167,19 @@ function scanningNotice() {
     'capcom serve is reading the logs into the index now, so the totals below are partial. This page redraws when the first scan is done.');
 }
 
+// A failed /api/status is retried, 2 s doubling up to 30 s, so a server that
+// was busy or restarting still gets its scanning notice shown and cleared.
+let statusRetry = 2e3;
 async function refreshStatus() {
   const was = statusData && statusData.scanning;
-  try { statusData = await api('status', true); } catch (e) { /* keep the last one */ }
+  try {
+    statusData = await api('status', true);
+    statusRetry = 2e3;
+  } catch (e) { // keep the last one, and ask again soon
+    setTimeout(refreshStatus, statusRetry);
+    statusRetry = Math.min(30e3, statusRetry * 2);
+    return;
+  }
   drawSidebar();
   if (statusData && statusData.scanning) {
     if (!was) renderPage();
