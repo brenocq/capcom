@@ -8,6 +8,8 @@ the index read-only and closes it before answering.
 The server keeps the index fresh itself: an incremental scan (`run_scan`, quiet) at
 start and then a minute after each scan ends, in one background thread; a lock keeps
 two scans from overlapping, and `--no-scan` turns it off. The handlers never write.
+The scan prints nothing but the files that failed; when Ctrl+C stops the server in the
+middle of a scan, the terminal says so (the next scan reads the rest).
 
 Conventions:
 
@@ -29,7 +31,7 @@ Errors are JSON: `{"error": code, "message": text, ...}`.
 | 400 | `bad_query` | A query parameter is out of range or unknown. |
 | 404 | `not_found` | Unknown endpoint or session. |
 | 501 | `unavailable` | The analysis module behind it is not built yet; adds `module` and `milestone`. |
-| 503 | `no_index` | No index, or one written by another capcom version: run `capcom scan`. |
+| 503 | `no_index` | No index, or one written by another capcom version: run `capcom scan`. Adds `scanning`: true when serve's scan is running (the message then says the logs are being read). |
 | 503 | `index_busy` | SQLite could not read the index. |
 
 Anything else is a plain-text `500 internal error` that says nothing more; the
@@ -64,11 +66,14 @@ end of step *i*, so the last total is the window's total. At most six members pl
 `(other)`, which sums the rest; members come largest first, `(other)` last (from
 `capcom.timeline.cumulative`). By category, web tools are counted with output.
 
-**Spikes**: `{count, excess_usd, marks: [{n, t, end, kind, session_id, title, agent_id,
-requests, cost_usd, excess_usd}]}` from `capcom.timeline.find_spikes` over the
-window: `count` and `excess_usd` cover them all, `marks` the 12 largest by excess,
-numbered 1.. in time order (`t`, `end` in ms). The charts draw them as numbered
-markers linking to `/spikes`.
+**Spikes**: `{count, excess_usd, explained, marks: [{n, key, t, end, kind, scope,
+session_id, title, agent_id, requests, cost_usd, excess_usd, cause, cause_label,
+confidence, headline}]}` from `capcom.timeline.find_spikes` over the window: `count`
+and `excess_usd` cover them all, `marks` the 12 largest by excess, numbered 1.. in time
+order (`t`, `end` in ms). The charts draw them as numbered markers linking to
+`/spikes?spike=<key>`. `cause`, `cause_label`, `confidence` and `headline` (the title)
+are the main cause from `capcom.explain` (its largest share of the excess), null when
+there is none; `explained` is false while `capcom.explain` is not available.
 
 `unavailable` lists the analysis modules that are not built yet; the parts that need
 them are `null`.
@@ -84,8 +89,9 @@ as one member, labeled `temporary folders`.
 
 ### `GET /api/status`
 
-`{now, sessions, prices_checked, index: {updated, size_bytes}}`. `updated` is the
-later modification time of `index.sqlite` and `index.sqlite-wal`.
+`{now, sessions, prices_checked, scanning, index: {updated, size_bytes}}`. `updated` is
+the later modification time of `index.sqlite` and `index.sqlite-wal`. `scanning` is
+true while serve's first scan has not finished: totals may be partial until then.
 
 ### `GET /api/overview`
 
@@ -149,16 +155,23 @@ numbers, missing values last).
            peak_context, finished}],
  agent_types: [{agent_type, spawns, median_tool_calls, average_peak_context, usd, share}],
  pauses: [{start, end, minutes, next_usd, next_cache_write}],    # gaps of 5 minutes or more
- compactions: [{t, agent_id, trigger, pre_tokens, post_tokens}]}
+ compactions: [{t, agent_id, trigger, pre_tokens, post_tokens}],
+ spikes: {count, excess_usd, explained, items: [Spike item]} | null}
 ```
+
+`spikes` are the session's (`find_spikes` on it), the 8 largest by excess in `items`
+(as in `/api/spikes`, without `n` and `window`; `explanations` is null when
+`capcom.explain` is not available); null when `capcom.timeline` is not.
 
 `requests.agent` is an index into `agents`, or -1 for the main thread. A session of
 more than 4,000 requests has its columns thinned for the charts (`thinned` says how
-many were kept): each thread's requests, in time order, are cut into runs of
-`ceil(3 n / b)`, where `b` is 4,000 less the spike requests and two per thread (at
-least 1,000), and a run keeps its costliest request and its largest and
-smallest context; every thread keeps its first and last request, and every request
-of a spike (`find_spikes` on the session) stays. Totals, `main`, `agents` and
+many were kept), to about 4,000 points whatever the number of threads: the spike
+requests (`find_spikes` on the session) get up to half of them, all when they fit,
+else cut into runs that each keep their costliest request and their largest and
+smallest context; the other requests get the rest the same way, in the shortest runs
+that fit, a thread with at least a run's worth of requests in runs of its own (the
+main thread keeps its line) and the smaller threads' requests together. The
+session's first and last request stay. Totals, `main`, `agents` and
 `pauses` count every request. `reason_labels` are the `reasons` in words (the ids
 come from `capcom.cost.calibrate`). A session whose replies are all placeholders has
 0 active seconds. A session is
@@ -171,8 +184,55 @@ Sessions with a record in the last 10 minutes, fastest first:
 usd_last_10_min, usd_per_hour, last_seen}]}`. The rate is the last 10 minutes' spend
 times six.
 
-### `GET /api/spikes?days=14` and `GET /api/checks?days=14`
+### `GET /api/spikes?days=14`
 
-501 until `capcom.timeline.find_spikes` and `capcom.explain` (milestone 3) or
-`capcom.checks` (milestone 4) are built; then `{days, spikes, explanations}` and
-`{days, findings}`, the `capcom.types` dataclasses as JSON.
+501 (`module` `timeline` or `explain`, milestone 3) until both are built. `days` is
+1 to 366.
+
+```
+{days, since, until, count, excess_usd,
+ explained,                                     # spikes with a cause other than unexplained
+ causes: [{cause, label, excess_usd, explanations}],   # largest first, unexplained last
+ spikes: [Spike item + {n, window}]}
+Spike item = {key, kind, scope, start, end, session_id, agent_id, agent_type, title,
+              project, requests, cost_usd, baseline_usd, excess_usd,
+              cause, cause_label, confidence, headline,   # the main cause, as in Spikes
+              explanations: [{cause, cause_label, confidence, confidence_label,
+                              excess_usd, title, summary, advice, evidence: [Evidence]}]}
+Evidence = {label, session_id, agent_id, timestamp, message_id, event_key}
+window = {start, step_s, usual: [usd], extra: [usd], spike_start, spike_end}   # ms
+```
+
+`causes` add up the explanations of every spike of the window; `spikes` lists the 40
+largest by excess, numbered in time order. `scope` is `thread` (one agent thread,
+`agent_id` null for the main thread) or `session` (all threads of the session). The
+`window` is about 36 bars around the spike (30 minutes to 3 hours each side) of the
+spend of its scope: `usual` is what the requests cost at the baseline pace (the
+spike's baseline shared among its requests, plus every other request), `extra` what
+the spike's requests cost above it, adding up to its excess.
+
+### `GET /api/checks?days=14`
+
+501 (milestone 4) until `capcom.checks` is built.
+
+```
+{days, since, until, overlapping,
+ total: {usd_per_week, findings, all} | null,
+ findings: [{n, kind, title, scope, summary, saving_usd_per_week, advice, change,
+             evidence: [Evidence], metrics, overlaps: [kind], counted, visual}]}
+```
+
+Findings come ranked by weekly saving. Some savings count the same dollars
+(`overlaps`, from `metrics["overlaps"]`; `overlapping` says whether any do), so they
+are never added up: `total` sums only the findings with `counted` true, picked largest
+first, each one that overlaps none picked before it (`all` says whether that is every
+finding); null when there are none. `visual` is a small chart from the metrics, or
+null:
+`{type: "squares" | "split", label, verb, total, filled}` (tools or skills loaded
+against those used, or sessions that loaded claude.ai connectors against those that
+called one; a bar past 120), `{type: "histogram", label, buckets: [{label, count,
+small}]}` (tool calls per subagent of the finding's agent type in the window, from the
+index; `small` marks two calls or fewer), `{type: "dots", label, values, threshold}`
+(context size when each compaction of the finding's project started, from the index),
+`{type: "gauge", label, value, limit}` (memory size against its budget, the largest
+context against its threshold).
