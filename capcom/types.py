@@ -670,3 +670,77 @@ class LimitSample:
     resets_at: datetime | None = None
     session_id: str | None = None
     source: str = "statusline"  # "statusline" or "rate_limit_error" (a seed from the logs)
+
+
+# --------------------------------------------------------------------------- did it work?
+#
+# The user marks a finding as applied on a date; capcom measures the finding's own
+# rate before and after that date (design.md, "Did it work?"). Marks are the only
+# thing capcom writes besides its cache: $XDG_DATA_HOME/capcom/changes.jsonl.
+
+
+@dataclass(frozen=True, slots=True)
+class ChangeMark:
+    """A change the user made, tied to the finding it answers (kind and scope)."""
+
+    id: int  # small, stable, shown in the CLI and URLs
+    kind: str  # the finding's kind, e.g. "subagent_cache_expiry"
+    scope: str  # the finding's scope: a project dir, an agent type, or "all"
+    applied_on: date  # local date the change was made; "after" starts the next day
+    title: str  # the finding's title when marked
+    what: str = "suggested"  # "suggested" (the finding's change) or "other"
+    note: str = ""  # the user's own words, kept on this machine
+    expected_usd_per_week: float | None = None  # the finding's saving when marked
+    marked_at: datetime | None = None
+    source: str = "user"  # "user", or "noticed" (a detected change the user confirmed)
+
+
+class Verdict(StrEnum):
+    WORKING = "working"  # the after rate sits below the before weeks' range
+    NO_EFFECT = "no_effect"  # inside that range
+    WORSE = "worse"  # above it
+    TOO_EARLY = "too_early"  # under the minimum days or requests since the date
+    NO_DATA = "no_data"  # nothing to measure in that scope (before or after)
+
+
+@dataclass(frozen=True, slots=True)
+class MeasurePoint:
+    """One week of a change's measure: the rate and the requests behind it."""
+
+    week_start: date
+    value: float | None  # None when the week had no requests in scope
+    requests: int
+    after: bool  # True for weeks starting after the applied date
+
+
+@dataclass(frozen=True, slots=True)
+class ChangeResult:
+    """A mark measured on the logs. Rates, so a busier week doesn't count against it."""
+
+    mark: ChangeMark
+    measure: str  # e.g. "Tool-wait rewrites per 1,000 requests"
+    before: float | None  # the rate over the before window
+    after: float | None  # the rate since the day after the date
+    before_range: tuple[float, float] | None  # lowest and highest full before week
+    weeks: tuple[MeasurePoint, ...]
+    requests_per_week_before: float
+    requests_per_week_after: float
+    measured_usd_per_week: float | None  # (before - after) x after workload x unit price
+    verdict: Verdict
+    verdict_due: date | None  # when a too-early verdict can be given
+    reason: str  # one generated sentence with the numbers
+    evidence: tuple[tuple[str, str, str], ...] = ()  # (label, before, after)
+    quality: tuple[tuple[str, str, str], ...] = ()  # model changes: signals to judge by
+
+
+@dataclass(frozen=True, slots=True)
+class NoticedChange:
+    """A change capcom saw in a file it already reads (an agent definition's
+    frontmatter), matching a finding's suggestion; shown for the user to confirm."""
+
+    kind: str
+    scope: str
+    title: str
+    path: Path
+    detail: str  # e.g. "model: sonnet"
+    since: datetime  # the file's modification time
