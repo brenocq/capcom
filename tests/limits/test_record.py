@@ -271,3 +271,23 @@ def test_stale_window_is_not_recorded(env: dict[str, str]) -> None:
     run(five(50, time.time() - 60), env)  # a reset already past: skipped
     got = [(g["used_percentage"]) for g in lines(env)]
     assert got == [80, 3, 4]
+
+
+def test_interleaved_sessions_record_one_rising_series(env: dict[str, str]) -> None:
+    def week(used: float, sid: str, resets: float = RESET_7D) -> bytes:
+        body = json.loads(payload(None, used))
+        body["session_id"] = sid
+        body["rate_limits"]["seven_day"]["resets_at"] = resets
+        return json.dumps(body).encode()
+
+    run(week(85, "a"), env)
+    run(week(87, "b"), env)
+    run(week(79, "c"), env)  # sessions whose last reply is older: stale, skipped
+    run(week(76, "d"), env)
+    run(week(87, "b"), env)  # equal to the maximum: nothing new
+    run(week(87, "a", RESET_7D + 120), env)  # drifted reset, same window, equal: skipped
+    run(week(88, "c"), env)
+    run(week(2, "a", RESET_7D + 7 * 86400), env)  # a new window starts lower
+    run(week(88, "b"), env)  # still the old window: stale
+    got = [(g["used_percentage"], g["session_id"]) for g in lines(env)]
+    assert got == [(85, "a"), (87, "b"), (88, "c"), (2, "a")]
