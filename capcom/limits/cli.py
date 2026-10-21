@@ -161,7 +161,10 @@ def run_limits(
         print(f"No samples in {samples_path(config.cache_dir)}.", file=out)
         print(NOT_RECORDING, file=out)
         return 0
-    views = analyze_all(index, load_prices(), samples, now)
+    from capcom.timeline.groups import ProjectNames
+
+    names = ProjectNames.build(index.sessions(), config.openclaw_root)
+    views = analyze_all(index, load_prices(), samples, now, lambda d: names.label(names.key(d)))
     print(f"capcom limits ({len(samples)} samples, {samples_path(config.cache_dir)})\n", file=out)
     print(format_views(views, samples, now), file=out)
     return 0

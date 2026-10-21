@@ -188,19 +188,19 @@ def format_views(
         last = v.segments[-1]
         if v.current and last.resets_at is not None:
             lines.append(
-                f"{head}: {r.used_percentage:.0f} % at {_local(r.time)}; resets "
+                f"{head}: {r.used_percentage:.0f}% at {_local(r.time)}; resets "
                 f"{_local(last.resets_at)} (in {_span(last.resets_at - now)})"
             )
         else:
             lines.append(
-                f"{head}: last reading {r.used_percentage:.0f} % at {_local(r.time)}; "
+                f"{head}: last reading {r.used_percentage:.0f}% at {_local(r.time)}; "
                 f"that window reset {_local(last.resets_at)}"
             )
         fc = v.forecast
         if fc is not None:
             lines.append(
-                f"  now about {fc.now:.0f} %; at the reset {fc.median:.0f} % "
-                f"(80 % range {fc.low:.0f} to {fc.high:.0f} %)"
+                f"  now about {fc.now:.0f}%; at the reset {fc.median:.0f}% "
+                f"(80% range {fc.low:.0f} to {fc.high:.0f}%)"
             )
             if fc.runs_out_at is not None:
                 lines.append(f"  runs out around {_local(fc.runs_out_at)}")
@@ -210,21 +210,21 @@ def format_views(
         if f is not None:
             err = f"mean error {f.mean_abs_error:.1f} points"
             lines.append(
-                f"  fit: {f.per_usd:.3f} % per API-equivalent dollar; {f.note}; "
+                f"  fit: {f.per_usd:.3f}% per API-equivalent dollar; {f.note}; "
                 f"{v.samples} samples; {err}"
             )
             if f.method == "per_type":
                 top = sorted(f.weights.items(), key=lambda kv: -kv[1])[:6]
                 for (m, c), wt in top:
                     if wt > 0:
-                        lines.append(f"    {m} {c.replace('_', ' ')}: {wt:.4f} % per M tokens")
+                        lines.append(f"    {m} {c.replace('_', ' ')}: {wt:.4f}% per M tokens")
         else:
             lines.append(f"  fit: {NOT_ENOUGH} ({v.samples} so far)")
         if v.shown and v.current:
             sv = v.shown[-1]
             parts = []
             for k, u, p in sv.by_project[:5]:
-                parts.append(f"{k} ${u:,.2f}" + ("" if p is None else f" ({p:.1f} %)"))
+                parts.append(f"{k} ${u:,.2f}" + ("" if p is None else f" ({p:.1f}%)"))
             if parts:
                 lines.append("  this window by project: " + ", ".join(parts))
         lines.append("")

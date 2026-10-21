@@ -104,7 +104,7 @@ def test_view_with_samples(tmp_path: Path) -> None:
     out = io.StringIO()
     run_limits(cfg, out=out, now=T0 + minutes(5), index=FakeIndex(reqs))  # type: ignore[arg-type]
     text = out.getvalue()
-    assert "5-hour window: 30 %" in text and "at the reset" in text and "80 % range" in text
+    assert "5-hour window: 30%" in text and "at the reset" in text and "80% range" in text
     assert "% per API-equivalent dollar" in text and "too few samples" in text
     assert "Weekly limit: no samples." in text
     assert "this window by project" in text

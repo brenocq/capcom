@@ -6,20 +6,12 @@ import {
 } from './lib.js';
 import { bandChart, sparkline } from './charts.js';
 import { pendingBlock } from './sessions.js';
+import { limitCard } from './limits.js';
 import { memberColor, memberLabel, timelineMissing, spikeMarks, spikeList, pickSpikes } from './spend.js';
 
 function greeting(d) {
   const hr = d.getHours();
   return hr < 5 ? 'Good night' : hr < 12 ? 'Good morning' : hr < 18 ? 'Good afternoon' : 'Good evening';
-}
-
-function limitCard(label) {
-  const ring = s('svg', { width: 60, height: 60, viewBox: '0 0 60 60', 'aria-hidden': 'true' },
-    s('circle', { cx: 30, cy: 30, r: 24, fill: 'none', 'stroke-width': 6, style: 'stroke:var(--subtle)' }));
-  return h('section.card', null,
-    h('div', { style: 'display:flex;align-items:center;gap:16px' }, ring,
-      h('div', { style: 'display:flex;flex-direction:column;gap:2px' }, h('span.label', { text: label }), h('span.big', { style: 'color:var(--muted)', text: 'No data yet' }))),
-    empty('Limit tracking starts in milestone 5', 'capcom will record the 5-hour and weekly percentages from then on and forecast the value at reset. Until there are recorded samples it shows no estimate.'));
 }
 
 export async function renderOverview(main, r) {
@@ -34,7 +26,9 @@ export async function renderOverview(main, r) {
       h('p.sub', { text: `${longDate(now)} · ${d.running_sessions} session${d.running_sessions === 1 ? '' : 's'} running` })),
     seg('Range', [['today', 'Today'], ['7d', '7 days']], range, (v) => setQuery({ range: v === 'today' ? null : v }))));
 
-  main.append(h('div.grid', { style: '--min:440px' }, limitCard('5-hour window'), limitCard('Weekly limit')));
+  const lim = d.limits || {};
+  const wins = lim.windows || {};
+  main.append(h('div.grid', { style: '--min:440px' }, limitCard('5-hour window', wins.five_hour, lim), limitCard('Weekly limit', wins.seven_day, lim)));
 
   // KPI cards
   // today so far against the previous days with history up to the same time of day
