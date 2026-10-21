@@ -20,7 +20,8 @@ def _scan(args: argparse.Namespace) -> int:
         print(
             f"{stats.files_read} of {stats.files_seen} files read, "
             f"{stats.bytes_read / 1e6:.1f} MB, {stats.records} records, "
-            f"{stats.skipped} lines skipped, {stats.seconds:.1f} s"
+            f"{stats.skipped} lines skipped, {stats.files_failed} files failed, "
+            f"{stats.seconds:.1f} s"
         )
     return 0
 

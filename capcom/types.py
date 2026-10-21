@@ -370,6 +370,7 @@ class ScanStats:
     records: int = 0
     skipped: int = 0
     seconds: float = 0.0
+    files_failed: int = 0  # files whose scan raised (retried next scan)
 
 
 # --------------------------------------------------------------------------- module boundaries

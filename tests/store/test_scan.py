@@ -237,6 +237,7 @@ def test_failed_file_is_reported_and_the_scan_goes_on(
     assert "failed on" in err and "s1.jsonl" in err and "RuntimeError" in err
     assert "2/2 files" in err and "1 failed" in err
     assert stats.records == 1
+    assert stats.files_failed == 1
     assert outputs(config) == [("n1", 0)]
     assert scan(config).records == 1  # retried on the next scan
     assert outputs(config) == [("m1", 0), ("n1", 0)]

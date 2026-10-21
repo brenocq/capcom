@@ -162,6 +162,7 @@ def scan_all(
             scan_file(index, source, log, stats)
         except Exception as exc:  # one bad file must not stop the scan: retried next time
             shown.error(log, exc)
+            stats.files_failed += 1
         shown.update(stats)
     stats.seconds = time.monotonic() - t0
     shown.update(stats, force=True)
