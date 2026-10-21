@@ -58,6 +58,12 @@ def _overlapped_by(
     return [hit[0] + 1 if counted[i] is False and hit else 0 for i, hit in enumerate(blockers)]
 
 
+def finding_id(f: Finding, scope: str | None = None) -> str:
+    """A finding's stable id across windows: "kind@scope", the scope as shown
+    (`scope`, a project's name) or as the finding has it."""
+    return f"{f.kind}@{f.scope if scope is None else scope}"
+
+
 def format_findings(
     findings: list[Finding],
     limit: int,
@@ -78,6 +84,8 @@ def format_findings(
         scope = _scope_label(f.scope, names, known)
         star = {True: " ", False: "*", None: "+"}[flags[i - 1]]
         lines = [f"{i:>2}.{star}${f.saving_usd_per_week:,.2f}/week  {f.title}  [{scope}]"]
+        # the stable id `capcom mark` takes (or this row's number, in this window)
+        lines.append(f"    id {finding_id(f, scope)}  (capcom mark {i})")
         if flags[i - 1] is None:
             lines.append("    + a judgement call: not added to the total")
         elif not flags[i - 1]:
