@@ -160,3 +160,20 @@ def test_project_names_rule() -> None:
     assert names.key(scratch) == f"temporary ({toy})"
     assert names.label(scratch) == names.label(names.key(scratch)) == "temporary (toy-brain)"
     assert names.label("-tmp-x") == "(temporary)"
+
+
+def test_openclaw_state_dir_and_a_repo_named_openclaw_are_told_apart() -> None:
+    from pathlib import Path
+
+    from capcom.timeline.groups import ProjectNames
+
+    names = ProjectNames.build(
+        [
+            ("-home-u-Github-openclaw", "/home/u/Github/openclaw"),
+            ("-home-u--openclaw", None),  # the state dir, no cwd seen
+        ],
+        openclaw_root=Path("/home/u/.openclaw"),
+        home=Path("/home/u"),
+    )
+    assert names.label("-home-u-Github-openclaw") == "~/Github/openclaw"
+    assert names.label("-home-u--openclaw") == "~/.openclaw"
