@@ -1,0 +1,43 @@
+[project]
+name = "capcom"
+version = "0.1.0"
+description = "Local, read-only analyzer of Claude Code's session logs: where the tokens go and why the spend jumped."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+capcom = "capcom.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["capcom"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"capcom/cost/prices.json" = "capcom/cost/prices.json"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["capcom"]
