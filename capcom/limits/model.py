@@ -64,8 +64,8 @@ NOT_ENOUGH = "not enough samples"
 # --------------------------------------------------------------------------- samples
 
 
-def samples_path(cache_dir: Path) -> Path:
-    return cache_dir / SAMPLES_FILE
+def samples_path(state_dir: Path) -> Path:
+    return state_dir / SAMPLES_FILE
 
 
 def _dt(v: Any) -> datetime | None:
@@ -143,21 +143,21 @@ def _same(a: LimitSample, b: LimitSample) -> bool:
     return a.window == b.window and a.source == b.source and a.time == b.time
 
 
-def append_samples(cache_dir: Path, new: Sequence[LimitSample]) -> list[LimitSample]:
+def append_samples(state_dir: Path, new: Sequence[LimitSample]) -> list[LimitSample]:
     """Append the samples of `new` that the file does not hold yet (same window, time
     and source), under the recorder's lock; return those appended."""
     import fcntl
 
-    cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    lock = os.open(cache_dir / LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock = os.open(state_dir / LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        have = {(s.window, s.source, s.time) for s in load_samples(samples_path(cache_dir))}
+        have = {(s.window, s.source, s.time) for s in load_samples(samples_path(state_dir))}
         fresh = [s for s in new if (s.window, s.source, s.time) not in have]
         fresh = [s for i, s in enumerate(fresh) if not any(_same(s, o) for o in fresh[:i])]
         if fresh:
             data = "".join(sample_json(s) + "\n" for s in fresh).encode()
-            fd = os.open(samples_path(cache_dir), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            fd = os.open(samples_path(state_dir), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
             try:
                 os.write(fd, data)
             finally:

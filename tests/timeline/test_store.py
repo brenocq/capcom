@@ -19,7 +19,10 @@ TABLE = load_prices()
 def build(tmp_path: Path) -> tuple[Config, list[str]]:
     # the OpenClaw dir is only a cwd here (nothing is read from it)
     config = Config(
-        tmp_path / ".claude", Path("/home/user/.openclaw"), tmp_path / "cache" / "capcom"
+        tmp_path / ".claude",
+        Path("/home/user/.openclaw"),
+        tmp_path / "cache" / "capcom",
+        tmp_path / "state",
     )
     s = SessionWriter(config.claude_root, cwd="/home/user/proj", session_id="sess-0001-aaaa")
     s.ai_title("Synthetic title")

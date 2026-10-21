@@ -305,8 +305,10 @@ the spike's requests cost above it, adding up to its excess.
 ### `GET /api/limits?days=14`
 
 The subscription's 5-hour and weekly windows from `capcom.limits`: the samples
-`capcom record-limits` appends to `limits.jsonl` next to the index (and the seed from
-the index's rate-limit errors). `days` is one of 7, 14, 30, 90 and bounds `segments`.
+`capcom record-limits` appends to `limits.jsonl` in the state folder
+(`$XDG_STATE_HOME/capcom`, else `~/.local/state/capcom`: no scan rebuilds them, so they
+stay out of the cache), and the seed from the index's rate-limit errors. `days` is one
+of 7, 14, 30, 90 and bounds `segments`.
 The reply's cache key also holds the size and modification time of `limits.jsonl`,
 since the recorder writes it without a scan.
 

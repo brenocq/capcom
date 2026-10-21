@@ -81,7 +81,8 @@ and spikes. The prices ship with capcom, with the date they were checked.
 
 No. capcom makes no network requests and uses only Python's standard library.
 It opens Claude Code's logs read-only, never reads credentials, writes only its
-own index in `~/.cache/capcom`, and serves the website on 127.0.0.1 only.
+own files (the index in `~/.cache/capcom`, and the usage-limit samples in
+`~/.local/state/capcom`), and serves the website on 127.0.0.1 only.
 
 </details>
 

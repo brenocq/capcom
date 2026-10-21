@@ -18,7 +18,12 @@ from tests.store.fake_source import FakeSource, write_lines
 
 @pytest.fixture
 def config(tmp_path: Path) -> Config:
-    return Config(tmp_path / ".claude", tmp_path / ".openclaw", tmp_path / "cache" / "capcom")
+    return Config(
+        tmp_path / ".claude",
+        tmp_path / ".openclaw",
+        tmp_path / "cache" / "capcom",
+        tmp_path / "state",
+    )
 
 
 def main_log(config: Config, session: str = "s1", project: str = "-home-u-p") -> Path:
@@ -294,7 +299,7 @@ def test_meta_change_alone_is_picked_up(config: Config) -> None:
 
 def test_run_scan_refuses_an_index_inside_the_logs(tmp_path: Path) -> None:
     claude = tmp_path / ".claude"
-    config = Config(claude, tmp_path / ".openclaw", claude / "capcom-cache")
+    config = Config(claude, tmp_path / ".openclaw", claude / "capcom-cache", tmp_path / "state")
     with pytest.raises(ValueError, match="log folder"):
         run_scan(config, quiet=True, source=FakeSource())
     assert not claude.exists()

@@ -21,7 +21,12 @@ from tests.fixtures.generate import Reply, SessionWriter, at
 
 @pytest.fixture
 def config(tmp_path: Path) -> Config:
-    return Config(tmp_path / ".claude", tmp_path / ".openclaw", tmp_path / "cache" / "capcom")
+    return Config(
+        tmp_path / ".claude",
+        tmp_path / ".openclaw",
+        tmp_path / "cache" / "capcom",
+        tmp_path / "state",
+    )
 
 
 @pytest.fixture

@@ -55,7 +55,9 @@ def test_the_view_prints_the_rollup_first_and_counts_small_findings(tmp_path: Pa
         1, start=401, session="s3", model="claude-sonnet-5-5", cache_read=0, cache_write_5m=10_000
     )
     out = io.StringIO()
-    config = Config(tmp_path / "claude", tmp_path / "openclaw", tmp_path / "cache")
+    config = Config(
+        tmp_path / "claude", tmp_path / "openclaw", tmp_path / "cache", tmp_path / "state"
+    )
     run_checks_view(config, 7, 10, index=began(index(reqs)), out=out, now=at(60 * 24))
     text = out.getvalue()
     head = text.index("By kind")
@@ -74,7 +76,9 @@ def test_a_judgement_call_is_listed_but_kept_out_of_the_total(tmp_path: Path) ->
     subs, agents = _subagents()
     reqs = run(100, cache_read=200_000) + subs
     out = io.StringIO()
-    config = Config(tmp_path / "claude", tmp_path / "openclaw", tmp_path / "cache")
+    config = Config(
+        tmp_path / "claude", tmp_path / "openclaw", tmp_path / "cache", tmp_path / "state"
+    )
     run_checks_view(
         config, 7, 10, index=began(index(reqs, agents=agents)), out=out, now=at(60 * 24)
     )

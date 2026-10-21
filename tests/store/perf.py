@@ -139,7 +139,7 @@ def run(base: Path, mb: int) -> Result:
         stamp.write_text(str(mb))
     cache = base / "cache"
     shutil.rmtree(cache, ignore_errors=True)
-    config = Config(claude, base / "openclaw", cache)
+    config = Config(claude, base / "openclaw", cache, base / "state")
     source = FakeSource(batch_lines=2_000)
 
     with open_index(config.index_path) as ix:

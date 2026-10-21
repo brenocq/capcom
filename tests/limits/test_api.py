@@ -1,5 +1,5 @@
 """/api/limits and the Overview's limit cards, on the website tests' synthetic index
-with synthetic samples written next to it."""
+with synthetic samples written in a state folder of their own."""
 
 from __future__ import annotations
 
@@ -33,12 +33,20 @@ def cache(built: Path, tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def client(cache: Path) -> Iterator[Client]:
-    yield from serve(Site(cache / "index.sqlite", TABLE, FAKE, clock=lambda: NOW, tz=UTC))
+def state(tmp_path: Path) -> Path:
+    folder = tmp_path / "state"
+    folder.mkdir()
+    return folder
 
 
-def write(cache: Path, samples: list[LimitSample]) -> None:
-    with (cache / "limits.jsonl").open("a") as f:
+@pytest.fixture
+def client(cache: Path, state: Path) -> Iterator[Client]:
+    site = Site(cache / "index.sqlite", TABLE, FAKE, clock=lambda: NOW, tz=UTC, state_dir=state)
+    yield from serve(site)
+
+
+def write(state: Path, samples: list[LimitSample]) -> None:
+    with (state / "limits.jsonl").open("a") as f:
         for s in samples:
             f.write(sample_json(s) + "\n")
 
@@ -70,8 +78,8 @@ def test_empty_state(client: Client) -> None:
     assert ov["limits"]["available"] is False and ov["limits"]["message"] == NOT_RECORDING
 
 
-def test_limits_with_samples(cache: Path, client: Client) -> None:
-    write(cache, samples())
+def test_limits_with_samples(state: Path, client: Client) -> None:
+    write(state, samples())
     status, data, _ = client.get("/api/limits?days=14")
     assert status == 200 and data["days"] == 14
     assert data["available"] and data["recording"] and data["message"] is None
@@ -92,10 +100,10 @@ def test_limits_with_samples(cache: Path, client: Client) -> None:
     assert five["reading"]["percent"] == 9.0
 
 
-def test_overview_cards_follow_new_samples(cache: Path, client: Client) -> None:
+def test_overview_cards_follow_new_samples(state: Path, client: Client) -> None:
     _, before, _ = client.get("/api/overview")
     assert before["limits"]["available"] is False
-    write(cache, samples())  # the recorder writes without a scan: the cache must notice
+    write(state, samples())  # the recorder writes without a scan: the cache must notice
     _, after, _ = client.get("/api/overview")
     lim = after["limits"]
     assert lim["available"] and lim["windows"]["seven_day"]["forecast"] is not None

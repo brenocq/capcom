@@ -6,7 +6,7 @@ its stdin; for Pro and Max plans it holds `rate_limits.five_hour` and
 `rate_limits.seven_day`, each with `used_percentage` and `resets_at` (epoch seconds).
 This command sits in front of the user's own status line command
 (`capcom record-limits | <their command>`): it copies stdin to stdout byte for byte,
-then appends one JSONL `LimitSample` per window to `<cache>/capcom/limits.jsonl` when
+then appends one JSONL `LimitSample` per window to `<state>/capcom/limits.jsonl` when
 the window's percentage rose above its running maximum for the current reset, or the
 reset moved on (a new window). Each open session reports the limits as of its own last
 API reply, so at the same moment sessions disagree; within one window usage only rises,
@@ -114,17 +114,58 @@ def _under(path: str, roots: Sequence[str]) -> bool:
     return False
 
 
-def cache_dir(env: Mapping[str, str]) -> str | None:
-    """`$XDG_CACHE_HOME/capcom` (or `~/.cache/capcom`); None when that would be inside
+def _folder(env: Mapping[str, str], var: str, default: str) -> str | None:
+    """`$<var>/capcom` (or `~/<default>/capcom`); None when that would be inside
     Claude Code's or OpenClaw's folders, which capcom never writes."""
     home = env.get("HOME") or os.path.expanduser("~")
-    base = env.get("XDG_CACHE_HOME") or os.path.join(home, ".cache")
+    base = env.get(var) or os.path.join(home, default)
     target = os.path.join(os.path.expanduser(base), "capcom")
     claude = env.get("CLAUDE_CONFIG_DIR") or os.path.join(home, ".claude")
     openclaw = env.get("OPENCLAW_STATE_DIR") or os.path.join(home, ".openclaw")
     if _under(target, [os.path.expanduser(claude), os.path.expanduser(openclaw)]):
         return None
     return target
+
+
+def state_dir(env: Mapping[str, str]) -> str | None:
+    """`$XDG_STATE_HOME/capcom` (or `~/.local/state/capcom`): the samples are history
+    no scan rebuilds, so they stay out of the cache, which may be cleared."""
+    return _folder(env, "XDG_STATE_HOME", os.path.join(".local", "state"))
+
+
+def cache_dir(env: Mapping[str, str]) -> str | None:
+    """`$XDG_CACHE_HOME/capcom` (or `~/.cache/capcom`), where the samples lived before
+    the state folder; `adopt` moves them out."""
+    return _folder(env, "XDG_CACHE_HOME", ".cache")
+
+
+def adopt(old: str | None, new: str) -> None:
+    """Move the samples and their state from `old` into `new`, once: nothing happens
+    when `new` already holds samples or `old` holds none. Raises on I/O errors."""
+    if old is None or os.path.exists(os.path.join(new, SAMPLES_FILE)):
+        return
+    if not os.path.exists(os.path.join(old, SAMPLES_FILE)):
+        return
+    import shutil
+
+    os.makedirs(new, mode=0o700, exist_ok=True)
+    lock = os.open(os.path.join(new, LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if not _lock(lock):
+            return
+        for name in (SAMPLES_FILE, STATE_FILE):
+            src, dst = os.path.join(old, name), os.path.join(new, name)
+            if os.path.exists(dst) or not os.path.exists(src):
+                continue
+            # a copy, then the old one removed: the two folders may be on different disks
+            tmp = f"{dst}.{os.getpid()}.tmp"
+            shutil.copy2(src, tmp)
+            os.replace(tmp, dst)
+            os.unlink(src)
+        with contextlib.suppress(OSError):
+            os.unlink(os.path.join(old, LOCK_FILE))
+    finally:
+        os.close(lock)  # releases the flock
 
 
 def _lock(fd: int) -> bool:
@@ -284,8 +325,13 @@ def run(
                 devnull = os.open(os.devnull, os.O_WRONLY)
                 os.dup2(devnull, sys.stdout.fileno())
                 os.close(devnull)
+    environ = os.environ if env is None else env
+    directory: str | None = None
     with contextlib.suppress(BaseException):
-        directory = cache_dir(os.environ if env is None else env)
+        directory = state_dir(environ)
+        if directory is not None:
+            adopt(cache_dir(environ), directory)
+    with contextlib.suppress(BaseException):
         if directory is not None:
             record(data, directory)
     return 0

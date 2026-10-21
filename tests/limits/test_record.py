@@ -42,10 +42,19 @@ def payload(five: float | None = 12, week: float | None = 40, **extra: object) -
 
 @pytest.fixture
 def env(tmp_path: Path) -> dict[str, str]:
-    return {"HOME": str(tmp_path / "home"), "XDG_CACHE_HOME": str(tmp_path / "cache")}
+    return {
+        "HOME": str(tmp_path / "home"),
+        "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+    }
 
 
-def cache(env: dict[str, str]) -> Path:
+def state(env: dict[str, str]) -> Path:
+    return Path(env["XDG_STATE_HOME"]) / "capcom"
+
+
+def old(env: dict[str, str]) -> Path:
+    """Where versions before the state folder kept the samples."""
     return Path(env["XDG_CACHE_HOME"]) / "capcom"
 
 
@@ -56,7 +65,7 @@ def run(data: bytes, env: dict[str, str], *argv: str) -> tuple[int, bytes]:
 
 
 def lines(env: dict[str, str]) -> list[dict[str, object]]:
-    path = cache(env) / rec.SAMPLES_FILE
+    path = state(env) / rec.SAMPLES_FILE
     if not path.exists():
         return []
     return [json.loads(x) for x in path.read_text().splitlines()]
@@ -70,7 +79,7 @@ def test_passthrough_is_byte_identical(env: dict[str, str]) -> None:
     assert [g["window"] for g in got] == ["five_hour", "seven_day"]
     assert got[0]["used_percentage"] == 12 and got[0]["session_id"] == "sess-1"
     assert got[0]["source"] == "statusline"
-    samples = load_samples(cache(env) / rec.SAMPLES_FILE)
+    samples = load_samples(state(env) / rec.SAMPLES_FILE)
     assert samples[0].window == LimitWindow.FIVE_HOUR
     assert samples[0].resets_at is not None and samples[0].resets_at.timestamp() == RESET_5H
 
@@ -92,10 +101,10 @@ def test_bad_input_passes_through_and_records_nothing(data: bytes, env: dict[str
     assert lines(env) == []
 
 
-def test_unwritable_cache_still_passes_through(tmp_path: Path) -> None:
+def test_unwritable_folder_still_passes_through(tmp_path: Path) -> None:
     blocker = tmp_path / "file"
     blocker.write_text("x")
-    env = {"HOME": str(tmp_path), "XDG_CACHE_HOME": str(blocker)}  # a file, not a folder
+    env = {"HOME": str(tmp_path), "XDG_STATE_HOME": str(blocker)}  # a file, not a folder
     data = payload()
     code, out = run(data, env)
     assert code == 0 and out == data
@@ -107,10 +116,58 @@ def test_never_writes_under_claude(tmp_path: Path) -> None:
         "HOME": str(tmp_path),
         "CLAUDE_CONFIG_DIR": str(claude),
         "XDG_CACHE_HOME": str(claude / "cache"),
+        "XDG_STATE_HOME": str(claude / "state"),
     }
     code, out = run(payload(), env)
     assert code == 0 and out == payload()
     assert not claude.exists()
+
+
+def test_samples_default_to_the_state_folder(tmp_path: Path) -> None:
+    run(payload(), {"HOME": str(tmp_path)})
+    assert (tmp_path / ".local" / "state" / "capcom" / rec.SAMPLES_FILE).exists()
+    assert not (tmp_path / ".cache").exists()  # a cleared cache loses no history
+
+
+def write_old(env: dict[str, str], five: float, week: float) -> list[str]:
+    """Samples and running maxima as a version before the state folder left them."""
+    folder = old(env)
+    folder.mkdir(parents=True)
+    rows = [
+        {"time": "2026-10-21T10:00:00+00:00", "window": "five_hour", "used_percentage": five},
+        {"time": "2026-10-21T10:00:00+00:00", "window": "seven_day", "used_percentage": week},
+    ]
+    text = [json.dumps(r) for r in rows]
+    (folder / rec.SAMPLES_FILE).write_text("".join(t + "\n" for t in text))
+    state_now = {"five_hour": [five, RESET_5H], "seven_day": [week, RESET_7D]}
+    (folder / rec.STATE_FILE).write_text(json.dumps(state_now))
+    return text
+
+
+def test_adopts_the_samples_left_in_the_cache(env: dict[str, str]) -> None:
+    text = write_old(env, five=20, week=40)
+    code, out = run(payload(five=15, week=40), env)  # at or below the old maxima
+    assert code == 0 and out == payload(five=15, week=40)
+    assert (state(env) / rec.SAMPLES_FILE).read_text().splitlines() == text
+    assert not (old(env) / rec.SAMPLES_FILE).exists()
+    assert not (old(env) / rec.STATE_FILE).exists()
+    run(payload(five=21, week=40), env)  # the moved maxima still decide
+    assert [g["used_percentage"] for g in lines(env)][2:] == [21]
+
+
+def test_adopt_leaves_both_when_the_state_folder_has_samples(env: dict[str, str]) -> None:
+    write_old(env, five=20, week=40)
+    state(env).mkdir(parents=True)
+    (state(env) / rec.SAMPLES_FILE).write_text("")
+    rec.adopt(str(old(env)), str(state(env)))
+    assert (old(env) / rec.SAMPLES_FILE).exists()
+    assert (state(env) / rec.SAMPLES_FILE).read_text() == ""
+
+
+def test_adopt_without_old_samples_creates_nothing(env: dict[str, str]) -> None:
+    rec.adopt(str(old(env)), str(state(env)))
+    rec.adopt(None, str(state(env)))
+    assert not state(env).exists()
 
 
 def test_broken_stdout_and_stdin_exit_zero(env: dict[str, str]) -> None:
@@ -159,7 +216,7 @@ def test_line_mode_prints_its_own_line(env: dict[str, str]) -> None:
 
 
 def _worker(cache_home: str, value: int, n: int) -> None:
-    env = {"HOME": cache_home, "XDG_CACHE_HOME": cache_home}
+    env = {"HOME": cache_home, "XDG_CACHE_HOME": cache_home, "XDG_STATE_HOME": cache_home}
     for i in range(n):
         rec.run([], stdin=io.BytesIO(payload(value + i, 50)), stdout=io.BytesIO(), env=env)
 

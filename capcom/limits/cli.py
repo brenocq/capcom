@@ -22,6 +22,7 @@ from capcom.limits.model import (
     samples_path,
     seed_samples,
 )
+from capcom.limits.record import adopt
 from capcom.limits.view import NOT_RECORDING, format_views
 from capcom.types import Index
 
@@ -52,6 +53,17 @@ def unwrap(cmd: str) -> tuple[bool, str | None]:
     if rest.startswith("|"):
         return True, rest[1:].strip() or None
     return True, None
+
+
+def adopt_samples(config: Config) -> None:
+    """Move the samples a version before the state folder kept in the cache; a failure
+    is said on stderr and leaves them where they are."""
+    try:
+        adopt(str(config.cache_dir), str(config.state_dir))
+    except OSError as err:
+        print(
+            f"capcom: cannot move the usage samples to {config.state_dir} ({err})", file=sys.stderr
+        )
 
 
 def _open(config: Config) -> Index | None:
@@ -169,6 +181,7 @@ def run_limits(
     index = index or _open(config)
     if index is None:
         return 1
+    adopt_samples(config)
     if seed:
         found = seed_samples(index)
         print(
@@ -183,18 +196,18 @@ def run_limits(
                 print(f"  {when}  {s.window.value:<9}  100 %  resets {reset}", file=out)
             print("dry run: nothing written", file=out)
             return 0
-        added = append_samples(config.cache_dir, found.samples)
-        print(f"{len(added)} new samples in {samples_path(config.cache_dir)}", file=out)
+        added = append_samples(config.state_dir, found.samples)
+        print(f"{len(added)} new samples in {samples_path(config.state_dir)}", file=out)
         return 0
-    samples = load_samples(samples_path(config.cache_dir))
+    samples = load_samples(samples_path(config.state_dir))
     if not samples:
-        print(f"No samples in {samples_path(config.cache_dir)}.", file=out)
+        print(f"No samples in {samples_path(config.state_dir)}.", file=out)
         print(NOT_RECORDING, file=out)
         return 0
     from capcom.timeline.groups import ProjectNames
 
     names = ProjectNames.build(index.sessions(), config.openclaw_root)
     views = analyze_all(index, load_prices(), samples, now, lambda d: names.label(names.key(d)))
-    print(f"capcom limits ({len(samples)} samples, {samples_path(config.cache_dir)})\n", file=out)
+    print(f"capcom limits ({len(samples)} samples, {samples_path(config.state_dir)})\n", file=out)
     print(format_views(views, samples, now), file=out)
     return 0

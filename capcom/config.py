@@ -12,7 +12,8 @@ from pathlib import Path
 class Config:
     claude_root: Path  # $CLAUDE_CONFIG_DIR or ~/.claude (read-only)
     openclaw_root: Path  # $OPENCLAW_STATE_DIR or ~/.openclaw (read-only)
-    cache_dir: Path  # $XDG_CACHE_HOME/capcom or ~/.cache/capcom (capcom's own files)
+    cache_dir: Path  # $XDG_CACHE_HOME/capcom or ~/.cache/capcom (the index: rebuilt by a scan)
+    state_dir: Path  # $XDG_STATE_HOME/capcom or ~/.local/state/capcom (history no scan rebuilds)
 
     @property
     def projects_dir(self) -> Path:
@@ -29,8 +30,10 @@ def load_config(env: os._Environ[str] | dict[str, str] | None = None) -> Config:
     claude = env.get("CLAUDE_CONFIG_DIR") or str(home / ".claude")
     openclaw = env.get("OPENCLAW_STATE_DIR") or str(home / ".openclaw")
     xdg_cache = env.get("XDG_CACHE_HOME") or str(home / ".cache")
+    xdg_state = env.get("XDG_STATE_HOME") or str(home / ".local" / "state")
     return Config(
         claude_root=Path(claude).expanduser(),
         openclaw_root=Path(openclaw).expanduser(),
         cache_dir=Path(xdg_cache).expanduser() / "capcom",
+        state_dir=Path(xdg_state).expanduser() / "capcom",
     )

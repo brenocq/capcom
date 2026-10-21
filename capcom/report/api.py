@@ -102,6 +102,7 @@ class Context:
     tz: tzinfo | None = None  # None: the machine's local time zone
     index_path: Path | None = None
     openclaw_root: Path | None = None  # None: from the configuration
+    state_dir: Path | None = None  # where the usage samples are; None: no samples
     scanning: bool = False  # serve's first scan is still running: totals may be partial
 
     def local(self, t: datetime) -> datetime:
@@ -1231,16 +1232,15 @@ MAX_DOTS = 200
 
 
 def _limits(ctx: Context, days: int | None, full: bool) -> dict[str, Any]:
-    """The usage windows from capcom.limits: the samples next to the index, projects
+    """The usage windows from capcom.limits: the samples in the state folder, projects
     named as everywhere else."""
     from capcom.limits.view import limits_json
 
-    cache = ctx.index_path.parent if ctx.index_path is not None else load_config().cache_dir
     names = ctx.names()
     return limits_json(
         ctx.index,
         ctx.table,
-        cache,
+        ctx.state_dir,
         ctx.now,
         ctx.tz,
         days=days,

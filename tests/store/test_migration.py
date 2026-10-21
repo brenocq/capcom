@@ -66,7 +66,12 @@ def _request_row(con: sqlite3.Connection, mid: str, file: Path, out: int) -> Non
 
 @pytest.fixture
 def config(tmp_path: Path) -> Config:
-    return Config(tmp_path / ".claude", tmp_path / ".openclaw", tmp_path / "cache" / "capcom")
+    return Config(
+        tmp_path / ".claude",
+        tmp_path / ".openclaw",
+        tmp_path / "cache" / "capcom",
+        tmp_path / "state",
+    )
 
 
 def test_v2_index_is_migrated_in_place_and_reread(config: Config) -> None:

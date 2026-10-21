@@ -55,7 +55,7 @@ def projects_index(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 def test_labels_identical_in_cli_and_api(projects_index: Path, tmp_path: Path) -> None:
-    config = Config(tmp_path / "claude", OPENCLAW, tmp_path / "cache")
+    config = Config(tmp_path / "claude", OPENCLAW, tmp_path / "cache", tmp_path / "state")
     out = io.StringIO()
     with open_index(projects_index, readonly=True) as ix:
         assert run_top(config, "project", 7, 0, index=ix, out=out, now=NOW) == 0

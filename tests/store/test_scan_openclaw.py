@@ -21,7 +21,12 @@ from tests.store.fake_source import write_lines
 
 @pytest.fixture
 def config(tmp_path: Path) -> Config:
-    return Config(tmp_path / ".claude", tmp_path / ".openclaw", tmp_path / "cache" / "capcom")
+    return Config(
+        tmp_path / ".claude",
+        tmp_path / ".openclaw",
+        tmp_path / "cache" / "capcom",
+        tmp_path / "state",
+    )
 
 
 def _ids(config: Config) -> list[str]:

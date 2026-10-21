@@ -26,7 +26,9 @@ def _world() -> tuple[World, list[Spike]]:
 
 
 def _config(tmp_path: Path) -> Config:
-    return Config(tmp_path / ".claude", tmp_path / ".openclaw", tmp_path / "cache")
+    return Config(
+        tmp_path / ".claude", tmp_path / ".openclaw", tmp_path / "cache", tmp_path / "state"
+    )
 
 
 def test_spikes_view(tmp_path: Path) -> None:

@@ -168,7 +168,9 @@ def test_same_model_and_no_rewrite_gives_no_switch() -> None:
 def test_the_checks_view_marks_overlapping_findings_and_totals_the_rest(tmp_path: Path) -> None:
     def view(idx) -> str:  # type: ignore[no-untyped-def]
         out = io.StringIO()
-        config = Config(tmp_path / "claude", tmp_path / "openclaw", tmp_path / "cache")
+        config = Config(
+            tmp_path / "claude", tmp_path / "openclaw", tmp_path / "cache", tmp_path / "state"
+        )
         run_checks_view(config, 7, 10, index=idx, out=out, now=at(60 * 24))
         return out.getvalue()
 
@@ -458,7 +460,9 @@ def test_the_view_prints_ranked_findings_with_their_change(tmp_path: Path) -> No
         )
     ]
     idx = index(run(200), evs)
-    config = Config(tmp_path / "claude", tmp_path / "openclaw", tmp_path / "cache")
+    config = Config(
+        tmp_path / "claude", tmp_path / "openclaw", tmp_path / "cache", tmp_path / "state"
+    )
     out = io.StringIO()
     assert run_checks_view(config, days=7, limit=5, index=idx, out=out, now=at(60 * 24)) == 0
     text = out.getvalue()
@@ -472,7 +476,9 @@ def test_the_view_prints_ranked_findings_with_their_change(tmp_path: Path) -> No
 
 
 def test_the_view_says_so_when_the_index_is_empty(tmp_path: Path) -> None:
-    config = Config(tmp_path / "claude", tmp_path / "openclaw", tmp_path / "cache")
+    config = Config(
+        tmp_path / "claude", tmp_path / "openclaw", tmp_path / "cache", tmp_path / "state"
+    )
     out = io.StringIO()
     assert run_checks_view(config, days=0, limit=5, index=index([]), out=out, now=at(60)) == 0
     assert "no findings" in out.getvalue() or "no requests" in out.getvalue()

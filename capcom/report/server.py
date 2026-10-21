@@ -43,6 +43,8 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 
 from capcom.config import Config
 from capcom.cost.prices import load_prices
+from capcom.limits.cli import adopt_samples
+from capcom.limits.model import samples_path
 from capcom.report import api
 from capcom.report.analysis import Analysis, Unavailable, default_analysis
 from capcom.store.index import open_index
@@ -201,10 +203,12 @@ def generation(index_path: Path, watch: DataVersion | None = None) -> tuple[int,
     return tuple(out)
 
 
-def _limits_stamp(index_path: Path) -> tuple[int, int]:
-    """Size and modification time of the usage samples next to the index."""
+def _limits_stamp(state_dir: Path | None) -> tuple[int, int]:
+    """Size and modification time of the usage samples."""
+    if state_dir is None:
+        return (-1, -1)
     try:
-        st = os.stat(index_path.with_name("limits.jsonl"))
+        st = os.stat(samples_path(state_dir))
     except OSError:
         return (-1, -1)
     return (st.st_size, st.st_mtime_ns)
@@ -233,6 +237,7 @@ class Site:
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
     tz: tzinfo | None = None
     openclaw_root: Path | None = None
+    state_dir: Path | None = None  # where the usage samples are; None: no samples
     scanner: Scanner | None = None
     cache: ApiCache | None = field(default_factory=ApiCache)  # None: no caching
 
@@ -438,7 +443,7 @@ class Handler(BaseHTTPRequestHandler):
         now = site.clock()
         if site.cache is not None and name not in UNCACHED:
             gen = generation(site.index_path, site.cache.watch(site.index_path))
-            gen += _limits_stamp(site.index_path)  # the recorder writes without a scan
+            gen += _limits_stamp(site.state_dir)  # the recorder writes without a scan
             today = now.astimezone(site.tz).date().isoformat()  # the windows start at midnight
             args = tuple((k, query[k]) for k in PARAMS.get(name, ()) if k in query)
             key = (gen, today, name, tuple(parts[1:]), args)
@@ -464,6 +469,7 @@ class Handler(BaseHTTPRequestHandler):
                 tz=self.site.tz,
                 index_path=self.site.index_path,
                 openclaw_root=self.site.openclaw_root,
+                state_dir=self.site.state_dir,
                 scanning=self.site.scanner is not None and self.site.scanner.first_scan,
             )
             payload = ENDPOINTS[name](ctx, parts[1] if len(parts) == 2 else "", query)
@@ -518,6 +524,7 @@ def make_server(site: Site, port: int) -> ThreadingHTTPServer:
 
 
 def run_serve(config: Config, port: int, open_browser: bool, scan: bool = True) -> int:
+    adopt_samples(config)
     scanner = None
     if scan:
         scanner = Scanner(lambda: background_scan(config))
@@ -526,6 +533,7 @@ def run_serve(config: Config, port: int, open_browser: bool, scan: bool = True) 
         table=load_prices(),
         analysis=default_analysis(),
         openclaw_root=config.openclaw_root,
+        state_dir=config.state_dir,
         scanner=scanner,
     )
     try:

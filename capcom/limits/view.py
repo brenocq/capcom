@@ -133,14 +133,14 @@ def window_json(
 def limits_json(
     index: Index,
     table: PriceTable,
-    cache_dir: Path,
+    state_dir: Path | None,
     now: datetime,
     tz: tzinfo | None = None,
     days: int | None = None,
     full: bool = True,
     label: Callable[[str], str] = project_label,
 ) -> dict[str, Any]:
-    samples = load_samples(samples_path(cache_dir))
+    samples = load_samples(samples_path(state_dir)) if state_dir is not None else []
     recording = any(s.source == "statusline" for s in samples)
     base: dict[str, Any] = {
         "available": bool(samples),
