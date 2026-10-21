@@ -39,7 +39,9 @@ above capcom's are priced at the model's output rate: the true total is at least
 capcom's and up to that much more (`output_above`). Every other token excess of
 cost-state over the log (cache reads, uncached input, cache writes, output where
 nothing is estimated) is priced at the window's own rate per model: calls Claude
-Code counted that the log does not record (`unlogged`). The rest is unexplained.
+Code counted that the log does not record (`unlogged`), and every token count the
+log has more of is priced the same way (`logged_more`). Both are inferred from token
+counts, not from calls seen. The rest is unexplained.
 """
 
 from __future__ import annotations
@@ -108,14 +110,28 @@ class Step:
         return (self.since is None or self.since <= t) and (self.until is None or t < self.until)
 
 
-def _grows_from(base: CostState, c: CostState) -> bool:
+_TOKENS = ("input", "output", "cache_read", "cache_write")
+
+
+def _fits(base: CostState, c: CostState) -> bool:
     """Whether `c`'s totals can have grown from `base`'s (a process that restored
-    them): nothing smaller, the duration included when both have one."""
+    them): no cost and no token count of any model smaller, no shorter duration,
+    and a process start (its time less the duration's growth) not before `base`
+    was written. A part not known on either side does not rule `base` out."""
     if c.total_cost_usd < base.total_cost_usd:
         return False
-    if c.total_duration_ms is not None and base.total_duration_ms is not None:
-        return c.total_duration_ms >= base.total_duration_ms
-    return True
+    for model, b in base.models.items():
+        mu = c.models.get(model, ModelUsage())
+        if any(getattr(mu, k) < getattr(b, k) for k in _TOKENS):
+            return False
+    if c.total_duration_ms is None or base.total_duration_ms is None:
+        return True
+    grown = c.total_duration_ms - base.total_duration_ms
+    if grown < 0:
+        return False
+    if c.timestamp is None or base.timestamp is None:
+        return True
+    return c.timestamp - timedelta(milliseconds=grown) + STEP_SLACK >= base.timestamp
 
 
 def _minus(c: CostState, base: CostState | None) -> dict[str, ModelUsage]:
@@ -140,17 +156,25 @@ def steps(states: Sequence[CostState]) -> list[Step]:
     """The process steps of one file's cost-states, in file order.
 
     A record with the same `startTime` as the one before it restored earlier totals:
-    its step is its growth over the latest earlier record of that start it can have
-    grown from (concurrent processes can restore an older one), from its time less
-    the growth of `totalDuration`, or from the first record after that earlier one
-    when a duration is missing. A record that adds nothing is the same exit written
-    twice and adds no step. Any other record starts from its process start."""
+    its step is its growth over the latest earlier record of that start it fits
+    (`_fits`: concurrent processes can restore an older one), from its time less the
+    growth of `totalDuration` but not before that record was written. When no
+    earlier record fits, it grows from the latest one with no higher cost, from the
+    first record after that one. A record that adds nothing is the same exit written
+    twice and adds no step. A record with a new `startTime`, or one costing less than
+    every earlier record of its start, starts from its process start."""
     out: list[Step] = []
     chain: list[CostState] = []
     for c in states:
         until = window(c)[1]
         same = chain and c.start_time_ms is not None and c.start_time_ms == chain[-1].start_time_ms
-        base = next((b for b in reversed(chain) if _grows_from(b, c)), None) if same else None
+        base = fits = None
+        if same:
+            base = fits = next((b for b in reversed(chain) if _fits(b, c)), None)
+            if base is None:
+                base = next(
+                    (b for b in reversed(chain) if b.total_cost_usd <= c.total_cost_usd), None
+                )
         if base is None:
             chain = [c]
             out.append(Step(window(c)[0], until, c.total_cost_usd, dict(c.models)))
@@ -159,14 +183,18 @@ def steps(states: Sequence[CostState]) -> list[Step]:
         grown = c.total_cost_usd - base.total_cost_usd
         dur = (
             None
-            if c.total_duration_ms is None or base.total_duration_ms is None
+            if fits is None or c.total_duration_ms is None or base.total_duration_ms is None
             else c.total_duration_ms - base.total_duration_ms
         )
-        if grown == 0 and dur in (0, None):
+        if grown == 0 and (dur in (0, None) or fits is None):
             continue
         since: datetime | None
         if dur is not None and c.timestamp is not None:
+            # totalDuration includes the idle time before the exit: never start before
+            # the record this one grew from was written.
             since = c.timestamp - timedelta(milliseconds=dur) - STEP_SLACK
+            if base.timestamp is not None:
+                since = max(since, base.timestamp)
         else:
             since = window(base)[1] or base.timestamp
         out.append(Step(since, until, grown, _minus(c, base)))
@@ -175,7 +203,9 @@ def steps(states: Sequence[CostState]) -> list[Step]:
 
 def session_steps(index: Index, cs: CostState) -> list[Step]:
     """The steps of `cs`'s session up to `cs` (its last cost-state, normally)."""
-    earlier = [c for c in index.cost_states(cs.session_id) if c.offset < cs.offset]
+    states_fn = getattr(index, "cost_states", None)  # optional: not in the Index protocol
+    found = states_fn(cs.session_id) if states_fn else ()
+    earlier = [c for c in found if c.offset < cs.offset]
     return steps([*earlier, cs])
 
 
@@ -270,26 +300,32 @@ def check_session(index: Index, cs: CostState, table: PriceTable) -> Calibration
             reasons.add("model only in cost-state")
     if any(s.since is None for s in st):
         reasons.add("no startTime")
-    if cs.total_cost_usd < MIN_COMPARABLE_USD:
+    if cc_total < MIN_COMPARABLE_USD:
         reasons.add("below $0.10")
     if any(lg.estimated for lg in logged.values()):
         reasons.add("estimated output")
     above: dict[str, float] = {}
     unlogged: dict[str, dict[str, float]] = {}
-    for model, c in cc.items():
+    more: dict[str, dict[str, float]] = {}
+    for model in sorted(set(cc) | set(logged)):
         got = logged.get(model)
+        mine = cc.get(model)
         rate = _rates(table, model, got, cs.timestamp)
-        parts = {}
+        parts, less = {}, {}
         for cat in CATEGORIES:
-            extra = c.tokens[cat] - (got.tokens[cat] if got else 0)
-            if extra <= 0:
+            extra = (mine.tokens[cat] if mine else 0) - (got.tokens[cat] if got else 0)
+            if extra < 0:
+                less[cat] = -extra * rate[cat]
+            elif extra == 0:
                 continue
-            if cat == "output" and got is not None and got.estimated:
+            elif cat == "output" and got is not None and got.estimated:
                 above[model] = extra * rate[cat]
             else:
                 parts[cat] = extra * rate[cat]
         if parts:
             unlogged[model] = parts
+        if less:
+            more[model] = less
     keys = sorted(set(logged) | set(cc))
     return Calibration(
         session_id=cs.session_id,
@@ -303,6 +339,7 @@ def check_session(index: Index, cs: CostState, table: PriceTable) -> Calibration
         outside_usd=outside,
         output_above=above,
         unlogged=unlogged,
+        logged_more=more,
     )
 
 

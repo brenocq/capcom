@@ -387,6 +387,9 @@ class Calibration:
     # cost-state's tokens above the log's in the compared window, priced: calls
     # Claude Code counted that the log does not record.
     unlogged: Mapping[str, Mapping[str, float]] = field(default_factory=dict, hash=False)
+    # The other way round: per model and category, the log's tokens above
+    # cost-state's in the compared window, priced the same way.
+    logged_more: Mapping[str, Mapping[str, float]] = field(default_factory=dict, hash=False)
 
     @property
     def output_above_usd(self) -> float:
@@ -397,10 +400,21 @@ class Calibration:
         return sum(sum(v.values()) for v in self.unlogged.values())
 
     @property
+    def logged_more_usd(self) -> float:
+        return sum(sum(v.values()) for v in self.logged_more.values())
+
+    @property
     def rest_usd(self) -> float:
         """cost-state's total less capcom's, the output above its estimate and the
-        calls the log does not record: the gap nothing here explains."""
-        return self.claude_code_usd - self.capcom_usd - self.output_above_usd - self.unlogged_usd
+        calls the log does not record, plus what the log counts more of: the gap
+        nothing here explains."""
+        return (
+            self.claude_code_usd
+            - self.capcom_usd
+            - self.output_above_usd
+            - self.unlogged_usd
+            + self.logged_more_usd
+        )
 
     @property
     def spread(self) -> float:
@@ -488,12 +502,9 @@ class Index(Protocol):
         ...
 
     def last_cost_states(self) -> Iterator[CostState]:
-        """The last cost-state of each session that has one."""
-        ...
-
-    def cost_states(self, session_id: str) -> Iterator[CostState]:
-        """Every cost-state of the file holding the session's last one, in file
-        order (one per process exit, totals carried on through resumes)."""
+        """The last cost-state of each session that has one. (The store also offers
+        `cost_states(session_id)`, every cost-state of the file holding the last,
+        in file order; optional, so callers reach it through getattr.)"""
         ...
 
 

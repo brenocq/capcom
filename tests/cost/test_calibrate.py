@@ -297,8 +297,8 @@ def test_restored_totals_compare_per_process_step() -> None:
             req("s1", when=at(190), input=M),
         ],
         costs=[
-            step_cs(100, 20.0, 60, 120, H),
-            step_cs(200, 24.0, 200, None, H + 20 * 60_000),
+            step_cs(100, 20.0, 60, 120, H, output=M),
+            step_cs(200, 24.0, 200, None, H + 20 * 60_000, output=M, input=M),
         ],
     )
     cal = check_session(idx, idx.costs[-1], T)
@@ -329,9 +329,58 @@ def test_a_process_that_restored_an_older_total_grows_from_it() -> None:
     assert got[2].since == at(310) - timedelta(minutes=31)
 
 
-def test_without_durations_a_step_starts_after_the_one_before() -> None:
-    got = steps([step_cs(100, 20.0, 60, 70, None), step_cs(200, 24.0, 200, None, None)])
+def test_a_shorter_duration_with_the_same_start_grows_by_cost_alone() -> None:
+    # $20 over an hour, then $24 with a duration of 20 minutes (a restore that lost
+    # the duration): $4 more, not a fresh $24.
+    a = step_cs(100, 20.0, 60, 70, H)
+    b = step_cs(200, 24.0, 200, None, 20 * 60_000)
+    got = steps([a, b])
+    assert [s.usd for s in got] == pytest.approx([20.0, 4.0])
     assert got[1].since == at(70)
+    # A cost below every earlier record starts again from the process start.
+    c = step_cs(300, 3.0, 300, None, 30 * 60_000)
+    assert [s.usd for s in steps([a, c])] == pytest.approx([20.0, 3.0])
+
+
+def test_the_base_must_have_no_more_tokens_and_be_written_before_the_start() -> None:
+    a = step_cs(100, 20.0, 60, 61, H, cache_read=5 * M)
+    # b costs more than a but counts fewer cache reads: it restored an older total.
+    b = step_cs(200, 22.0, 300, 301, 2 * H, cache_read=4 * M)
+    got = steps([step_cs(50, 10.0, 30, 31, H // 2, cache_read=2 * M), a, b])
+    assert got[-1].usd == pytest.approx(12.0)  # grew from the $10 record
+    # From `early`, c's process started at minute 200 less 165 (after `early` was
+    # written); from `later`, at minute 40, before `later` was: it restored `early`.
+    early = step_cs(50, 10.0, 30, 31, 25 * 60_000)
+    later = step_cs(100, 20.0, 60, 61, 30 * 60_000)
+    c = step_cs(200, 25.0, 200, None, 190 * 60_000)
+    got = steps([early, later, c])
+    assert got[-1].usd == pytest.approx(15.0)
+    assert got[-1].since == at(34)
+
+
+def test_a_step_never_starts_before_its_base_was_written() -> None:
+    # The process idled before it exited: its duration grew by more than the time
+    # since a was written (within the slack), so the step starts at a's time.
+    a = step_cs(100, 20.0, 60, 61, H)
+    b = step_cs(200, 24.0, 100, None, H + 40 * 60_000 + 30_000)
+    got = steps([a, b])
+    assert got[1].since == at(60)
+
+
+def test_below_ten_cents_uses_the_compared_total() -> None:
+    # Two processes that each started from zero: $0.05, then $0.06. The last record
+    # alone is under $0.10, the compared total is not.
+    later = START_MS + 120 * 60_000
+    idx = FakeIndex(
+        reqs=[req("s1", when=at(5), output=2500), req("s1", when=at(130), output=3000)],
+        costs=[
+            step_cs(100, 0.05, 60, 90, H, output=2500),
+            step_cs(200, 0.06, 150, None, H, start_ms=later, output=3000),
+        ],
+    )
+    cal = check_session(idx, idx.costs[-1], T)
+    assert cal.claude_code_usd == pytest.approx(0.11)
+    assert "below $0.10" not in cal.reasons
 
 
 def test_output_above_capcom_estimate_is_a_range() -> None:
@@ -359,4 +408,36 @@ def test_calls_not_in_the_log_are_priced_per_model_and_category() -> None:
     assert list(cal.unlogged) == ["claude-opus-5-5"]
     assert cal.unlogged["claude-opus-5-5"] == pytest.approx({"cache_read": 10 * rate})
     assert cal.output_above == {}
+    assert cal.logged_more == {}
     assert cal.rest_usd == pytest.approx(22.5 - 11 * rate - 20.0)
+
+
+def test_what_the_log_counts_more_of_is_shown_too() -> None:
+    # The log has 2 M uncached input; cost-state counted 1 M (and the same output).
+    idx = FakeIndex(
+        reqs=[req("s1", when=at(5), input=2 * M, output=M)],
+        costs=[step_cs(100, 24.0, 60, None, H, input=M, output=M)],
+    )
+    [cal] = calibrate(idx, T)
+    assert cal.unlogged == {}
+    assert cal.logged_more["claude-opus-5-5"] == pytest.approx({"input": 4.0})
+    assert cal.capcom_usd == pytest.approx(28.0)
+    assert cal.rest_usd == pytest.approx(0)
+
+
+class _NoCostStates:
+    """An Index without the optional `cost_states`: only the last record compares."""
+
+    def __init__(self, idx: FakeIndex) -> None:
+        self.requests = idx.requests
+        self.events = idx.events
+        self.shared_replies = idx.shared_replies
+
+
+def test_an_index_without_cost_states_compares_the_last_record_alone() -> None:
+    idx = FakeIndex(
+        reqs=[req("s1", when=at(5), output=M)],
+        costs=[step_cs(100, 20.0, 60, None, H, output=M)],
+    )
+    cal = check_session(_NoCostStates(idx), idx.costs[-1], T)  # type: ignore[arg-type]
+    assert cal.capcom_usd == pytest.approx(20.0) and cal.comparable
