@@ -335,17 +335,19 @@ The reply's cache key also holds the size and modification time of `limits.jsonl
 since the recorder writes it without a scan.
 
 ```
-Limits = {available, recording, message, install, samples, last_sample, days,
+Limits = {available, recording, message, install, samples, last_sample, recording_since, days,
           windows: {five_hour: Window | null, seven_day: Window | null}}
 Window = {window, label, samples, current,
           reading: {percent, time, resets_at, source} | null,
-          fit: {method, note, percent_per_usd, intervals, mean_abs_error, r2,
+          fit: {method, note, percent_per_usd, usd_per_percent, intervals, readings, rough,
+                rate_factor, mean_abs_error, r2,
                 weights: [{model, category, percent_per_mtok}]} | null,
           forecast: {reading, now, median, low, high, resets_at, runs_out_at,
+                     runs_out_early, runs_out_late, rough, readings, rate_factor, line,
                      bucket_minutes, buckets, fan: [[ms, median, low, high]]} | null,
-          reason,                       # why there is no forecast ("not enough samples", ...)
+          reason,                       # why there is no forecast (it needs two readings, ...)
           history: [[ms, percent]],     # the current window's line, from its start at 0 %
-          start,
+          start, start_known,           # start_known: history's first point is the reset, not a reading
           segments: [{start, start_known, resets_at, peak, hit_limit, reset,
                       points: [[ms, percent]], usd,
                       by_project: [{project, usd, percent}] | null}]}   # newest first
@@ -357,10 +359,19 @@ text until then ("Not recording yet: run `capcom limits --install` to set it
 up."). A segment is one window between resets; within it the percentage only
 rises. `fit.method` is `per_type` (weights per model and token category, in percent
 per million tokens, by non-negative least squares) once there are enough intervals,
-else `per_usd` (one percent per API-equivalent dollar) and `note` says so; null with
-fewer than 2 intervals. `forecast` (current window only) is the median and the 10th
-to 90th percentile of the value at the reset, from the window's spend in buckets
-resampled over the time left; `runs_out_at` is when the median path reaches 100 %.
+else `per_usd` (one percent per API-equivalent dollar); `note` says it in plain words
+("About $17 of API-equivalent spend per 1% of your weekly limit, from 4 rises
+(rough)."); null before two readings with a rise between them. `rate_factor` is the
+fit's 80 % range on its rate (divided to multiplied by it): a t-interval on the rises'
+residuals pooled with a wide prior (2.5 from a single rise), narrowing as rises come;
+`rough` is fewer than 6 rises. `forecast` (current window only, from the second
+reading on) is the median and the 10th to 90th percentile of the value at the reset,
+from the window's spend in buckets resampled over the time left, each draw with its
+own rate from `rate_factor`; when `rough`, the range also covers the straight line of
+percent against time through the window's readings (`line` says it widened it).
+`runs_out_at` is when the median path reaches 100 %, `runs_out_early` and
+`runs_out_late` the range's ends (null: never before the reset).
+`recording_since` is the first status line sample's time.
 `by_project` (the last 8 segments; up to 6 projects plus `(other)`) is what the
 index's requests spent in the segment, and their fitted percent (null without a fit).
 Usage from other machines or claude.ai counts toward the limits but is not in the

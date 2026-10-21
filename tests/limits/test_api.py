@@ -85,7 +85,9 @@ def test_limits_with_samples(state: Path, client: Client) -> None:
     assert data["available"] and data["recording"] and data["message"] is None
     week = data["windows"]["seven_day"]
     assert week["reading"]["percent"] == 45.0 and week["current"]
-    assert week["fit"]["method"] == "per_usd" and "too few samples" in week["fit"]["note"]
+    assert week["fit"]["method"] == "per_usd" and week["fit"]["note"].startswith("About $")
+    assert "of your weekly limit, from" in week["fit"]["note"]
+    assert data["recording_since"] == ago(hours=7).isoformat(timespec="seconds")
     fc = week["forecast"]
     assert fc is not None and fc["low"] <= fc["median"] <= fc["high"]
     assert fc["median"] >= 45.0 and len(fc["fan"]) > 2
@@ -95,9 +97,21 @@ def test_limits_with_samples(state: Path, client: Client) -> None:
     assert len(segs) == 2 and segs[0]["peak"] == 45.0 and segs[1]["hit_limit"]
     projects = {p["project"] for p in segs[0]["by_project"]}
     assert "alpha" in projects and segs[0]["usd"] > 0
+    # two readings, the first at the window's start: one rise, a rough and wide forecast
     five = data["windows"]["five_hour"]
+    assert five["reading"]["percent"] == 9.0 and five["reason"] is None
+    assert five["fit"]["rough"] and five["fit"]["note"].endswith("from 1 rise (rough).")
+    fc = five["forecast"]
+    assert fc["rough"] and fc["readings"] == 2 and fc["rate_factor"] >= 2.5
+    assert fc["low"] <= fc["median"] <= fc["high"]
+    for key in ("runs_out_at", "runs_out_early", "runs_out_late"):
+        assert key in fc
+
+
+def test_one_reading_is_not_enough(state: Path, client: Client) -> None:
+    write(state, [LimitSample(ago(hours=1), H5, 5.0, NOW + timedelta(hours=1), "s1")])
+    five = client.get("/api/limits")[1]["windows"]["five_hour"]
     assert five["fit"] is None and five["forecast"] is None and five["reason"] == NOT_ENOUGH
-    assert five["reading"]["percent"] == 9.0
 
 
 def test_overview_cards_follow_new_samples(state: Path, client: Client) -> None:
