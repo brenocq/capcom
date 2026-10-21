@@ -234,7 +234,8 @@ def _spike_marks(
     ctx: Context,
     since: datetime,
     until: datetime,
-    titles: Mapping[str, str | None],
+    infos: Mapping[str, SessionInfo],
+    names: ProjectNames,
     unavailable: list[str],
 ) -> dict[str, Any] | None:
     """The window's spikes (capcom.timeline.find_spikes) as chart markers: the
@@ -261,12 +262,13 @@ def _spike_marks(
                 "kind": sp.kind.value,
                 "scope": sp.scope,
                 "session_id": sp.session_id,
-                "title": titles.get(sp.session_id) if sp.session_id else None,
+                "title": (info.title if (info := infos.get(sp.session_id or "")) else None),
                 "agent_id": sp.agent_id,
                 "requests": len(sp.message_ids),
                 "cost_usd": round(sp.cost_usd, 6),
                 "excess_usd": round(sp.excess_usd, 6),
             }
+            | _spike_project(sp, infos, names)
             | _headline(causes.get(sp, ()))
             for i, sp in enumerate(marks)
         ],
@@ -349,8 +351,7 @@ def overview(ctx: Context) -> dict[str, Any]:
     )
     if cum is not None:
         cum = _tidy(cum, GroupBy.CATEGORY, names)
-    titles = {sid: s.title for sid, s in infos.items()}
-    marks = _spike_marks(ctx, today_since, ctx.now, titles, unavailable)
+    marks = _spike_marks(ctx, today_since, ctx.now, infos, names, unavailable)
     spark_since = max(today_since, ctx.now - timedelta(hours=2))
     spark = _try(
         lambda: ctx.analysis.per_step(
@@ -474,8 +475,7 @@ def spend(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
             )
             hourly = _tidy(full or [], group, w.names)
         daily_json, heat_json = _daily_and_heat(ctx, hourly, keep, days)
-    titles = {sid: info.title for sid, info in w.infos.items()}
-    marks = _spike_marks(ctx, since, ctx.now, titles, unavailable)
+    marks = _spike_marks(ctx, since, ctx.now, w.infos, w.names, unavailable)
 
     rows = w.session_rows(ctx.tz)
     temporary = [r for r in rows if r["temporary"]]
@@ -989,6 +989,19 @@ def _headline(causes: Sequence[Explanation]) -> dict[str, Any]:
     }
 
 
+def _spike_project(
+    sp: Spike, infos: Mapping[str, SessionInfo], names: ProjectNames
+) -> dict[str, str | None]:
+    """The project of a spike's session: its shared label and its full folder."""
+    info = infos.get(sp.session_id) if sp.session_id else None
+    if info is None:
+        return {"project": None, "project_path": None}
+    return {
+        "project": project_display(info.project_dir, names),
+        "project_path": names.path(info.project_dir),
+    }
+
+
 def _spike_json(
     ctx: Context,
     sp: Spike,
@@ -1009,7 +1022,7 @@ def _spike_json(
         "agent_id": sp.agent_id,
         "agent_type": agent.agent_type if agent else None,
         "title": info.title if info else None,
-        "project": project_display(info.project_dir, names) if info else None,
+        **_spike_project(sp, infos, names),
         "requests": len(sp.message_ids),
         "cost_usd": round(sp.cost_usd, 6),
         "baseline_usd": round(sp.baseline_usd, 6),
@@ -1057,10 +1070,41 @@ def _spike_window(ctx: Context, sp: Spike) -> dict[str, Any]:
     }
 
 
+def _project_filter(
+    query: Mapping[str, str], infos: Mapping[str, SessionInfo], names: ProjectNames
+) -> str | None:
+    """The project label `?project=` names (a label, a full folder or a project
+    folder), None when absent; a project no session has is a 400."""
+    raw = query.get("project")
+    if not raw:
+        return None
+    for info in infos.values():
+        label = project_display(info.project_dir, names)
+        if raw in (label, names.path(info.project_dir), info.project_dir):
+            return label
+    raise ApiError(400, "bad_query", "project names no known project")
+
+
 def spikes(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     days = _int(query, "days", 14, 1, 366)
     since = ctx.midnight(days - 1)
     found, explained = ctx.analysis.spikes(ctx.index, ctx.table, since, ctx.now)
+    infos = ctx.infos()
+    names = ctx.names(infos)
+    agents = ctx.agents()
+    where = {sp: _spike_project(sp, infos, names) for sp in found}
+    projects: dict[str, list[Any]] = {}  # label -> [path, excess, spikes]
+    for sp in found:
+        p = where[sp]
+        row = projects.setdefault(p["project"] or "", [p["project_path"], 0.0, 0])
+        row[1] += sp.excess_usd
+        row[2] += 1
+    by_project = sorted(projects.items(), key=lambda kv: (kv[0] == "", -kv[1][1]))
+    project = _project_filter(query, infos, names)
+    if project is not None:
+        found = [sp for sp in found if where[sp]["project"] == project]
+        kept = set(found)
+        explained = [e for e in explained if e.spike in kept]
     causes = _by_spike(explained)
     totals: dict[str, list[float]] = {}
     for e in explained:
@@ -1075,9 +1119,6 @@ def spikes(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     if wanted and not any(spike_key(sp) == wanted for sp in shown):
         shown += [sp for sp in found if spike_key(sp) == wanted][:1]
     shown.sort(key=lambda sp: (sp.start, sp.session_id or "", sp.agent_id or ""))
-    infos = ctx.infos()
-    names = ctx.names(infos)
-    agents = ctx.agents()
     items = []
     for i, sp in enumerate(shown):
         item = _spike_json(ctx, sp, causes.get(sp, []), infos, agents, names)
@@ -1100,6 +1141,17 @@ def spikes(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
         "count": len(found),
         "excess_usd": round(sum(sp.excess_usd for sp in found), 6),
         "explained": explained_count,
+        "project": project,
+        "project_path": projects[project][0] if project in projects else None,
+        "by_project": [
+            {
+                "project": k or None,
+                "project_path": v[0],
+                "excess_usd": round(v[1], 6),
+                "spikes": int(v[2]),
+            }
+            for k, v in by_project
+        ],
         "causes": [
             {
                 "cause": k,

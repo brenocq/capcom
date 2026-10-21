@@ -286,3 +286,12 @@ export function spikeHref(key, startMs, days) {
   const d = days || [1, 7, 14, 30, 90].find((x) => x >= back) || Math.min(366, back + 1);
   return `/spikes?days=${d}` + (key ? '&spike=' + encodeURIComponent(key) : '');
 }
+
+// A spike's project as a chip: the shared label, its full folder on hover; null
+// when the spike has no session. `onPick`, when given, makes it a filter button.
+export function projectChip(it, onPick) {
+  if (!it || !it.project) return null;
+  const title = it.project_path && it.project_path !== it.project ? `Project ${it.project_path}` : `Project ${it.project}`;
+  if (!onPick) return h('span.tag.proj', { text: it.project, title });
+  return h('button.tag.proj', { type: 'button', text: it.project, title: `${title}: show its spikes only`, onclick: (e) => { e.preventDefault(); e.stopPropagation(); onPick(it.project); } });
+}

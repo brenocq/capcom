@@ -4,7 +4,7 @@
 import {
   h, api, usd, tokens, pct, seg, legend, empty, errorBox, setQuery, monthDay, localDate, dayName, hm,
   outputUsd, estimateNote, lowerMark, SERIES, OTHER_COLOR, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor,
-  spikeText, spikeHref,
+  spikeText, spikeHref, projectChip,
 } from './lib.js';
 import { bandChart, dayBars, heatmap, heatScale } from './charts.js';
 import { sessionsTable } from './sessions.js';
@@ -51,7 +51,7 @@ export function pickSpikes(sp, x0, x1, gap = 0.04, max = 8) {
 // chart markers from a picked spikes block; `days` picks the Spikes window
 export function spikeMarks(sp, days) {
   if (!sp) return [];
-  return sp.marks.map((m) => ({ n: m.n, t: m.t, href: spikeHref(m.key, m.t, days), aria: `Spike ${m.n}: ${spikeText(m).title}, +${usd(m.excess_usd)} over the baseline, ${spikeWhen(m)}` }));
+  return sp.marks.map((m) => ({ n: m.n, t: m.t, href: spikeHref(m.key, m.t, days), aria: `Spike ${m.n}: ${spikeText(m).title}, +${usd(m.excess_usd)} over the baseline${m.project ? `, in project ${m.project}` : ''}, ${spikeWhen(m)}` }));
 }
 
 // the numbered list next to a chart: the largest spikes first
@@ -62,7 +62,7 @@ export function spikeList(sp, days, limit = 4) {
   const out = rows.map((m) => h('a.spikerow', { href: spikeHref(m.key, m.t, days) },
     h('span.num', { text: String(m.n) }),
     h('span.body', null,
-      h('span.meta', { text: spikeWhen(m) }),
+      h('span.meta', null, projectChip(m), h('span', { text: spikeWhen(m) })),
       h('b', { text: spikeText(m).title }),
       h('span.tags', null, h('span.tag', { text: spikeText(m).tag }),
         h('span.plus', { text: `+${usd(m.excess_usd)}` }),
