@@ -503,12 +503,18 @@ ENDPOINTS: dict[str, Endpoint] = {
 }
 
 
+class _Server(ThreadingHTTPServer):
+    # socketserver listens with a backlog of 5. A page load opens a connection per
+    # module at once, and macOS resets the ones a full queue cannot hold; one reset
+    # import keeps app.js from running and leaves the page blank.
+    request_queue_size = 128
+    daemon_threads = True
+
+
 def make_server(site: Site, port: int) -> ThreadingHTTPServer:
     """A server bound to 127.0.0.1:`port` (0: any free port); not started."""
     handler = type("SiteHandler", (Handler,), {"site": site})
-    server = ThreadingHTTPServer((HOST, port), handler)
-    server.daemon_threads = True
-    return server
+    return _Server((HOST, port), handler)
 
 
 def run_serve(config: Config, port: int, open_browser: bool, scan: bool = True) -> int:

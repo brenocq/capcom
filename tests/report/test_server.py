@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC
 from pathlib import Path
 
 import pytest
 
-from capcom.report.server import HOST, Site, make_server
+from capcom.report.server import HOST, STATIC, Site, make_server
 from tests.report.conftest import FAKE, NOW, TABLE, Client, serve
 
 
@@ -47,6 +48,18 @@ def test_static_files_and_types(client: Client) -> None:
         assert status == 200, name
         assert headers["Content-Type"].startswith(ctype)
         assert body
+
+
+def test_serves_a_page_load_burst(client: Client) -> None:
+    # the browser fetches every module of the page at once, a connection each
+    names = sorted(p.name for p in STATIC.glob("*.js"))
+    with ThreadPoolExecutor(12) as pool:
+        statuses = [
+            status
+            for _ in range(50)
+            for status in pool.map(lambda n: client.get(f"/static/{n}")[0], names)
+        ]
+    assert statuses == [200] * 50 * len(names)
 
 
 @pytest.mark.parametrize(
