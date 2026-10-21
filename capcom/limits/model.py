@@ -47,6 +47,7 @@ BLOCK = {LimitWindow.FIVE_HOUR: 4, LimitWindow.SEVEN_DAY: 6}  # buckets per resa
 LABEL = {LimitWindow.FIVE_HOUR: "5-hour window", LimitWindow.SEVEN_DAY: "weekly limit"}
 CATEGORIES = ("input", "cache_write", "cache_read", "output")
 SAME_RESET = timedelta(minutes=10)  # reset times closer than this are one reset
+BURST = timedelta(seconds=30)  # rises closer than this are one refresh burst
 NOISE_DROP = 5.0  # without reset times, a fall of more than this many points is a reset
 MIN_INTERVALS = 2  # fewer: no fit ("not enough samples")
 MIN_RISE = 2.0  # percent points the intervals must add up to
@@ -284,10 +285,17 @@ def segments(samples: Iterable[LimitSample], window: LimitWindow) -> list[Segmen
             floor = _floor(out[:-1])
             if begin <= first and (floor is None or begin >= floor):
                 cur.start, cur.start_known = begin, True
+        # each session reports the limits as of its own last reply, so readings of one
+        # window interleave stale values; usage only rises, so keep the running maximum
         if cur.samples and s.used_percentage < cur.last.used_percentage:
             continue  # a stale reading
         if cur.samples and s.used_percentage == cur.last.used_percentage:
-            continue  # no rise: the earlier sample already says it
+            continue  # no rise: the earlier sample already says when it was reached
+        if cur.samples and s.time - cur.last.time < BURST:
+            # sessions refreshing together, the lower ones stale: one reading, not a
+            # rise of several points in a few milliseconds
+            cur.samples[-1] = s
+            continue
         cur.samples.append(s)
     return out
 

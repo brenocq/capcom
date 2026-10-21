@@ -7,7 +7,10 @@ its stdin; for Pro and Max plans it holds `rate_limits.five_hour` and
 This command sits in front of the user's own status line command
 (`capcom record-limits | <their command>`): it copies stdin to stdout byte for byte,
 then appends one JSONL `LimitSample` per window to `<cache>/capcom/limits.jsonl` when
-the window's percentage or reset time changed since its last sample. With `--line`
+the window's percentage rose above its running maximum for the current reset, or the
+reset moved on (a new window). Each open session reports the limits as of its own last
+API reply, so at the same moment sessions disagree; within one window usage only rises,
+so a lower reading is stale and skipped. With `--line`
 (no status line of one's own) it prints a short line of its own instead of the copy.
 
 It must never break the status line: every error is swallowed, the copy still goes
@@ -34,7 +37,7 @@ SAMPLES_FILE = "limits.jsonl"
 STATE_FILE = "limits.state.json"
 LOCK_FILE = "limits.lock"
 MAX_INPUT = 1 << 20  # larger stdin is passed through but not parsed
-RESET_SLACK_S = 60  # reset times closer than this are the same reset (they jitter)
+RESET_SLACK_S = 600  # reset times closer than this are the same reset (they drift)
 READ_DEADLINE_S = 1.0  # stdin still open after this: pass through what arrived
 LOCK_TRIES = 25  # times 2 ms: give up on the lock after about 50 ms
 
@@ -87,15 +90,19 @@ def _stale(prev: Any, resets: float | None, now: float) -> bool:
     return p_resets is not None and p_resets - resets >= RESET_SLACK_S
 
 
-def _changed(prev: Any, used: float, resets: float | None) -> bool:
+def _instance(prev: Any, resets: float | None) -> tuple[float, float | None] | None:
+    """The running maximum and reset of the window instance `resets` belongs to, or None
+    when the reading starts a new instance (no state yet, or a later reset)."""
     if not isinstance(prev, list) or len(prev) != 2:
-        return True
-    p_used, p_resets = _number(prev[0]), _number(prev[1])
-    if p_used != used:
-        return True
-    if (resets is None) != (p_resets is None):
-        return True
-    return resets is not None and p_resets is not None and abs(resets - p_resets) >= RESET_SLACK_S
+        return None
+    p_max, p_resets = _number(prev[0]), _number(prev[1])
+    if p_max is None:
+        return None
+    if resets is None:
+        return p_max, p_resets  # no reset to tell windows apart: assume the same one
+    if p_resets is None or abs(resets - p_resets) >= RESET_SLACK_S:
+        return None
+    return p_max, p_resets
 
 
 def _under(path: str, roots: Sequence[str]) -> bool:
@@ -163,8 +170,16 @@ def record(data: bytes, directory: str, now: float | None = None) -> int:
         lines: list[bytes] = []
         for window, used, resets in found:
             prev = state.get(window)
-            if _stale(prev, resets, now) or not _changed(prev, used, resets):
+            if _stale(prev, resets, now):
                 continue
+            inst = _instance(prev, resets)
+            kept = resets  # the reset the state keeps for this instance
+            if inst is not None:
+                # usage only rises within a window: a reading at or below the running
+                # maximum is an older session's stale view (or says nothing new)
+                if used <= inst[0]:
+                    continue
+                kept = inst[1] if inst[1] is not None else resets
             sample = {
                 "time": _iso(now),
                 "window": window,
@@ -174,7 +189,7 @@ def record(data: bytes, directory: str, now: float | None = None) -> int:
                 "source": "statusline",
             }
             lines.append(json.dumps(sample, separators=(",", ":")).encode() + b"\n")
-            state[window] = [used, resets]
+            state[window] = [used, kept]  # the instance's running maximum
         if not lines:
             return 0
         out = os.open(

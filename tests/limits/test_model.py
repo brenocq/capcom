@@ -69,6 +69,33 @@ def test_segments_cut_at_resets_and_drop_stale_readings() -> None:
     assert ivs[0].start == segs[0].start
 
 
+def test_interleaved_stale_readings_make_one_rising_series() -> None:
+    reset = T0 + timedelta(days=5)  # the weekly window started two days before T0
+    burst = [85, 87, 79, 76]  # four sessions refreshing together, three of them stale
+    ss = [
+        sample(T0 + timedelta(milliseconds=10 * i), p, resets=reset, window=D7)
+        for i, p in enumerate(burst)
+    ]
+    ss += [
+        sample(T0 + minutes(2), 87, resets=reset + minutes(3), window=D7),  # drift, equal
+        sample(T0 + minutes(5), 80, resets=reset, window=D7),  # stale
+        sample(T0 + minutes(60), 89, resets=reset, window=D7),
+        sample(T0 + minutes(70), 88, resets=reset, window=D7),  # stale
+    ]
+    segs = segments(ss, D7)
+    assert len(segs) == 1
+    assert [(s.time, s.used_percentage) for s in segs[0].samples] == [
+        (ss[1].time, 87),  # the time 87 was first seen
+        (T0 + minutes(60), 89),
+    ]
+    assert [round(i.rise) for i in intervals(segs)] == [87, 2]
+    after = sample(reset + minutes(30), 1, resets=reset + timedelta(days=7), window=D7)
+    later = segments([*ss, after], D7)
+    assert len(later) == 2 and later[1].samples == [after]
+    view = analyze(FakeIndex([]), TABLE, ss, D7, now=T0 + minutes(80))
+    assert view.reading is not None and view.reading.used_percentage == 89
+
+
 def test_segments_never_overlap() -> None:
     reset = T0 + timedelta(hours=4)  # its window would start an hour before T0
     ss = [sample(T0 - minutes(30), 100, source="rate_limit_error"), sample(T0, 10, resets=reset)]
