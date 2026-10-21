@@ -69,6 +69,31 @@ def _checks(args: argparse.Namespace) -> int:
     return run_checks_view(load_config(), days=args.days, limit=args.limit)
 
 
+def _mark(args: argparse.Namespace) -> int:
+    from capcom.changes.cli import run_mark
+
+    return run_mark(
+        load_config(),
+        args.finding,
+        on=args.on,
+        other=args.other,
+        note=args.note,
+        noticed=args.noticed,
+    )
+
+
+def _changes(args: argparse.Namespace) -> int:
+    from capcom.changes.cli import run_changes
+
+    return run_changes(load_config(), args.id, days=args.days, noticed=args.noticed)
+
+
+def _unmark(args: argparse.Namespace) -> int:
+    from capcom.changes.cli import run_unmark
+
+    return run_unmark(load_config(), args.id)
+
+
 def _limits(args: argparse.Namespace) -> int:
     if args.install or args.uninstall:
         from capcom.limits.install import run_install
@@ -127,6 +152,30 @@ def build_parser() -> argparse.ArgumentParser:
     checks.add_argument("--days", type=int, default=14, help="window, in days (0: all)")
     checks.add_argument("--limit", type=int, default=20)
     checks.set_defaults(func=_checks)
+
+    mark = sub.add_parser("mark", help="record that you applied a finding's change on a date")
+    mark.add_argument("finding", help="its row in `capcom checks`, or its id kind@scope")
+    mark.add_argument("--on", default="today", help="today, yesterday or YYYY-MM-DD")
+    mark.add_argument(
+        "--other", action="store_true", help="you made another change than the suggested one"
+    )
+    mark.add_argument("--note", default="", help="your own words, kept on this machine")
+    mark.add_argument("--noticed", action="store_true", help=argparse.SUPPRESS)
+    mark.set_defaults(func=_mark)
+
+    changes = sub.add_parser("changes", help="did it work? the marked changes and their verdicts")
+    changes.add_argument("id", type=int, nargs="?", help="one mark in detail")
+    changes.add_argument(
+        "--days", type=int, default=0, help="marks applied in the last N days (0: all)"
+    )
+    changes.add_argument(
+        "--noticed", action="store_true", help="changes capcom saw in agent definitions"
+    )
+    changes.set_defaults(func=_changes)
+
+    unmark = sub.add_parser("unmark", help="remove a mark")
+    unmark.add_argument("id", type=int)
+    unmark.set_defaults(func=_unmark)
 
     limits = sub.add_parser(
         "limits", help="the 5-hour and weekly usage windows: now, forecast, what spent them"
