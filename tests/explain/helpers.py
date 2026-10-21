@@ -129,6 +129,9 @@ class FakeIndex:
     def last_cost_states(self) -> Iterator[CostState]:
         yield from ()
 
+    def cost_states(self, session_id: str) -> Iterator[CostState]:
+        yield from ()
+
     def shared_replies(
         self, session_id: str, since: datetime | None = None, until: datetime | None = None
     ) -> int:

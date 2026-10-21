@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from capcom.cost.calibrate import calibrate
+from capcom.cost.calibrate import calibrate, check_session, steps
 from capcom.cost.prices import load_prices
 from capcom.sources.claude_code import ClaudeCodeSource
 from capcom.store.index import open_index
@@ -256,3 +256,107 @@ def test_shared_replies_against_the_store(tmp_path: Path) -> None:
     # The original's window lost its only reply, so its model is "only in cost-state".
     assert "shares replies with another session" in got["sess-orig"].reasons
     assert got["sess-copy"].comparable
+
+
+# --------------------------------------------------------------------------- steps
+
+H = 3_600_000  # ms
+
+
+def step_cs(
+    offset: int,
+    total: float,
+    when: int,
+    nxt: int | None,
+    dur_ms: int | None,
+    start_ms: int | None = START_MS,
+    **tokens: int,
+) -> CostState:
+    """A cost-state written at minute `when`, the next record at minute `nxt`, with
+    Opus 5.5 tokens (`output=`, `cache_read=`, ...) and its dollars."""
+    mu = ModelUsage(cost_usd=total, **tokens)
+    return CostState(
+        session_id="s1",
+        offset=offset,
+        total_cost_usd=total,
+        models={"claude-opus-5-5": mu},
+        start_time_ms=start_ms,
+        timestamp=at(when),
+        next_timestamp=None if nxt is None else at(nxt),
+        total_duration_ms=dur_ms,
+    )
+
+
+def test_restored_totals_compare_per_process_step() -> None:
+    # Process 1: minutes 0-60, $20. A process that wrote no cost-state: minute 120,
+    # $20. Process 2 restores process 1's totals: minutes 180-200, +$4 over 20 min.
+    idx = FakeIndex(
+        reqs=[
+            req("s1", when=at(10), output=M),
+            req("s1", when=at(120), output=M),
+            req("s1", when=at(190), input=M),
+        ],
+        costs=[
+            step_cs(100, 20.0, 60, 120, H),
+            step_cs(200, 24.0, 200, None, H + 20 * 60_000),
+        ],
+    )
+    cal = check_session(idx, idx.costs[-1], T)
+    assert cal.claude_code_usd == pytest.approx(24.0)
+    assert cal.capcom_usd == pytest.approx(24.0)
+    assert cal.outside_usd == pytest.approx(20.0)
+    assert cal.comparable and cal.rest_usd == pytest.approx(0)
+
+
+def test_steps_skip_a_repeated_exit_and_restart_with_a_new_start() -> None:
+    a = step_cs(100, 20.0, 60, 61, H)
+    again = step_cs(150, 20.0, 61, 62, H)  # the same exit written twice
+    later = step_cs(200, 24.0, 200, None, H + 20 * 60_000)
+    fresh = step_cs(300, 3.0, 400, None, 10 * 60_000, start_ms=START_MS + 390 * 60_000)
+    got = steps([a, again, later, fresh])
+    assert [s.usd for s in got] == pytest.approx([20.0, 4.0, 3.0])
+    assert got[0].since == T0 and got[0].until == at(61)
+    assert got[1].since == at(200) - timedelta(minutes=21) and got[1].until is None
+    assert got[2].since == at(390)
+
+
+def test_a_process_that_restored_an_older_total_grows_from_it() -> None:
+    a = step_cs(100, 20.0, 60, 61, H)
+    b = step_cs(200, 30.0, 300, 301, 2 * H)  # restored a, ran an hour
+    c = step_cs(300, 25.0, 310, None, H + 30 * 60_000)  # also restored a, ran 30 min
+    got = steps([a, b, c])
+    assert [s.usd for s in got] == pytest.approx([20.0, 10.0, 5.0])
+    assert got[2].since == at(310) - timedelta(minutes=31)
+
+
+def test_without_durations_a_step_starts_after_the_one_before() -> None:
+    got = steps([step_cs(100, 20.0, 60, 70, None), step_cs(200, 24.0, 200, None, None)])
+    assert got[1].since == at(70)
+
+
+def test_output_above_capcom_estimate_is_a_range() -> None:
+    # A subagent's estimated output: 0.1 M tokens logged, cost-state counted 0.6 M.
+    idx = FakeIndex(
+        reqs=[req("s1", when=at(5), agent="a1", estimated=True, output=M // 10)],
+        costs=[step_cs(100, 12.0, 60, None, H, output=6 * M // 10)],
+    )
+    [cal] = calibrate(idx, T)
+    assert cal.capcom_usd == pytest.approx(2.0)
+    assert cal.output_above == pytest.approx({"claude-opus-5-5": 10.0})
+    assert cal.unlogged == {}
+    assert cal.rest_usd == pytest.approx(0)
+    assert "estimated output" in cal.reasons
+
+
+def test_calls_not_in_the_log_are_priced_per_model_and_category() -> None:
+    # The log has 1 M cache reads; cost-state counted 11 M (and the same output).
+    idx = FakeIndex(
+        reqs=[req("s1", when=at(5), cache_read=M, output=M)],
+        costs=[step_cs(100, 22.5, 60, None, H, cache_read=11 * M, output=M)],
+    )
+    [cal] = calibrate(idx, T)
+    rate = cal.capcom_usd - 20.0  # the window's own cache-read price per M
+    assert list(cal.unlogged) == ["claude-opus-5-5"]
+    assert cal.unlogged["claude-opus-5-5"] == pytest.approx({"cache_read": 10 * rate})
+    assert cal.output_above == {}
+    assert cal.rest_usd == pytest.approx(22.5 - 11 * rate - 20.0)
