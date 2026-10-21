@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 
 from capcom.cost.model import price, price_usage
 from capcom.cost.prices import canonical, lookup, price_at
-from capcom.explain import fmt
+from capcom.explain import fmt, shared
 from capcom.explain.data import (
     ONE_HOUR,
     Member,
@@ -28,6 +28,7 @@ from capcom.explain.data import (
     api_request_for,
     ttl_delta,
 )
+from capcom.explain.shared import CONTEXT_STEPS, GROWTH_FLOOR, LATE_COMPACTION, LONG_CONTEXT
 from capcom.types import (
     CauseKind,
     Confidence,
@@ -48,15 +49,11 @@ MIN_REWRITE_TOKENS = 10_000
 LARGE_RESULT_TOKENS = 20_000  # a tool result this big is "large" (rule 5)
 LONG_REPORT_TOKENS = 10_000  # an Agent report this big is "long" (rule 8)
 RESULT_LOOKBACK = timedelta(hours=1)  # results that may still weigh on a spike
-LATE_COMPACTION_TOKENS = 400_000  # a compaction from above this ran late (rule 2)
 TRIM_MIN_TOKENS = 20_000  # a prompt that shrank this much, and by TRIM_SHARE, was trimmed
 TRIM_SHARE = 0.05
 COMPACTION_REACH = timedelta(minutes=10)  # a compaction just after the spike ends it
-TOOL_WAIT_REACH = timedelta(minutes=1)  # a tool result this close before a rewrite ends the pause
-GROWTH_MIN_CONTEXT = 100_000  # context growth only matters at this size (rule 6)
 GROWTH_RATIO = 1.5  # peak context over the hour-before median
 GROWTH_CLEAR_RATIO = 2.0
-GROWTH_THRESHOLDS = (150_000, 200_000, 400_000)
 BASELINE_WINDOW = timedelta(hours=1)
 FAN_OUT_MIN = 4  # Agent calls in the window that make a fan-out (rule 7)
 FAN_OUT_LOOKBACK = timedelta(minutes=10)
@@ -70,6 +67,8 @@ POLL_CLEAR = 10
 POLL_TOOLS = frozenset({"BashOutput", "TaskOutput"})  # checks on a background task
 POLL_COMMANDS = frozenset({"sleep", "watch", "until", "while", "wait", "inotifywait"})
 POLL_WORDS = ("wait", "poll")  # e.g. a waitlog.sh script
+PARALLEL_MIN = 4  # subagents working at once that make parallel work (rule 11)
+PARALLEL_PAD = timedelta(seconds=30)  # a thread counts as active this long after a request
 MAX_EVIDENCE = 6
 
 AGENT_TOOLS = frozenset({"Agent", "Task"})
@@ -391,8 +390,8 @@ def _ttl(thread: Thread, r: Request) -> str | None:
 
 def _tool_wait(rw: Rewrite) -> tuple[Event, timedelta] | None:
     """The tool result the pause before `rw` waited for: the last result of the
-    previous request's calls, when it came back past the cache lifetime and just
-    before the rewrite (the agent was running a tool, not idle)."""
+    previous request's calls, when it came back past the cache lifetime (the agent
+    was running a tool, not idle: the cache expired while it ran)."""
     p, r = rw.previous, rw.request
     ids = {c.tool_use_id for c in p.tool_calls}
     if not ids or rw.lifetime is None:
@@ -406,15 +405,23 @@ def _tool_wait(rw: Rewrite) -> tuple[Event, timedelta] | None:
         return None
     last = results[-1]
     ran = last.timestamp - p.timestamp
-    if ran <= rw.lifetime or r.timestamp - last.timestamp > TOOL_WAIT_REACH:
+    if ran <= rw.lifetime:
         return None
     return last, ran
 
 
-def _idle(rw: Rewrite, confidence: Confidence, how: str, wrote: Evidence) -> None:
+def _expired(rw: Rewrite, confidence: Confidence, how: str, wrote: Evidence) -> None:
+    """A rewrite after a gap past the cache lifetime, named by who was waiting
+    (`shared.expiry_kind`): the agent on its own tool call, a finished subagent on
+    its lead, or the user."""
     m, p, r = rw.member, rw.previous, rw.request
     lifetime = rw.lifetime or ONE_HOUR
-    rw.reason, rw.confidence = CauseKind.IDLE_REWRITE, confidence
+    wait = _tool_wait(rw)
+    sub = shared.expiry_kind(
+        rw.gap, lifetime, wait[1] if wait else None, m.thread.agent_id is not None
+    )
+    rw.reason = shared.EXPIRY_CAUSES.get(sub or "", CauseKind.IDLE_REWRITE)
+    rw.confidence = confidence
     rw.evidence = [
         _ev(f"Previous {_who(m)} request at {fmt.clock(p.timestamp)}", m, p),
         _ev(
@@ -423,16 +430,24 @@ def _idle(rw: Rewrite, confidence: Confidence, how: str, wrote: Evidence) -> Non
             r,
         ),
     ]
-    wait = _tool_wait(rw)
     if wait is not None:
         e, ran = wait
         call = next(
             (c for c in p.tool_calls if c.tool_use_id == e.attrs.get("tool_use_id")),
             p.tool_calls[0],
         )
-        rw.waited_on = fmt.tool_label(call.name, call.target)
+        rw.waited_on = call.name or "a tool"
         rw.evidence.append(
             _ev(f"The {rw.waited_on} call ran for {fmt.duration(ran)} before its result", m, e=e)
+        )
+    elif rw.reason is CauseKind.LATE_RESUME_EXPIRY:
+        rw.evidence.append(
+            _ev(
+                f"The {_who(m)} had finished its turn at {fmt.clock(p.timestamp)} and was "
+                f"resumed {fmt.duration(rw.gap)} later",
+                m,
+                p,
+            )
         )
     rw.evidence.append(wrote)
 
@@ -479,7 +494,7 @@ def classify(rw: Rewrite) -> None:
     expired = rw.gap > lifetime
     # a pause past a known lifetime rewrites the cache whatever else changed in it
     if expired and (known or rw.gap > ONE_HOUR):
-        _idle(rw, Confidence.CLEAR, how, wrote)
+        _expired(rw, Confidence.CLEAR, how, wrote)
         return
 
     if not rw.same_model:
@@ -543,21 +558,10 @@ def classify(rw: Rewrite) -> None:
         return
 
     if expired:
-        _idle(rw, Confidence.LIKELY, how, wrote)
+        _expired(rw, Confidence.LIKELY, how, wrote)
         return
-    aways = [e for e in evs if e.kind is EventKind.AWAY]
-    if aways:
-        rw.reason, rw.confidence = CauseKind.IDLE_REWRITE, Confidence.LIKELY
-        rw.evidence = [
-            _ev(
-                f"away_summary at {fmt.clock(aways[-1].timestamp)}: the user was away",
-                m,
-                e=aways[-1],
-            ),
-            _ev(f"Gap of {fmt.duration(rw.gap)} since the previous {_who(m)} request", m, p),
-            wrote,
-        ]
-        return
+    # a gap within the cache lifetime is never an expiry, whatever else it holds (an
+    # away_summary too): the cache was still there
     deltas = [
         e
         for e in evs
@@ -702,6 +706,94 @@ _TRIM_ADVICE = (
 )
 
 
+EXPIRY_CAUSES = frozenset(shared.EXPIRY_SUB_KINDS)
+
+
+def _pause(life: timedelta) -> str:
+    return "an hour" if life >= ONE_HOUR else fmt.lifetime(life)
+
+
+def _tools_waited(group: Sequence[Rewrite]) -> str:
+    """The one tool name the group's waits share, or "tools"."""
+    names = {rw.waited_on for rw in group if rw.waited_on}
+    return next(iter(names)) if len(names) == 1 else "tools"
+
+
+def _expiry_text(reason: CauseKind, group: list[Rewrite], top: Rewrite) -> tuple[str, str]:
+    """Title and advice of cache expiries, by who waited (`shared.expiry_kind`)."""
+    k = len(group)
+    life = top.lifetime or ONE_HOUR
+    pause = _pause(life)
+    if reason is CauseKind.TOOL_WAIT_EXPIRY:
+        tool = _tools_waited(group)
+        title = (
+            f"Cache expired while {top.waited_on or 'a tool'} ran {fmt.duration(top.gap)}"
+            if k == 1
+            else f"Cache expired {k} times while {tool} ran"
+        )
+        advice = (
+            f"A tool call that runs longer than {pause} comes back to an expired cache "
+            "and rewrites the whole context. Run long jobs in the background and check on "
+            "them with short calls, or wait in an agent with a small context."
+        )
+        if any(rw.waited_on in AGENT_TOOLS for rw in group):
+            advice += (
+                " A foreground Agent call keeps its caller waiting the same way: run long "
+                "subagents in the background."
+            )
+        if any(rw.member.thread.agent_id is None for rw in group):
+            advice += (
+                " A command waiting on a permission prompt looks the same in the logs: "
+                "allow it in the settings, or approve it sooner."
+            )
+        return title, advice
+    if reason is CauseKind.LATE_RESUME_EXPIRY:
+        title = (
+            f"Subagent resumed after the cache expired ({fmt.duration(top.gap)} later)"
+            if k == 1
+            else f"Subagents resumed {k} times after the cache expired"
+        )
+        advice = (
+            f"A subagent that finished and is resumed more than {pause} later rewrites its "
+            "whole context. For the next step, spawn a fresh agent with a short note of "
+            f"what it needs, or reply to the finished one within {pause}."
+        )
+        return title, advice
+    title = (
+        f"Cache rebuilt after {fmt.duration(top.gap)} idle"
+        if k == 1
+        else f"Cache rebuilt {k} times after idling"
+    )
+    advice = (
+        f"A pause longer than {pause} costs one full rewrite of the context. Before a "
+        "long break, compact or end the session with a handoff note."
+    )
+    if any(rw.lifetime is not None and rw.lifetime < ONE_HOUR for rw in group):
+        advice += (
+            f" This thread cached for {fmt.lifetime(life)}: with the 1-hour cache lifetime, "
+            "breaks under an hour would read the cache instead."
+        )
+    return title, advice
+
+
+def _expiry_line(rw: Rewrite) -> Evidence:
+    """One rewrite of a group of expiries, on one line."""
+    m, r = rw.member, rw.request
+    if rw.reason is CauseKind.TOOL_WAIT_EXPIRY:
+        why = f"while its {rw.waited_on or 'tool'} call ran"
+    elif rw.reason is CauseKind.LATE_RESUME_EXPIRY:
+        why = "after it had finished"
+    else:
+        why = "idle"
+    life = fmt.lifetime(rw.lifetime or ONE_HOUR)
+    return _ev(
+        f"{_who(m).capitalize()} at {fmt.clock(r.timestamp)}: {fmt.duration(rw.gap)} {why} "
+        f"(lifetime {life}), {fmt.approx(rw.tokens)} tokens written again",
+        m,
+        r,
+    )
+
+
 def rewrite_candidates(view: SpikeView) -> list[Candidate]:
     by_reason: dict[tuple[CauseKind, bool], list[Rewrite]] = {}
     for rw in view.rewrites:
@@ -712,39 +804,8 @@ def rewrite_candidates(view: SpikeView) -> list[Candidate]:
         excess = sum(rw.excess for rw in group)
         top = max(group, key=lambda rw: rw.excess)
         k = len(group)
-        if reason is CauseKind.IDLE_REWRITE:
-            life = top.lifetime or ONE_HOUR
-            pause = "an hour" if life >= ONE_HOUR else f"{fmt.lifetime(life)}"
-            waits = [rw for rw in group if rw.waited_on]
-            if len(waits) * 2 > k:
-                title = (
-                    f"Cache expired while {top.waited_on or 'a tool'} ran {fmt.duration(top.gap)}"
-                    if k == 1
-                    else f"Cache expired {k} times while tools ran"
-                )
-                advice = (
-                    f"A tool call that runs longer than {pause} comes back to an expired "
-                    "cache and rewrites the whole context. Run long jobs in the background "
-                    "and check on them with short calls, or wait in an agent with a small "
-                    "context."
-                )
-            else:
-                title = (
-                    f"Cache rebuilt after {fmt.duration(top.gap)} idle"
-                    if k == 1
-                    else f"Cache rebuilt {k} times after idling"
-                )
-                if top.member.thread.agent_id is not None:
-                    advice = (
-                        f"A subagent left waiting longer than {pause} rewrites its whole "
-                        "context when it resumes. Have it report and finish, and start a "
-                        "fresh agent for the next step."
-                    )
-                else:
-                    advice = (
-                        f"A pause longer than {pause} costs one full rewrite of the context. "
-                        "Before a long break, compact or end the session with a handoff note."
-                    )
+        if reason in EXPIRY_CAUSES:
+            title, advice = _expiry_text(reason, group, top)
         elif reason is CauseKind.MODEL_SWITCH:
             title = "Model switch rewrote the cache" + (f" {k} times" if k > 1 else "")
             advice = _REWRITE_ADVICE[reason]
@@ -769,9 +830,11 @@ def rewrite_candidates(view: SpikeView) -> list[Candidate]:
         else:
             title = "Cache rewritten after a compaction" + (f" {k} times" if k > 1 else "")
             advice = _REWRITE_ADVICE[CauseKind.COMPACTION]
-        evidence = [
-            e for rw in sorted(group, key=lambda rw: rw.request.timestamp) for e in rw.evidence
-        ]
+        ordered = sorted(group, key=lambda rw: rw.request.timestamp)
+        if reason in EXPIRY_CAUSES and k > 1:
+            evidence = [_expiry_line(rw) for rw in ordered]
+        else:
+            evidence = [e for rw in ordered for e in rw.evidence]
         out.append(
             Candidate(
                 reason,
@@ -794,18 +857,35 @@ def _rewrite_summary(reason: CauseKind, group: list[Rewrite], excess: float) -> 
         lead = f"The {who} request at {fmt.hm(top.request.timestamp)}"
     else:
         lead = f"{fmt.count_word(len(group), True)} requests"
-    if reason is CauseKind.IDLE_REWRITE:
+    if reason in EXPIRY_CAUSES:
         life = fmt.lifetime(top.lifetime or ONE_HOUR)
         # the longest pause, which need not be the costliest rewrite
         lg = max(group, key=lambda rw: rw.gap)
-        while_ = f" while {lg.waited_on} ran" if lg.waited_on else ""
-        why = (
-            f"came {fmt.duration(top.gap)} after the previous one{while_}, past its cache "
-            f"lifetime of {life}"
-            if len(group) == 1
-            else f"came after pauses past the cache lifetime (the longest {fmt.duration(lg.gap)}"
-            f"{while_})"
-        )
+        if reason is CauseKind.TOOL_WAIT_EXPIRY:
+            tool = lg.waited_on or "a tool"
+            why = (
+                f"came {fmt.duration(top.gap)} after the previous one, once its {tool} call "
+                f"had run past the cache lifetime of {life}"
+                if len(group) == 1
+                else f"came after tool calls ran past the cache lifetime of {life} (the "
+                f"longest, {tool}, {fmt.duration(lg.gap)})"
+            )
+        elif reason is CauseKind.LATE_RESUME_EXPIRY:
+            why = (
+                f"came when its lead resumed it {fmt.duration(top.gap)} after it had "
+                f"finished, past its cache lifetime of {life}"
+                if len(group) == 1
+                else "came when finished subagents were resumed past their cache lifetime "
+                f"(the longest after {fmt.duration(lg.gap)})"
+            )
+        else:
+            why = (
+                f"came {fmt.duration(top.gap)} after the previous one, past its cache "
+                f"lifetime of {life}"
+                if len(group) == 1
+                else "came after pauses past the cache lifetime (the longest "
+                f"{fmt.duration(lg.gap)})"
+            )
     elif reason is CauseKind.COMPACTION and top.trimmed:
         why = (
             f"came after the prompt shrank from {fmt.approx(top.previous.usage.context)} to "
@@ -833,6 +913,17 @@ def _rewrite_summary(reason: CauseKind, group: list[Rewrite], excess: float) -> 
 # --------------------------------------------------------------- rule 2: late compaction
 
 
+_LATE_COMPACTION_ADVICE = (
+    f"Compact or hand off by about {fmt.approx(LONG_CONTEXT)} tokens, well before "
+    f"{fmt.approx(LATE_COMPACTION)}: past that, each turn costs about twice what it did, "
+    "and the work rarely needs the oldest half of the context."
+)
+_GROWTH_ADVICE = (
+    f"One task per agent. Hand off, /clear or compact by about {fmt.approx(LONG_CONTEXT)} "
+    "tokens: past that, every turn rereads all of it."
+)
+
+
 def late_compaction(view: SpikeView) -> list[Candidate]:
     out = []
     for m in view.members:
@@ -844,12 +935,12 @@ def late_compaction(view: SpikeView) -> list[Candidate]:
             pre = _int(e.attrs.get("pre_tokens")) or max(
                 (r.usage.context for r in before), default=0
             )
-            if pre < LATE_COMPACTION_TOKENS:
+            if pre < LATE_COMPACTION:
                 continue
-            heavy = [r for r in before if r.usage.context > LATE_COMPACTION_TOKENS]
+            heavy = [r for r in before if r.usage.context > LATE_COMPACTION]
             excess = sum(
                 view.ledger.take_prompt(
-                    r, r.usage.context - LATE_COMPACTION_TOKENS, False, CauseKind.COMPACTION
+                    r, r.usage.context - LATE_COMPACTION, False, CauseKind.COMPACTION
                 )
                 for r in heavy
             )
@@ -859,7 +950,7 @@ def late_compaction(view: SpikeView) -> list[Candidate]:
             evidence = [
                 *_compaction_lines(m, e),
                 _ev(
-                    f"{len(heavy)} turns above {fmt.approx(LATE_COMPACTION_TOKENS)}, "
+                    f"{len(heavy)} turns above {fmt.approx(LATE_COMPACTION)}, "
                     f"averaging {fmt.approx(mean)}",
                     m,
                     heavy[0],
@@ -882,13 +973,11 @@ def late_compaction(view: SpikeView) -> list[Candidate]:
                     excess,
                     f"Compaction ran late, at {fmt.approx(pre)} tokens",
                     evidence,
-                    "Compact or hand off near 400k tokens. Past that, each turn costs about "
-                    "twice what it did, and the work rarely needs the oldest half of the "
-                    "context.",
+                    _LATE_COMPACTION_ADVICE,
                     f"The {_who(m)} compacted at {fmt.approx(pre)} tokens, after "
-                    f"{len(heavy)} turns above {fmt.approx(LATE_COMPACTION_TOKENS)} "
+                    f"{len(heavy)} turns above {fmt.approx(LATE_COMPACTION)} "
                     f"(about {fmt.approx(mean)} each). The context above "
-                    f"{fmt.approx(LATE_COMPACTION_TOKENS)} cost {fmt.usd(excess)} on those "
+                    f"{fmt.approx(LATE_COMPACTION)} cost {fmt.usd(excess)} on those "
                     "turns.",
                 )
             )
@@ -1085,7 +1174,7 @@ def context_growth(view: SpikeView) -> list[Candidate]:
             else (m.requests[0].usage.context)
         )
         peak = max(r.usage.context for r in m.requests)
-        if peak < GROWTH_MIN_CONTEXT or peak < GROWTH_RATIO * max(ref, 1):
+        if peak < GROWTH_FLOOR or peak < GROWTH_RATIO * max(ref, 1):
             continue
         excess = 0.0
         for r in m.requests:
@@ -1110,19 +1199,20 @@ def context_growth(view: SpikeView) -> list[Candidate]:
                 max(m.requests, key=lambda r: r.usage.context),
             )
         )
-        for thr in GROWTH_THRESHOLDS:
+        for thr in CONTEXT_STEPS:
             if ref < thr <= peak:
                 r = next(r for r in m.requests if r.usage.context >= thr)
                 evidence.append(_ev(f"Crossed {fmt.approx(thr)} at {fmt.clock(r.timestamp)}", m, r))
         evidence.append(_ev(f"{fmt.approx(reads)} cache reads over {len(m.requests)} requests", m))
     else:
         peaks = [g[2] for g in grown]
-        thr = max(
-            (t for t in (100_000, *GROWTH_THRESHOLDS) if all(p >= t for p in peaks)),
-            default=GROWTH_MIN_CONTEXT,
-        )
+        past = [t for t in CONTEXT_STEPS if all(p >= t for p in peaks)]
         agents = len(grown)
-        title = f"{fmt.count_word(agents, True)} agents past {fmt.approx(thr)} context"
+        title = (
+            f"{fmt.count_word(agents, True)} agents past {fmt.approx(past[-1])} context"
+            if past
+            else f"{fmt.count_word(agents, True)} agents' contexts grew"
+        )
         starts = [g[0].requests[0].timestamp for g in grown]
         longest = max(g[0].requests[-1].timestamp - g[0].requests[0].timestamp for g in grown)
         m0 = grown[0][0]
@@ -1165,8 +1255,7 @@ def context_growth(view: SpikeView) -> list[Candidate]:
             excess,
             title,
             _cap(evidence),
-            "One task per agent. Hand off, /clear or compact before about 200k tokens: past "
-            "that, every turn rereads all of it.",
+            _GROWTH_ADVICE,
             summary,
         )
     ]
@@ -1720,6 +1809,72 @@ def polling(view: SpikeView) -> list[Candidate]:
 # In claiming order: each rule prices only the tokens the rules before it left (the
 # rewrites claim theirs in `find_rewrites`, before any rule), and context growth, the
 # cause without a single event, takes the rest.
+# --------------------------------------------------------------------------- rule 11: parallel work
+
+
+def _most_at_once(spans: Sequence[tuple[datetime, datetime]]) -> tuple[int, datetime | None]:
+    """The most spans open at one time, and the first time that many were."""
+    points = sorted([(a, 1) for a, _ in spans] + [(b, -1) for _, b in spans])
+    n = best = 0
+    when = None
+    for t, d in points:
+        n += d
+        if n > best:
+            best, when = n, t
+    return best, when
+
+
+_PARALLEL_ADVICE = (
+    "Run fewer subagents at once (three or four), each on a narrow task with a short "
+    "brief, and give routine ones a cheaper model: every agent rereads its own context "
+    "each turn, so the spend grows with how many run side by side."
+)
+
+
+def parallel_work(view: SpikeView) -> list[Candidate]:
+    """Rule 11: on a session spike where PARALLEL_MIN or more subagents work at once,
+    their own requests (what the other causes left of them) are the parallel work."""
+    if view.spike.scope != "session":
+        return []
+    subs = [m for m in view.members if m.thread.agent_id is not None]
+    if len(subs) < PARALLEL_MIN:
+        return []
+    spans = [(m.requests[0].timestamp, m.requests[-1].timestamp + PARALLEL_PAD) for m in subs]
+    peak, when = _most_at_once(spans)
+    if peak < PARALLEL_MIN or when is None:
+        return []
+    spent = sum(view.pricer.cost(r) for m in subs for r in m.requests)
+    excess = sum(
+        view.ledger.take(r, view.ledger.left(r), CauseKind.PARALLEL_SUBAGENTS)
+        for m in subs
+        for r in m.requests
+    )
+    if excess <= 0:
+        return []
+    types = Counter(m.session.agent_type(m.thread.agent_id) or "unknown type" for m in subs)
+    mix = ", ".join(f"{k} \u00d7{v}" for k, v in types.most_common(4))
+    turns = sum(len(m.requests) for m in subs)
+    m0 = subs[0]
+    evidence = [
+        _ev(f"{peak} subagents working at once at {fmt.clock(when)}", m0),
+        _ev(f"{len(subs)} subagents in the spike: {mix}", m0),
+        _ev(f"{turns} subagent requests in the spike, {fmt.usd(spent)} in all", m0),
+    ]
+    return [
+        Candidate(
+            CauseKind.PARALLEL_SUBAGENTS,
+            Confidence.LIKELY,
+            excess,
+            f"Parallel subagents' work, up to {peak} at once",
+            evidence,
+            _PARALLEL_ADVICE,
+            f"{len(subs)} subagents worked in this spike, up to {peak} at once, over "
+            f"{turns} requests. Their own work, apart from what the causes above claim, "
+            f"cost {fmt.usd(excess)}: the price of running them side by side.",
+        )
+    ]
+
+
 RULES: tuple[Callable[[SpikeView], list[Candidate]], ...] = (
     rewrite_candidates,
     late_compaction,
@@ -1729,6 +1884,7 @@ RULES: tuple[Callable[[SpikeView], list[Candidate]], ...] = (
     thinking_heavy,
     polling,
     context_growth,
+    parallel_work,  # last: the subagents' work no other cause claims
 )
 
 
