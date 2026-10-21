@@ -82,13 +82,14 @@ end of step *i*, so the last total is the window's total. At most six members pl
 `capcom.timeline.cumulative`). By category, web tools are counted with output.
 
 **Spikes**: `{count, excess_usd, explained, marks: [{n, key, t, end, kind, scope,
-session_id, title, agent_id, requests, cost_usd, excess_usd, cause, cause_label,
+session_id, title, project, project_path, agent_id, requests, cost_usd, excess_usd, cause, cause_label,
 confidence, headline}]}` from `capcom.timeline.find_spikes` over the window: `count`
 and `excess_usd` cover them all, `marks` the 12 largest by excess, numbered 1.. in time
 order (`t`, `end` in ms). The charts draw them as numbered markers linking to
 `/spikes?spike=<key>`. `cause`, `cause_label`, `confidence` and `headline` (the title)
 are the main cause from `capcom.explain` (its largest share of the excess), null when
-there is none; `explained` is false while `capcom.explain` is not available.
+there is none; `project` is the session's project label (`project_path` its full
+folder), null without a session; `explained` is false while `capcom.explain` is not available.
 
 `unavailable` lists the analysis modules that are not built yet; the parts that need
 them are `null`.
@@ -210,18 +211,21 @@ Sessions with a record in the last 10 minutes, fastest first:
 usd_last_10_min, usd_per_hour, last_seen}]}`. The rate is the last 10 minutes' spend
 times six.
 
-### `GET /api/spikes?days=14`
+### `GET /api/spikes?days=14&project=<label>`
 
 501 (`module` `timeline` or `explain`, milestone 3) until both are built. `days` is
-1 to 366.
+1 to 366. `project` (optional) is a project label, its full folder or its project
+folder; a project no session has is a 400 `bad_query`.
 
 ```
 {days, since, until, count, excess_usd,
  explained,                                     # spikes with a cause other than unexplained
+ project, project_path,                         # the filter, null without one
+ by_project: [{project, project_path, excess_usd, spikes}],   # largest first
  causes: [{cause, label, excess_usd, explanations}],   # largest first, unexplained last
  spikes: [Spike item + {n, window}]}
 Spike item = {key, kind, scope, start, end, session_id, agent_id, agent_type, title,
-              project, requests, cost_usd, baseline_usd, excess_usd,
+              project, project_path, requests, cost_usd, baseline_usd, excess_usd,
               cause, cause_label, confidence, headline,   # the main cause, as in Spikes
               explanations: [{cause, cause_label, confidence, confidence_label,
                               excess_usd, title, summary, advice, evidence: [Evidence]}]}
@@ -229,7 +233,11 @@ Evidence = {label, session_id, agent_id, timestamp, message_id, event_key}
 window = {start, step_s, usual: [usd], extra: [usd], spike_start, spike_end}   # ms
 ```
 
-`causes` add up the explanations of every spike of the window; `spikes` lists the 40
+`causes` add up the explanations of every spike of the window (of the project's
+spikes with `?project=`, which also narrows `count`, `excess_usd`, `explained` and
+`spikes`); `by_project` adds up the excess of every spike of the window per project,
+whatever the filter (`project` null for spikes without a session), so its sums equal
+the unfiltered `excess_usd`; `spikes` lists the 40
 largest by excess, numbered in time order. `scope` is `thread` (one agent thread,
 `agent_id` null for the main thread) or `session` (all threads of the session). The
 `window` is about 36 bars around the spike (30 minutes to 3 hours each side) of the

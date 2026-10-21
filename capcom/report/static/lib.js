@@ -267,11 +267,13 @@ export const SPIKE_KINDS = {
   slope_change: ['The spend rate rose and stayed up', 'Slope change'],
 };
 
-// A spike's headline and tag: its main cause when capcom.explain gave one, else
-// what capcom.timeline saw.
+// A spike's headline and tag: its largest named cause when capcom.explain gave
+// one, else what capcom.timeline saw; `rest` is a muted note when the unexplained
+// rest is more than half the excess.
 export function spikeText(m) {
   const kind = SPIKE_KINDS[m.kind] || [m.kind, m.kind];
-  return { title: m.headline || kind[0], tag: m.cause_label || kind[1], unexplained: m.cause === 'unexplained' };
+  const rest = m.mostly_unexplained && m.cause !== 'unexplained' ? `mostly unexplained: ${usd(m.unexplained_usd)} of ${usd(m.excess_usd)}` : null;
+  return { title: m.headline || kind[0], tag: m.cause_label || kind[1], unexplained: m.cause === 'unexplained', rest };
 }
 
 // The Spikes page for one spike: a window of whole days that starts on or before it.
@@ -285,4 +287,13 @@ export function spikeHref(key, startMs, days) {
   const back = Math.round((today - day0) / 864e5) + 1;
   const d = days || [1, 7, 14, 30, 90].find((x) => x >= back) || Math.min(366, back + 1);
   return `/spikes?days=${d}` + (key ? '&spike=' + encodeURIComponent(key) : '');
+}
+
+// A spike's project as a chip: the shared label, its full folder on hover; null
+// when the spike has no session. `onPick`, when given, makes it a filter button.
+export function projectChip(it, onPick) {
+  if (!it || !it.project) return null;
+  const title = it.project_path && it.project_path !== it.project ? `Project ${it.project_path}` : `Project ${it.project}`;
+  if (!onPick) return h('span.tag.proj', { text: it.project, title });
+  return h('button.tag.proj', { type: 'button', text: it.project, title: `${title}: show its spikes only`, onclick: (e) => { e.preventDefault(); e.stopPropagation(); onPick(it.project); } });
 }

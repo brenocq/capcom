@@ -273,3 +273,24 @@ def test_small_fan_out_shows_beside_growth_and_the_rest() -> None:
     assert fan.confidence is Confidence.CLEAR
     assert set(found) == {CauseKind.FAN_OUT, CauseKind.CONTEXT_GROWTH, CauseKind.UNEXPLAINED}
     assert sum(e.excess_usd for e in out) == pytest.approx(s.excess_usd)
+
+
+def test_spikes_view_uses_the_shared_project_names() -> None:
+    from pathlib import Path
+
+    from capcom.explain.cli import format_spikes
+    from capcom.timeline.groups import ProjectNames
+
+    w = World()
+    steady_main(w, 20)
+    for k in range(4):
+        new_agent(w, f"a{k}", 11 + k)
+    s = session_spike(w, 10, 20)
+    names = ProjectNames.build(
+        [("-home-u-Github-proj", "/home/u/Github/proj")],
+        openclaw_root=Path("/home/u/.openclaw"),
+        home=Path("/home/u"),
+    )
+    exps = explain(w.index, TABLE, [s])
+    text = format_spikes(exps, 5, {"s1": "-home-u-Github-proj"}, {}, names)
+    assert "proj (session-wide)" in text and "-home-u-Github-proj" not in text

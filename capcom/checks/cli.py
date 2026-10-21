@@ -11,6 +11,7 @@ from typing import TextIO
 from capcom.config import Config
 from capcom.cost.prices import load_prices
 from capcom.cost.top import window_start
+from capcom.timeline.groups import TEMPORARY_LABEL, ProjectNames
 from capcom.types import Finding, Index
 
 WIDTH = 88
@@ -35,12 +36,28 @@ def _wrap(text: str, indent: str, first: str | None = None) -> str:
     )
 
 
-def format_findings(findings: list[Finding], limit: int) -> str:
+def _scope_label(scope: str, names: ProjectNames | None, dirs: set[str]) -> str:
+    """A project scope named as on the website (ProjectNames); other scopes as is."""
+    if names is None:
+        return scope
+    named = scope in dirs or scope.startswith("temporary (") or scope == TEMPORARY_LABEL
+    return names.label(names.key(scope)) if named else scope
+
+
+def format_findings(
+    findings: list[Finding],
+    limit: int,
+    names: ProjectNames | None = None,
+    dirs: set[str] | None = None,
+) -> str:
     """Findings as numbered blocks: saving, title and scope, summary, advice, the
-    change to paste, and the first evidence lines."""
+    change to paste, and the first evidence lines. Project scopes (folders in `dirs`)
+    are named by `names`, the website's rule, when given."""
     blocks: list[str] = []
+    known = dirs if dirs is not None else set(names.paths) if names is not None else set()
     for i, f in enumerate(findings[: max(limit, 0)], 1):
-        lines = [f"{i:>2}. ${f.saving_usd_per_week:,.2f}/week  {f.title}  [{f.scope}]"]
+        scope = _scope_label(f.scope, names, known)
+        lines = [f"{i:>2}. ${f.saving_usd_per_week:,.2f}/week  {f.title}  [{scope}]"]
         lines.append(_wrap(f.summary, "    "))
         lines.append(_wrap(f.advice, "    "))
         if f.change:
@@ -100,10 +117,13 @@ def run_checks_view(
     if not findings:
         print("no findings in this window", file=out)
         return 0
-    print(format_findings(findings, limit), file=out)
+    sessions = list(index.sessions())
+    dirs = {s.project_dir for s in sessions}
+    names = ProjectNames.build(sessions, config.openclaw_root)
+    print(format_findings(findings, limit, names, dirs), file=out)
     from capcom.report.tally import savings_total  # the website's total, worded the same
 
-    total = savings_total(findings, {s.project_dir for s in index.sessions()})
+    total = savings_total(findings, dirs)
     if total is not None:
         print(f"\nTogether: {total['text']}.", file=out)
     return 0

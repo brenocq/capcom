@@ -2,7 +2,7 @@
 // spike in detail (its cause, the bars of its window, the evidence, what to change).
 
 import {
-  h, usd, stamp, hm, monthDay, seg, empty, setQuery, sessionHref, maxOf, spikeText, daysText, CONFIDENCE,
+  h, usd, stamp, hm, monthDay, seg, empty, setQuery, sessionHref, maxOf, spikeText, daysText, CONFIDENCE, projectChip,
 } from './lib.js';
 import { pendingBlock } from './sessions.js';
 
@@ -16,40 +16,67 @@ function thread(it) {
 }
 
 function where(it) {
-  return [it.title || it.project || (it.session_id ? it.session_id.slice(0, 8) : 'all sessions'), thread(it)].join(' · ');
+  return [it.title || (it.session_id ? it.session_id.slice(0, 8) : 'all sessions'), thread(it)].join(' · ');
 }
 
 export async function renderSpikes(main, r) {
   const days = Number(r.query.get('days')) || 14;
+  const project = r.query.get('project') || '';
   const head = h('header.head', null,
     h('div.titles', null, h('h1', { text: 'Spikes' })),
     h('div.controls', null, seg('Range', RANGES, days, (v) => setQuery({ days: v, spike: null }))));
   main.append(head);
-  const { data: d, block } = await pendingBlock('spikes', `days=${days}`);
+  const q = new URLSearchParams({ days: String(days) });
+  if (project) q.set('project', project);
+  const { data: d, block } = await pendingBlock('spikes', q.toString());
   if (block) {
     main.append(h('section.card', null, block));
     return;
   }
   const titles = head.firstChild;
+  const pick = (p) => setQuery({ project: p, spike: null });
+  if (d.project) {
+    titles.append(h('div.chips', null, h('span.note', { text: 'Project' }),
+      h('button.tag.proj.filter', { type: 'button', title: `${d.project_path || d.project}: show every project`, 'aria-label': `Remove the filter on project ${d.project}`, onclick: () => pick(null) },
+        d.project, h('span', { 'aria-hidden': 'true', text: ' ×' }))));
+  }
+  const inProject = d.project ? ` in ${d.project}` : '';
   if (!d.count) {
-    titles.append(h('p.sub', { text: `No spikes in ${daysText(days)}: the spend rose at its usual pace.` }));
+    titles.append(h('p.sub', { text: `No spikes${inProject} in ${daysText(days)}: the spend rose at its usual pace.` }));
     main.append(h('section.card', null, empty('Nothing jumped', 'A spike is a request far above its recent median, or a rate that rose and stayed up. None did in this window.')));
     return;
   }
   const times = d.count === 1 ? 'Once' : `${d.count} times`;
   titles.append(h('p.sub', null,
-    `${times} in ${daysText(days)} the spend jumped or its slope rose and stayed up. capcom matched ${d.explained} to a cause in the logs. Together they cost `,
+    `${times}${inProject} in ${daysText(days)} the spend jumped or its slope rose and stayed up. capcom matched ${d.explained} to a cause in the logs. Together they cost `,
     h('strong', { text: usd(d.excess_usd) }), ' more than your usual pace.'));
 
-  // extra cost by cause
+  // extra cost by cause, and by project (a project row filters the page to it)
+  const bars = [];
   if (d.causes.length) {
     const max = maxOf(d.causes.map((c) => c.excess_usd), 1e-9);
-    main.append(h('section.card', null, h('h2', { text: 'Extra cost by cause' }),
-      h('div.causes', null, d.causes.map((c) => h('div.cause', null,
+    bars.push(h('section.card.grow1', null, h('h2', { text: d.project ? `Extra cost by cause in ${d.project}` : 'Extra cost by cause' }),
+      h('div.causes.one', null, d.causes.map((c) => h('div.cause', null,
         h('span', { text: c.label }),
         h('div.track', null, h('div', { style: `width:${(c.excess_usd / max * 100).toFixed(1)}%;background:${c.cause === 'unexplained' ? 'var(--gray)' : 'var(--accent)'}` })),
         h('span.mono', { text: usd(c.excess_usd) }))))));
   }
+  const byProject = d.by_project || [];
+  if (byProject.length) {
+    const max = maxOf(byProject.map((p) => p.excess_usd), 1e-9);
+    bars.push(h('section.card.grow1', null, h('h2', { text: 'Extra cost by project' }),
+      h('div.causes.one', null, byProject.map((p) => {
+        const on = d.project && p.project === d.project;
+        const label = p.project || 'no session';
+        const row = [
+          h('span.plabel', { text: label, title: p.project_path || label }),
+          h('div.track', null, h('div', { style: `width:${(p.excess_usd / max * 100).toFixed(1)}%;background:${d.project && !on ? 'var(--gray)' : 'var(--accent)'}` })),
+          h('span.mono', { text: usd(p.excess_usd) })];
+        if (!p.project) return h('div.cause', null, ...row);
+        return h('button.cause.pick', { type: 'button', 'aria-pressed': String(Boolean(on)), title: `${p.project_path || label}: ${p.spikes} spike${p.spikes === 1 ? '' : 's'}`, onclick: () => pick(on ? null : p.project) }, ...row);
+      }))));
+  }
+  if (bars.length) main.append(h('div.row-wrap', null, ...bars));
 
   // the list and the selected spike
   const items = d.spikes;
@@ -62,7 +89,8 @@ export async function renderSpikes(main, r) {
       h('span', { class: txt.unexplained || !it.cause ? 'n gray' : 'n', text: String(it.n) }),
       h('span.body', null,
         h('span.row', null, h('span.t', { text: txt.title }), h('span.plus', { text: '+' + usd(it.excess_usd) })),
-        h('span.meta', { text: `${when(it.start)} · ${where(it)}` })));
+        txt.rest ? h('span.rest', { text: txt.rest }) : null,
+        h('span.meta', null, projectChip(it), h('span', { text: `${when(it.start)} · ${where(it)}` }))));
   }));
   main.append(h('div.row-wrap', { style: 'align-items:flex-start' }, list, detail(sel)));
   const hidden = d.count - items.length;
@@ -75,15 +103,19 @@ export async function renderSpikes(main, r) {
 function detail(it) {
   const txt = spikeText(it);
   const causes = it.explanations || [];
-  const top = causes.length ? causes.reduce((a, b) => (b.excess_usd > a.excess_usd ? b : a)) : null;
+  const named = causes.filter((c) => c.cause !== 'unexplained');
+  const pool = named.length ? named : causes;
+  const top = pool.length ? pool.reduce((a, b) => (b.excess_usd > a.excess_usd ? b : a)) : null;
   const conf = top ? top.confidence : null;
   const box = h('section.card.detail');
   box.append(h('div.tags', null,
+    projectChip(it),
     h('span.tag', { text: txt.tag }),
     conf ? h('span', { class: `tag conf ${conf}`, text: top.confidence_label || CONFIDENCE[conf] || conf }) : null,
     it.scope === 'session' ? h('span.tag', { text: 'session-wide', title: 'Found over all the threads of the session together, where a fan-out of subagents shows.' }) : null,
     h('span.note', { text: `${when(it.start)} · ${where(it)}` })));
   box.append(h('div.split', { style: 'align-items:baseline' }, h('h2.big2', { text: txt.title }), h('span.excess', { text: '+' + usd(it.excess_usd) })));
+  if (txt.rest) box.append(h('p.note', { style: 'margin:0', text: txt.rest[0].toUpperCase() + txt.rest.slice(1) + '.' }));
   const body = top && top.summary ? top.summary
     : `${it.requests} request${it.requests === 1 ? '' : 's'} cost ${usd(it.cost_usd)}, where the usual pace would have spent ${usd(it.baseline_usd)}.`;
   box.append(h('p.para', { text: body }));

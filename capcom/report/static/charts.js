@@ -69,7 +69,8 @@ export function xAxis(ticks, x0, x1, left, xOf) {
 // ------------------------------------------------------------------ band chart
 
 // Cumulative lines, largest first, each with a band down to the next line, filled
-// in its own color with a vertical fade; the total on top in the text color.
+// in its own color with a vertical fade; the total on top in the text color, with
+// a gray band down to the largest series and its amount labeled at its right end.
 // opts: {times, members: [{label, values, color}], total, start, end, now,
 //        height, left, timeLabel(t), marks: [{n, t, href, aria}]}
 export function bandChart(opts) {
@@ -108,13 +109,26 @@ export function bandChart(opts) {
     plot.append(h('div.nowline', { style: `left:${f}` }), h('span.nowlab', { style: `left:${f}`, text: 'now' }));
   }
   // spike markers: numbered, on the total line at the spike's start, linking to /spikes
+  const placed = [];
   for (const m of opts.marks || []) {
     if (m.t < x0 || m.t > x1) continue;
     let i = times.findIndex((tm) => tm >= m.t);
     if (i < 0) i = times.length - 1;
-    const left = ((m.t - x0) / (x1 - x0) * 100).toFixed(2) + '%';
-    const top = ((1 - tot[i] / ymax) * 100).toFixed(2) + '%';
+    placed.push({ fx: (m.t - x0) / (x1 - x0), fy: 1 - tot[i] / ymax });
+    const left = (placed[placed.length - 1].fx * 100).toFixed(2) + '%';
+    const top = (placed[placed.length - 1].fy * 100).toFixed(2) + '%';
     plot.append(h('a.spikemark', { href: m.href || '/spikes', style: `left:${left};top:${top}`, 'aria-label': m.aria || `Spike ${m.n}`, title: m.aria || '', text: String(m.n) }));
+  }
+  // the total at the total line's end: a dot and the amount, inside the plot and
+  // clear of the markers (above the line, below it near a marker, beside the end at the very top)
+  const end = tot[tot.length - 1];
+  if (end > 0) {
+    const fx = (times[times.length - 1] - x0) / (x1 - x0), fy = 1 - end / ymax;
+    const near = placed.some((p) => fx - p.fx < 0.16 && fx - p.fx > -0.04);
+    const place = near ? '.below' : fy < 0.1 ? '.beside' : '';
+    const pos = `left:${(fx * 100).toFixed(2)}%;top:${(fy * 100).toFixed(2)}%`;
+    plot.append(h('span.enddot', { style: pos }),
+      h('span.endlab' + place + (fx < 0.15 ? '.leftward' : ''), { style: pos, text: usd(end, end >= 100 ? 0 : 2) }));
   }
   const guide = h('div.guide', { hidden: true });
   plot.append(guide);
