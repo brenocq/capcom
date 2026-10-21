@@ -6,7 +6,7 @@ from __future__ import annotations
 import itertools
 import uuid
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -227,6 +227,14 @@ class World:
 
 def cost(r: Request) -> float:
     return price(r, TABLE).total
+
+
+def prefix(r: Request) -> float:
+    """What fan-out charges for an agent's first request: its cache writes and its
+    uncached input."""
+    u = r.usage
+    part = Usage(input=u.input, cache_write_5m=u.cache_write_5m, cache_write_1h=u.cache_write_1h)
+    return cost(replace(r, usage=part))
 
 
 def spike(
