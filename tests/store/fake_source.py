@@ -163,6 +163,8 @@ class FakeSource:
                     batch.skipped += 1
                 else:
                     batch.records.append(rec)
+                    if batch.first_timestamp is None and isinstance(rec, (Request, Event)):
+                        batch.first_timestamp = rec.timestamp  # first in file order
                 if batch.lines >= self.batch_lines:
                     yield batch
                     batch = Batch(records=[], end_offset=pos)

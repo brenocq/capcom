@@ -1,5 +1,6 @@
-"""Schemas 2 -> 3 -> 4: cost_states gains its times (ts, then next_ts) and the index
-its shared_replies, in place, and the files with cost-states are read again."""
+"""Schemas 2 -> 3 -> 4 -> 5: cost_states gains its times (ts, then next_ts) and the
+index its shared_replies, in place, and the files with cost-states and every file of
+their sessions are read again."""
 
 from __future__ import annotations
 
@@ -105,7 +106,8 @@ def test_v2_index_is_migrated_in_place_and_reread(config: Config) -> None:
     with open_index(config.index_path) as ix:
         assert ix.file_state(main).offset == 0  # type: ignore[union-attr]  # queued
         assert ix.file_state(gone).offset == 0  # type: ignore[union-attr]
-        assert ix.file_state(sub).offset == sub.stat().st_size  # type: ignore[union-attr]
+        # A subagent log of a session with a cost-state: queued too (its replies).
+        assert ix.file_state(sub).offset == 0  # type: ignore[union-attr]
         got = {c.session_id: c for c in ix.last_cost_states()}
         assert {s: (c.total_cost_usd, c.timestamp) for s, c in got.items()} == {
             "s0": (0.25, None),
@@ -118,7 +120,8 @@ def test_v2_index_is_migrated_in_place_and_reread(config: Config) -> None:
 
     source = FakeSource()
     stats = run_scan(config, quiet=True, source=source)
-    assert source.calls == [(main, 0)]  # only the queued file, from 0, without a reset
+    # Only the queued files, from 0, without a reset.
+    assert sorted(source.calls) == sorted([(main, 0), (sub, 0)])
     assert stats.files_reset == 0
     with open_index(config.index_path, readonly=True) as ix:
         got = {c.session_id: c for c in ix.last_cost_states()}
@@ -175,7 +178,7 @@ def test_v3_index_is_migrated_in_place_and_reread(config: Config) -> None:
         assert next(ix.last_cost_states()).next_timestamp is None
     con = sqlite3.connect(config.index_path)
     assert con.execute("SELECT version FROM schema_version").fetchall() == [(SCHEMA_VERSION,)]
-    assert SCHEMA_VERSION == 4
+    assert SCHEMA_VERSION == 5
     con.close()
 
     source = FakeSource(batch_lines=2)  # the cost-state ends a batch
@@ -184,8 +187,9 @@ def test_v3_index_is_migrated_in_place_and_reread(config: Config) -> None:
     with open_index(config.index_path, readonly=True) as ix:
         (cs,) = ix.last_cost_states()
         assert (cs.offset, cs.timestamp, cs.next_timestamp) == (cost_pos, at(1), at(3))
-        # The reread replaced the fork's row of m1: both sessions hold it.
-        assert ix.shared_replies("s1") == ix.shared_replies("s3") == 1
+        # The reread replaced the fork's row of m1: both logs hold it, and the fork,
+        # which lost the row, is the one missing it.
+        assert (ix.shared_replies("s1"), ix.shared_replies("s3")) == (0, 1)
         assert sorted(r.message_id for r in ix.requests()) == ["m1", "m2"]
 
 
@@ -202,5 +206,53 @@ def test_v2_index_migrates_through_v3(config: Config) -> None:
     con = sqlite3.connect(config.index_path)
     cols = [r[1] for r in con.execute("PRAGMA table_info(cost_states)")]
     assert cols[-2:] == ["ts", "next_ts"]
-    assert con.execute("SELECT version FROM schema_version").fetchall() == [(4,)]
+    assert con.execute("SELECT version FROM schema_version").fetchall() == [(SCHEMA_VERSION,)]
     con.close()
+
+
+def test_v4_index_rereads_every_file_of_sessions_with_cost_states(config: Config) -> None:
+    project = config.projects_dir / "-home-u-p"
+    main = project / "s1.jsonl"
+    sub = project / "s1" / "subagents" / "agent-a1.jsonl"
+    fork = config.projects_dir / "-tmp-x" / "s3.jsonl"  # a copy holding reply m5
+    write_lines(main, {"t": "req", "id": "m1", "ts": 1, "out": 5})
+    cost_pos = main.stat().st_size
+    write_lines(main, {"t": "cost", "usd": 0.5, "ts": 1}, {"t": "req", "id": "m2", "ts": 3})
+    write_lines(sub, {"t": "req", "id": "m5", "ts": 2, "out": 5}, {"t": "req", "id": "m6", "ts": 2})
+    write_lines(fork, {"t": "req", "id": "m5", "ts": 2, "out": 5})
+
+    # The index as version 4 left it: m5's row is the fork's, and the share through
+    # the subagent log was never seen (3 -> 4 reread only files with cost-states).
+    config.index_path.parent.mkdir(parents=True)
+    con = sqlite3.connect(config.index_path)
+    con.executescript(index_module._SCHEMA)
+    con.execute("INSERT INTO schema_version (version) VALUES (4)")
+    for f in (main, sub, fork):
+        _file_row(con, f, f.stat().st_size)
+    _request_row(con, "m1", main, 5)
+    _request_row(con, "m2", main, 0)
+    _request_row(con, "m5", fork, 5)
+    _request_row(con, "m6", sub, 0)
+    con.execute("UPDATE requests SET session_id = 's3' WHERE message_id = 'm5'")
+    con.execute(
+        "INSERT INTO cost_states (file, pos, session_id, main, total_cost_usd, ts, next_ts) "
+        "VALUES (?, ?, 's1', 1, 0.5, 0, 0)",
+        (str(main), cost_pos),
+    )
+    con.commit()
+    con.close()
+
+    with open_index(config.index_path) as ix:
+        assert ix.file_state(main).offset == 0  # type: ignore[union-attr]
+        assert ix.file_state(sub).offset == 0  # type: ignore[union-attr]
+        assert ix.file_state(fork).offset == fork.stat().st_size  # type: ignore[union-attr]
+        assert ix.shared_replies("s1") == ix.shared_replies("s3") == 0
+
+    source = FakeSource(batch_lines=1)
+    run_scan(config, quiet=True, source=source)
+    assert sorted(source.calls) == sorted([(main, 0), (sub, 0)])
+    with open_index(config.index_path, readonly=True) as ix:
+        (cs,) = ix.last_cost_states()
+        assert (cs.timestamp, cs.next_timestamp) == (at(1), at(3))  # filled again
+        # The subagent log took m5's row back from the fork: s3 now lacks it.
+        assert (ix.shared_replies("s1"), ix.shared_replies("s3")) == (0, 1)

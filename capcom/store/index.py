@@ -18,15 +18,16 @@ Tables (schema version in `schema_version`):
 - cost_states: one row per (file, pos), flagged when it comes from its session's
   main log; the last per session is the main log's highest pos. `next_ts` is the time
   of the first timestamped record after the line: the source fills it within a parse
-  call, and `apply` fills what is still missing from the file's next batch
+  call, and `apply` fills what is still missing from the next batch's first_timestamp
 - shared_replies: (session_id, message_id) of each reply found in the logs of two
   sessions (a forked or copied session). `requests` keeps one row per message_id, so
   the session whose row was replaced lost that request; found when a write replaces a
   row of another session, and kept as history (forget_file leaves it)
 
-Version 2 lacked cost_states.ts, version 3 cost_states.next_ts and shared_replies: a
-writable open migrates them in place (the index keeps history the logs may have lost)
-and queues the files with cost-states for a reread.
+Version 2 lacked cost_states.ts, version 3 cost_states.next_ts and shared_replies,
+and version 4 filled next_ts from the earliest time of the next batch: a writable open
+migrates them in place (the index keeps history the logs may have lost) and queues the
+files with cost-states, and every file of their sessions, for a reread.
 
 Times are stored as integer microseconds since the Unix epoch, UTC.
 """
@@ -61,7 +62,7 @@ from capcom.types import (
     Usage,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _US = timedelta(microseconds=1)
@@ -446,11 +447,7 @@ class SqliteIndex:
         sess: list[SessionInfo] = []
         agents: list[AgentInfo] = []
         costs: list[tuple[Any, ...]] = []
-        earliest: datetime | None = None  # the batch's earliest record time
         for r in batch.records:
-            t = _record_time(r)
-            if t is not None and (earliest is None or t < earliest):
-                earliest = t
             if isinstance(r, Request):
                 u = r.usage
                 row = [
@@ -522,15 +519,15 @@ class SqliteIndex:
             else:
                 raise TypeError(f"not a capcom record: {type(r).__name__}")
         with self._tx() as cur:
-            if earliest is not None:
+            if batch.first_timestamp is not None:
                 # This file's cost-states before this batch that no record followed yet:
-                # every record of this batch comes after them in the file.
+                # the batch's first timestamped record, in file order, is the next one.
                 row = cur.execute("SELECT pos FROM files WHERE path = ?", (file,)).fetchone()
                 if row is not None and row[0] > 0:
                     cur.execute(
                         "UPDATE cost_states SET next_ts = ? "
                         "WHERE file = ? AND next_ts IS NULL AND pos < ?",
-                        (_aware("timestamp", earliest), file, row[0]),
+                        (_aware("first_timestamp", batch.first_timestamp), file, row[0]),
                     )
             if reqs:
                 self._write_requests(cur, reqs)
@@ -713,14 +710,15 @@ class SqliteIndex:
         self, session_id: str, since: datetime | None = None, until: datetime | None = None
     ) -> int:
         """How many replies of `session_id` with a time in [since, until) are also in
-        another session's log (its request row may be the other session's)."""
+        another session's log and whose request row that other session holds, so this
+        session is missing them (the session that kept the row counts none)."""
         where, args = _range(since, until, None)
         where = [f"r.{w}" for w in where]
         sql = (
             "SELECT COUNT(*) FROM shared_replies s JOIN requests r USING (message_id) "
-            f"WHERE {' AND '.join(['s.session_id = ?', *where])}"
+            f"WHERE {' AND '.join(['s.session_id = ?', 'r.session_id != ?', *where])}"
         )
-        return int(self._con.execute(sql, [session_id, *args]).fetchone()[0])
+        return int(self._con.execute(sql, [session_id, session_id, *args]).fetchone()[0])
 
 
 def _session_row(file: str, s: SessionInfo, seq: int) -> tuple[Any, ...]:
@@ -741,14 +739,6 @@ def _agent_row(file: str, a: AgentInfo, seq: int) -> tuple[Any, ...]:
     )
     pairs = [x for v in vals for x in (v, None if v is None else seq)]
     return (file, a.agent_id, *pairs)
-
-
-def _record_time(r: object) -> datetime | None:
-    if isinstance(r, (Request, Event)):
-        return r.timestamp
-    if isinstance(r, SessionInfo):
-        return r.first_seen
-    return None
 
 
 def _migrate_2_to_3(con: sqlite3.Connection) -> None:
@@ -778,9 +768,38 @@ def _migrate_3_to_4(con: sqlite3.Connection) -> None:
         if con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 3:
             con.execute("ALTER TABLE cost_states ADD COLUMN next_ts INTEGER")
             con.execute(_SHARED)
-            con.execute("UPDATE files SET pos = 0 WHERE path IN (SELECT file FROM cost_states)")
+            _queue_cost_sessions(con)
             con.execute("DELETE FROM schema_version")
             con.execute("INSERT INTO schema_version (version) VALUES (4)")
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
+    con.execute("COMMIT")
+
+
+def _queue_cost_sessions(con: sqlite3.Connection) -> None:
+    """Set to 0 the offset of every file with cost-states and of every file holding
+    requests of a session with a cost-state (its subagent logs too), so the next scan
+    rereads them: rows upsert by their keys, next_ts is filled again, and a reply
+    another session's row holds is found as the reread replaces it."""
+    con.execute("UPDATE files SET pos = 0 WHERE path IN (SELECT file FROM cost_states)")
+    con.execute(
+        "UPDATE files SET pos = 0 WHERE path IN (SELECT file FROM requests "
+        "WHERE session_id IN (SELECT session_id FROM cost_states))"
+    )
+
+
+def _migrate_4_to_5(con: sqlite3.Connection) -> None:
+    """No new column: version 4 filled next_ts from the earliest time of the file's
+    next batch (not the first in file order) and, when migrated from 3, missed the
+    replies shared through subagent logs. Queue the same files as 3 -> 4 for a
+    reread. One transaction."""
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        if con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 4:
+            _queue_cost_sessions(con)
+            con.execute("DELETE FROM schema_version")
+            con.execute("INSERT INTO schema_version (version) VALUES (5)")
     except BaseException:
         con.execute("ROLLBACK")
         raise
@@ -818,6 +837,8 @@ def open_index(path: Path, readonly: bool = False) -> SqliteIndex:
                     _migrate_2_to_3(con)
                 if con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 3:
                     _migrate_3_to_4(con)
+                if con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 4:
+                    _migrate_4_to_5(con)
         row = con.execute("SELECT MAX(version) FROM schema_version").fetchone()
         version = row[0] if row else None
         if version != SCHEMA_VERSION:
