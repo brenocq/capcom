@@ -216,7 +216,7 @@ PARAMS: dict[str, tuple[str, ...]] = {
     "spend": ("days", "group"),
     "sessions": ("days", "limit", "sort", "q"),
     "session": (),
-    "spikes": ("days", "spike", "project"),
+    "spikes": ("days", "spike", "project", "cause"),
     "checks": ("days",),
     "limits": ("days",),
 }

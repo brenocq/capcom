@@ -25,8 +25,8 @@ Conventions:
 - Times are ISO 8601 strings in the machine's local time zone, with their offset
   (spike starts and ends, chart markers, pauses, compactions, threads' first and
   last request included). The only epoch milliseconds (`ms`) are the x values of
-  charts: series `times`, the session's per-request column `requests.t`, a spike
-  `window`'s `start`, `spike_start` and `spike_end`, and the limits' point arrays
+  charts: series `times`, the session's per-request column `requests.t`, and the
+  limits' point arrays
   (`fan`, `history`, `points`). Dates without a time (`regime.day`) are `YYYY-MM-DD`.
 - "Today" and day windows start at local midnight; a window of `days` holds that many
   whole local days, today included.
@@ -275,7 +275,7 @@ Spike item = {key, kind, scope, start, end, session_id, agent_id, agent_type, ti
               explanations: [{cause, cause_label, confidence, confidence_label,
                               excess_usd, title, summary, advice, evidence: [Evidence]}]}
 Evidence = {label, session_id, agent_id, timestamp, message_id, event_key}
-window = {start, step_s, usual: [usd], extra: [usd], spike_start, spike_end}   # a chart: ms
+window = {start, step_s, usual: [usd], extra: [usd], spike_start, spike_end}   # ISO times
 ```
 
 `causes` add up the explanations of every spike of the window (of the project's

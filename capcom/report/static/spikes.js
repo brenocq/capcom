@@ -165,7 +165,8 @@ function detail(it) {
 
 // Bars around the spike: the usual pace in gray, the extra above it in the accent.
 function windowChart(it) {
-  const w = it.window;
+  // ISO times from the API, epoch ms for the bar arithmetic
+  const w = { ...it.window, start: Date.parse(it.window.start), spike_start: Date.parse(it.window.spike_start), spike_end: Date.parse(it.window.spike_end) };
   const n = w.usual.length;
   const totals = w.usual.map((u, i) => u + w.extra[i]);
   const ymax = maxOf(totals, 1e-6) * 1.1;

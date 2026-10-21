@@ -5,7 +5,7 @@ bugs. All data here is made up."""
 from __future__ import annotations
 
 import io
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -40,6 +40,7 @@ from tests.report.conftest import (
     FAKE,
     NOW,
     TABLE,
+    Client,
     _log,
     _put,
     build_index,
@@ -47,6 +48,7 @@ from tests.report.conftest import (
     req,
     usd,
 )
+from tests.report.test_review import _client
 
 GAMMA = "-home-user-gamma"
 
@@ -285,7 +287,9 @@ def test_spikes_times_causes_and_largest(spikes_index: Path) -> None:
     assert data["count"] >= 2
     items = data["spikes"]
     assert all(isinstance(it["start"], str) and isinstance(it["end"], str) for it in items)
-    assert all(isinstance(it["window"]["spike_start"], int) for it in items)  # a chart: ms
+    for it in items:  # the detail window is ISO too
+        win = it["window"]
+        assert datetime.fromisoformat(win["start"]) <= datetime.fromisoformat(win["spike_start"])
     big = max(items, key=lambda it: it["excess_usd"])
     assert data["largest"] == big["key"]
     colors = {c["cause"]: c["color"] for c in data["causes"]}
@@ -391,3 +395,23 @@ def test_requests_after_the_last_cost_state(tmp_path: Path) -> None:
         load_config(), 20, days=7, index=open_index(path, readonly=True), out=out, now=NOW, tz=UTC
     )
     assert "later requests not in it" in out.getvalue()
+
+
+@pytest.fixture
+def cause_client(spikes_index: Path) -> Iterator[Client]:
+    analysis = Analysis(
+        capcom.timeline.cumulative,
+        capcom.timeline.per_step,
+        real_spikes,
+        _two_causes,
+        FAKE.checks_fn,
+    )
+    yield from _client(spikes_index, analysis)
+
+
+def test_cause_filter_is_in_the_cache_key(cause_client: Client) -> None:
+    """Two causes through the server, one after the other: two different replies."""
+    _, a, _ = cause_client.get("/api/spikes?days=1&cause=tool_wait_expiry")
+    _, b, _ = cause_client.get("/api/spikes?days=1&cause=parallel_subagents")
+    assert a["cause"] == "tool_wait_expiry" and b["cause"] == "parallel_subagents"
+    assert {s["key"] for s in a["spikes"]} != {s["key"] for s in b["spikes"]}

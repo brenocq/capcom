@@ -1104,12 +1104,12 @@ def _spike_window(ctx: Context, sp: Spike) -> dict[str, Any]:
         extra[k] += x
         usual[k] += cost - x
     return {
-        "start": ms(lo),
+        "start": iso(lo, ctx.tz),
         "step_s": int(step.total_seconds()),
         "usual": [round(v, 6) for v in usual],
         "extra": [round(v, 6) for v in extra],
-        "spike_start": ms(sp.start),
-        "spike_end": ms(sp.end),
+        "spike_start": iso(sp.start, ctx.tz),
+        "spike_end": iso(sp.end, ctx.tz),
     }
 
 
