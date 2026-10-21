@@ -2,22 +2,28 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import sys
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TextIO
 
 from capcom.config import Config
 from capcom.cost.calibrate import TARGET_SPREAD, calibrate
 from capcom.cost.model import price
-from capcom.cost.prices import is_placeholder, load_prices, normalize
+from capcom.cost.prices import ZERO_MODEL, is_placeholder, load_prices, normalize
 from capcom.types import Calibration, Index, PriceTable, Request
 
 GROUPINGS = ("project", "session", "agent", "model", "day")
 TEMPORARY = "(temporary)"  # project folders under /tmp, grouped as one
+# A folder under /tmp that names the project it was made for: Claude Code's
+# scratchpads, /tmp/claude-<uid>/<project folder>/<session id>/..., hold the
+# project's own folder name (itself starting with "-") before a session id.
+_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_TEMP_OF_PROJECT = re.compile(rf"^-tmp-.+?-(-[^-].*?)-{_UUID}(?:-|$)")
 MAIN_THREAD = "main"
 
 
@@ -37,7 +43,9 @@ class Row:
     usd_cache_write: float = 0.0
     usd_output: float = 0.0  # output and web tools
     estimated_output: int = 0
-    inexact_price: int = 0
+    inexact_price: int = 0  # priced at a related model's rates
+    unpriced: int = 0  # no price at all: counted at $0
+    unpriced_models: set[str] = field(default_factory=set)
 
     @property
     def total(self) -> float:
@@ -45,11 +53,20 @@ class Row:
 
     @property
     def flags(self) -> str:
-        return ("~" if self.estimated_output else "") + ("?" if self.inexact_price else "")
+        return (
+            ("~" if self.estimated_output else "")
+            + ("?" if self.inexact_price else "")
+            + ("!" if self.unpriced else "")
+        )
 
 
 def project_label(project_dir: str) -> str:
-    return TEMPORARY if project_dir.startswith("-tmp-") else project_dir
+    """The folder name; a temporary folder under /tmp is "(temporary)", or
+    "temporary (<project folder>)" when its name holds the project it was made for."""
+    if not project_dir.startswith("-tmp-"):
+        return project_dir
+    m = _TEMP_OF_PROJECT.match(project_dir)
+    return f"temporary ({m.group(1)})" if m else TEMPORARY
 
 
 def group_key(
@@ -108,7 +125,11 @@ def aggregate(
         row.usd_cache_write += cost.cache_write
         row.usd_output += cost.output + cost.web
         row.estimated_output += req.output_estimated
-        row.inexact_price += not cost.exact_price
+        if cost.priced_as == ZERO_MODEL:
+            row.unpriced += 1
+            row.unpriced_models.add(normalize(req.model) or "(no model name)")
+        elif not cost.exact_price:
+            row.inexact_price += 1
     if by == "day":
         return sorted(rows.values(), key=lambda r: r.key, reverse=True)
     return sorted(rows.values(), key=lambda r: (-r.total, r.key))
@@ -184,8 +205,10 @@ def format_top(rows: list[Row], by: str, limit: int) -> str:
             "usd_output",
             "estimated_output",
             "inexact_price",
+            "unpriced",
         ):
             setattr(total, name, getattr(total, name) + getattr(r, name))
+        total.unpriced_models |= r.unpriced_models
     body.append(
         [
             total.label,
@@ -205,11 +228,19 @@ def format_top(rows: list[Row], by: str, limit: int) -> str:
     text = _table(header, body)
     notes = ["API-equivalent cost at the list prices; not the bill."]
     if total.estimated_output:
-        notes.append(f"~ output estimated from content length (requests: {total.estimated_output})")
+        share = total.estimated_output / total.requests if total.requests else 0.0
+        notes.append(
+            f"~ {share:.0%} of requests ({total.estimated_output}) have output estimated "
+            "from content length; output totals are lower bounds"
+        )
     if total.inexact_price:
         notes.append(
-            f"? priced as the closest model family, or unpriced (requests: {total.inexact_price})"
+            f"? {total.inexact_price} requests of models the price table lacks, priced at "
+            "the closest version of the same family (or without a fast-mode rate)"
         )
+    if total.unpriced:
+        names = ", ".join(sorted(total.unpriced_models))
+        notes.append(f"! {total.unpriced} requests of models with no price, counted at $0: {names}")
     if limit > 0 and len(rows) > limit:
         notes.append(f"{len(rows) - limit} more rows (--limit)")
     return text + "\n\n" + "\n".join(notes)
@@ -331,12 +362,44 @@ def format_calibration(checks: list[Calibration], titles: Mapping[str, str], lim
             "comparable sessions by model:\n"
             + _table(["model", "cost-state", "capcom", "spread"], rows)
         )
+    parts.append(_by_reason([c for c in checks if not c.comparable]))
     parts.append(
         "Not comparable: windows with calls the transcript lacks (away summaries, compactions,\n"
-        "WebFetch / WebSearch side calls), estimated output, a model only cost-state knows,\n"
-        "or under $0.10. cost-state counts from its process start (startTime) only."
+        "WebFetch / WebSearch side calls, or cost-state's uncached input far above the log's),\n"
+        "replies another session's log also holds (a forked or copied session), estimated\n"
+        "output, a model only cost-state knows, or under $0.10. cost-state counts from its\n"
+        "process start (startTime) to the first record after it."
     )
     return "\n\n".join(parts)
+
+
+def _by_reason(checks: list[Calibration]) -> str:
+    """The non-comparable sessions and their dollars per reason, and the part where
+    that reason is the only one."""
+    if not checks:
+        return "not comparable: none"
+    per: dict[str, list[float]] = defaultdict(lambda: [0, 0.0, 0.0, 0, 0.0])
+    for c in checks:
+        for reason in c.reasons:
+            row = per[reason]
+            row[0] += 1
+            row[1] += c.claude_code_usd
+            row[2] += c.capcom_usd
+            if len(c.reasons) == 1:
+                row[3] += 1
+                row[4] += c.claude_code_usd
+    rows = [
+        [reason, str(int(n)), usd(cc), usd(mine), _spread(mine, cc), str(int(n1)), usd(cc1)]
+        for reason, (n, cc, mine, n1, cc1) in sorted(per.items(), key=lambda kv: (-kv[1][1], kv[0]))
+    ]
+    cc = sum(c.claude_code_usd for c in checks)
+    head = (
+        f"not comparable: {len(checks)} sessions, cost-state {usd(cc)}. By reason: a session "
+        "with several reasons counts under each\n(the rows add up to more); the last two "
+        "columns are the sessions with that reason alone."
+    )
+    header = ["reason", "sessions", "cost-state", "capcom", "spread", "alone", "cost-state"]
+    return head + "\n" + _table(header, rows)
 
 
 def run_calibrate(

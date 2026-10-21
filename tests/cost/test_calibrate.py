@@ -1,4 +1,5 @@
-from datetime import timedelta
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -9,6 +10,24 @@ from capcom.types import CostState, Event, EventKind, ModelUsage
 from .fakes import T0, FakeIndex, at, req
 
 T = load_prices()
+
+
+@dataclass
+class SharedIndex(FakeIndex):
+    """A FakeIndex with the store's optional `shared_replies` count."""
+
+    shared: dict[str, list[datetime]] = field(default_factory=dict)
+
+    def shared_replies(
+        self, session_id: str, since: datetime | None = None, until: datetime | None = None
+    ) -> int:
+        return sum(
+            1
+            for t in self.shared.get(session_id, [])
+            if (since is None or t >= since) and (until is None or t < until)
+        )
+
+
 M = 1_000_000
 START_MS = int(T0.timestamp() * 1000)
 
@@ -68,20 +87,69 @@ def test_without_a_start_time_the_session_is_not_comparable() -> None:
     assert cal.reasons == ("no startTime",)
 
 
-def test_requests_after_the_cost_state_are_left_out() -> None:
-    last = at(5)
+def test_the_window_ends_at_the_next_record_after_the_cost_state() -> None:
+    last, nxt = at(5), at(6)
+    reqs = [
+        req("s1", when=at(1), output=M),
+        req("s1", when=last, output=M),  # the record just before the cost-state
+        # Written after the last record before the line (a background subagent, or
+        # records out of order), but before the next one: cost-state counts it.
+        req("s1", when=last + timedelta(seconds=0.5), agent="a1", output=M),
+        req("s1", when=nxt, output=M),  # the next record: the end, exclusive
+    ]
+    late = [Event(EventKind.AWAY, "s1", None, at(9), "late")]  # after it, too
+    state = replace(cs("s1", 60.0, when=last, claude_opus_5_5=60.0), next_timestamp=nxt)
+    [cal] = calibrate(FakeIndex(reqs=reqs, evs=late, costs=[state]), T)
+    assert cal.capcom_usd == pytest.approx(60.0)
+    assert cal.comparable
+    # No record after the cost-state yet: no upper cut.
+    open_end = replace(state, next_timestamp=None)
+    [cal] = calibrate(FakeIndex(reqs=reqs, costs=[open_end]), T)
+    assert cal.capcom_usd == pytest.approx(80.0)
+
+
+def test_shared_replies_make_a_session_not_comparable() -> None:
+    reqs = [req("s1", when=at(1), output=M), req("s2", when=at(1), output=M)]
+    idx = SharedIndex(reqs=reqs, costs=[cs("s1", 20.0, claude_opus_5_5=20.0)])
+    idx.shared = {"s1": [at(1)]}
+    [cal] = calibrate(idx, T)
+    assert cal.reasons == ("shares replies with another session",)
+    idx.shared = {"s1": [at(-60)]}  # before the process start: not in the window
+    [cal] = calibrate(idx, T)
+    assert cal.comparable
+
+
+def _with_input(state: CostState, model: str, tokens: int) -> CostState:
+    models = dict(state.models)
+    models[model] = replace(models[model], input=tokens)
+    return replace(state, models=models)
+
+
+@pytest.mark.parametrize(
+    ("logged", "cost_state", "comparable"),
+    [
+        (100, 900, True),  # 9x, but below the token floor
+        (100, 1_200, False),  # 12x and 1,100 tokens more
+        (5_000, 40_000, True),  # 8x: within the ratio
+        (5_000, 60_000, False),  # 12x
+        (0, 900, True),
+        (0, 1_500, False),
+    ],
+)
+def test_calls_not_in_the_log(logged: int, cost_state: int, comparable: bool) -> None:
     idx = FakeIndex(
-        reqs=[
-            req("s1", when=at(1), output=M),
-            req("s1", when=last, output=M),  # the record just before the cost-state
-            req("s1", when=last + timedelta(seconds=1), output=M),  # after it
+        reqs=[req("s1", when=at(1), output=M, input=logged)],
+        costs=[
+            _with_input(
+                cs("s1", 20.0 + logged * 4 / M, claude_opus_5_5=20.0 + logged * 4 / M),
+                "claude-opus-5-5",
+                cost_state,
+            )
         ],
-        evs=[Event(EventKind.AWAY, "s1", None, at(9), "late")],  # after it, too
-        costs=[cs("s1", 40.0, when=last, claude_opus_5_5=40.0)],
     )
     [cal] = calibrate(idx, T)
-    assert cal.capcom_usd == pytest.approx(40.0)
-    assert cal.comparable
+    assert cal.comparable is comparable
+    assert cal.reasons == (() if comparable else ("calls not in the log",))
 
 
 def test_model_names_are_normalized_on_both_sides() -> None:
