@@ -28,15 +28,16 @@ def read_model(path: Path) -> str | None:
     """The `model:` value of a definition's frontmatter, or None. Reads at most the
     frontmatter."""
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
+        with path.open("r", encoding="utf-8-sig", errors="replace") as fh:
             lines = _lines(fh)
             if next(lines, "").strip() != "---":
                 return None
             for _, line in zip(range(MAX_FRONTMATTER_LINES), lines, strict=False):
                 if line.strip() == "---":
                     return None
-                if line.startswith("model:"):
-                    return line[len("model:") :].strip().strip("'\"") or None
+                stripped = line.strip()
+                if stripped.startswith("model:"):
+                    return stripped[len("model:") :].strip().strip("'\"") or None
     except OSError:
         return None
     return None
@@ -45,8 +46,9 @@ def read_model(path: Path) -> str | None:
 def _suggested(change: str | None, key: str) -> str | None:
     """The value of the `key:` line of a finding's change text."""
     for line in (change or "").splitlines():
-        if line.startswith(f"{key}:"):
-            return line[len(key) + 1 :].strip()
+        stripped = line.strip()
+        if stripped.startswith(f"{key}:"):
+            return stripped[len(key) + 1 :].strip()
     return None
 
 

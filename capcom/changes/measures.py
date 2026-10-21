@@ -41,7 +41,6 @@ from capcom.explain.shared import (
     LONG_CONTEXT,
     TOOL_WAIT_EXPIRY,
 )
-from capcom.types import EventKind, Index
 
 
 @dataclass(slots=True)
@@ -74,6 +73,7 @@ class Tally:
             self.top(k, v)
 
 
+Counts = Mapping[tuple[str, str | None], int]  # per thread: tool results flagged, errors
 ERRORS_ROW = "Tool errors per 100 tool calls"  # shown only when the index flags errors
 Row = tuple[str, Callable[[Tally, float], str]]  # (label, value of a tally over n weeks)
 
@@ -83,11 +83,14 @@ class Measure:
     label: str  # e.g. "Tool-wait rewrites per 1,000 requests"
     unit: str  # the value's unit in a sentence: "per 1,000 requests"
     scale: float
-    tally: Callable[[Facts, str, Index], Tally]
+    tally: Callable[[Facts, str, Counts, Counts], Tally]  # facts, scope, flagged, errors
     rows: tuple[Row, ...] = ()
     median: bool = False  # the value is the median of the samples, not count / base
     fmt: str = "{:,.1f}"
     quality: tuple[Row, ...] = ()  # model changes: signals to judge quality by
+    # the count is of discrete events (rewrites, compactions, turns): with few a day,
+    # the verdict tests the counts (a binomial test), not the daily rates
+    counted: bool = False
     # the work the habit rides on, in words (its count: the tally's "habit" sum, else
     # the requests in scope): near zero before and present after, nothing to compare
     habit: str = "requests in scope"
@@ -132,7 +135,7 @@ def _requests(threads: Iterable[Thread]) -> int:
 def _rewrites(
     pick: Callable[[Facts], Mapping[str, Rewrite]], habit: Callable[[Thread], float]
 ) -> Callable[..., Tally]:
-    def tally(facts: Facts, scope: str, index: Index) -> Tally:
+    def tally(facts: Facts, scope: str, flagged: Counts, errors: Counts) -> Tally:
         out = Tally()
         threads = _project_threads(facts, scope)
         out.requests = _requests(threads)
@@ -156,7 +159,7 @@ def _beats(facts: Facts) -> set[tuple[str, str | None]]:
     return {k for k, t in facts.threads.items() if t.agent_id is None and heartbeat(t)}
 
 
-def _long_running(facts: Facts, scope: str, index: Index) -> Tally:
+def _long_running(facts: Facts, scope: str, flagged: Counts, errors: Counts) -> Tally:
     out = Tally()
     out.requests = _requests(_project_threads(facts, scope))
     out.base = out.requests
@@ -174,7 +177,7 @@ def _long_running(facts: Facts, scope: str, index: Index) -> Tally:
     return out
 
 
-def _late_compactions(facts: Facts, scope: str, index: Index) -> Tally:
+def _late_compactions(facts: Facts, scope: str, flagged: Counts, errors: Counts) -> Tally:
     out = Tally()
     out.requests = _requests(_project_threads(facts, scope))
     out.base = out.requests
@@ -183,9 +186,10 @@ def _late_compactions(facts: Facts, scope: str, index: Index) -> Tally:
         if key in beats or not _in_project(facts, scope)(key[0]):
             continue
         for c in comps:
-            if c.timestamp >= facts.since:
-                out.add("compactions", 1)
-            if c.pre_tokens > LATE_COMPACTION and c.timestamp >= facts.since:
+            if not facts.since <= c.timestamp < facts.until:
+                continue
+            out.add("compactions", 1)
+            if c.pre_tokens > LATE_COMPACTION:
                 out.count += 1
                 out.usd += max(0.0, c.excess_usd)
                 out.add("turns_above", c.turns)
@@ -193,7 +197,7 @@ def _late_compactions(facts: Facts, scope: str, index: Index) -> Tally:
     return out
 
 
-def _heartbeat(facts: Facts, scope: str, index: Index) -> Tally:
+def _heartbeat(facts: Facts, scope: str, flagged: Counts, errors: Counts) -> Tally:
     """The context each run of the scope's main threads starts with (a run starts
     at a resume after a pause, or at the thread's first request)."""
     out = Tally()
@@ -208,13 +212,10 @@ def _heartbeat(facts: Facts, scope: str, index: Index) -> Tally:
             out.usd += start * rates
             out.base += 1
             out.top("max_start", start)
-        out.add("resumed", len(t.resumes))
-        if heartbeat(t):
-            out.add("beats", 1)
     return out
 
 
-def _never_ended(facts: Facts, scope: str, index: Index) -> Tally:
+def _never_ended(facts: Facts, scope: str, flagged: Counts, errors: Counts) -> Tally:
     out = Tally()
     threads = _project_threads(facts, scope)
     out.requests = _requests(threads)
@@ -241,7 +242,7 @@ def _never_ended(facts: Facts, scope: str, index: Index) -> Tally:
     return out
 
 
-def _model_mix(facts: Facts, scope: str, index: Index) -> Tally:
+def _model_mix(facts: Facts, scope: str, flagged: Counts, errors: Counts) -> Tally:
     out = Tally()
     threads = _type_threads(facts, scope)
     out.requests = _requests(threads)
@@ -259,22 +260,11 @@ def _model_mix(facts: Facts, scope: str, index: Index) -> Tally:
     return out
 
 
-def _errors(index: Index, facts: Facts, out: Tally, threads: Iterable[Thread]) -> None:
-    """Tool results flagged as errors in `threads` over the facts' window."""
-    keys = {(t.session_id, t.agent_id) for t in threads}
-    flagged = errors = 0
-    for e in index.events(facts.since, facts.until, kinds=frozenset({EventKind.TOOL_RESULT})):
-        if (e.session_id, e.agent_id) not in keys or "is_error" not in e.attrs:
-            continue
-        flagged += 1
-        errors += 1 if e.attrs.get("is_error") is True else 0
-    out.add("flagged", flagged)
-    out.add("errors", errors)
-
-
-def _model_mix_with_errors(facts: Facts, scope: str, index: Index) -> Tally:
-    out = _model_mix(facts, scope, index)
-    _errors(index, facts, out, _type_threads(facts, scope))
+def _model_mix_with_errors(facts: Facts, scope: str, flagged: Counts, errors: Counts) -> Tally:
+    out = _model_mix(facts, scope, flagged, errors)
+    keys = {(t.session_id, t.agent_id) for t in _type_threads(facts, scope)}
+    out.add("flagged", sum(n for k, n in flagged.items() if k in keys))
+    out.add("errors", sum(n for k, n in errors.items() if k in keys))
     return out
 
 
@@ -286,7 +276,7 @@ def _carried(
     """Tokens carried in prompts by the items `match` picks, per request of
     `threads`; `by_thread` matches items in those threads only (an agent type's)."""
 
-    def tally(facts: Facts, scope: str, index: Index) -> Tally:
+    def tally(facts: Facts, scope: str, flagged: Counts, errors: Counts) -> Tally:
         out = Tally()
         ts = threads(facts, scope)
         out.requests = _requests(ts)
@@ -414,7 +404,13 @@ def _rewrite_measure(
     if pause == "wait":
         rows = (*rows, ("Top tool waited on, rewrites per week", _top_cause))
     return Measure(
-        label, "per 1,000 requests", 1000, _rewrites(pick, habit), rows, habit=habit_label
+        label,
+        "per 1,000 requests",
+        1000,
+        _rewrites(pick, habit),
+        rows,
+        habit=habit_label,
+        counted=True,
     )
 
 
@@ -465,6 +461,7 @@ SWITCH = Measure(
     _rewrites(lambda f: f.switches, _main_requests),
     _REWRITE_ROWS,
     habit="main-thread requests",
+    counted=True,
 )
 
 MEASURES: dict[str, Measure] = {
@@ -485,6 +482,7 @@ MEASURES: dict[str, Measure] = {
             (f"Threads past {LONG_CONTEXT // 1000}k per week", _per_week("threads")),
             ("Largest context (tokens)", _largest("max_context")),
         ),
+        counted=True,
     ),
     "late_compactions": Measure(
         f"Compactions past {LATE_COMPACTION // 1000}k tokens per 1,000 requests",
@@ -500,6 +498,7 @@ MEASURES: dict[str, Measure] = {
                 _ratio("turns_above", "count"),
             ),
         ),
+        counted=True,
     ),
     "heartbeat_growing_session": Measure(
         "Median context at a run's start (tokens)",
@@ -508,7 +507,6 @@ MEASURES: dict[str, Measure] = {
         _heartbeat,
         (
             ("Runs per week", lambda t, w: f"{t.base / w:,.1f}" if w else "-"),
-            ("Resumes per week", _per_week("resumed")),
             ("Largest start (tokens)", _largest("max_start")),
         ),
         median=True,

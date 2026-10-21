@@ -91,3 +91,13 @@ def test_the_commands_parse() -> None:
     assert parser.parse_args(["changes", "3"]).id == 3
     assert parser.parse_args(["changes", "--noticed"]).noticed
     assert parser.parse_args(["unmark", "3"]).id == 3
+
+
+def test_the_mark_hint_is_printed_only_in_the_default_window() -> None:
+    from capcom.checks.cli import format_findings
+    from capcom.types import Finding
+
+    f = Finding("idle_cache_rewrites", "Idle", "all", "s", 2.0, "a")
+    assert "capcom mark 1" in format_findings([f], 5, mark_rows=True)
+    plain = format_findings([f], 5)
+    assert "id idle_cache_rewrites@all" in plain and "capcom mark" not in plain

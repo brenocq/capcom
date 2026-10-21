@@ -58,16 +58,37 @@ def test_edits_and_unmarks_replay_and_ids_are_never_reused(tmp_path: Path) -> No
         edit(2, note="x", path=p)
 
 
-def test_a_duplicate_open_mark_is_refused_but_another_date_is_fine(tmp_path: Path) -> None:
+def test_one_open_mark_per_finding_whatever_the_date(tmp_path: Path) -> None:
     p = tmp_path / "c.jsonl"
     mark("a", "s", D, "A", path=p)
     with pytest.raises(ValueError, match="already"):
         mark("a", "s", D, "A", path=p)
-    mark("a", "s", date(2026, 10, 8), "A", path=p)
     with pytest.raises(ValueError, match="already"):
-        edit(2, applied_on=D, path=p)
+        mark("a", "s", date(2026, 10, 8), "A", path=p)
+    mark("a", "other scope", D, "A", path=p)
+    assert edit(1, applied_on=date(2026, 10, 8), path=p).applied_on == date(2026, 10, 8)
     unmark(1, path=p)
     mark("a", "s", D, "A", path=p)  # the first one is gone
+
+
+def test_notes_are_kept_on_one_line_and_cut_on_read(tmp_path: Path) -> None:
+    p = tmp_path / "c.jsonl"
+    m = mark("a", "s", D, "A\x1b[2J", note="line one\nline two\x07\u2028end", path=p)
+    assert m.note == "line one line two  end" and m.title == "A [2J"
+    assert load(p)[0].note == "line one line two  end"
+    raw = {"event": "edit", "id": 1, "note": "x" * 900 + "\r\n"}
+    with p.open("a") as fh:
+        fh.write(json.dumps(raw) + "\n")
+    assert load(p)[0].note == "x" * 500
+
+
+def test_overlong_and_deeply_nested_lines_are_skipped(tmp_path: Path) -> None:
+    p = tmp_path / "c.jsonl"
+    good = {"event": "mark", "id": 1, "kind": "a", "scope": "s", "applied_on": "2026-10-07"}
+    huge = dict(good, id=2, kind="b", title="y" * 70_000)
+    deep = "[" * 30_000 + "]" * 30_000  # under the line limit, past the parser's depth
+    p.write_text("\n".join([json.dumps(huge), deep, json.dumps(good)]) + "\n")
+    assert [m.id for m in load(p)] == [1]
 
 
 def test_a_long_note_or_an_unknown_what_is_refused(tmp_path: Path) -> None:

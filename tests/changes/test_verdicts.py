@@ -12,7 +12,17 @@ from capcom.changes.measure import local_midnight
 from capcom.checks import run_checks
 from capcom.cost.prices import load_prices
 from capcom.types import Verdict
-from tests.changes.helpers import PROJECT, A, after, before, build, mark_of, now_after, span
+from tests.changes.helpers import (
+    PROJECT,
+    A,
+    after,
+    before,
+    build,
+    mark_of,
+    now_after,
+    poisson,
+    span,
+)
 
 TABLE = load_prices()
 
@@ -191,11 +201,42 @@ def test_a_rewrite_new_since_the_date_is_worse_and_priced_from_the_after_weeks()
     assert r.measured_usd_per_week is not None and r.measured_usd_per_week < 0
 
 
-def test_a_measure_already_moving_before_the_date_cannot_tell() -> None:
+def _weekly(per_day: tuple[int, ...]) -> dict:  # type: ignore[type-arg]
     weeks = {}
-    for k, e in zip((4, 3, 2, 1), (0, 1, 3, 4), strict=True):
+    for k, e in zip((4, 3, 2, 1), per_day, strict=True):
         start = A - timedelta(days=7 * k)
         weeks |= span(start, start + timedelta(days=7), 40, e)
-    r = _measure({**weeks, **after(40, 6)})
+    return weeks
+
+
+def test_a_rise_before_the_date_that_then_holds_cannot_tell() -> None:
+    r = _measure({**_weekly((0, 1, 3, 4)), **after(40, 4)})
     assert r.verdict is Verdict.NO_DATA
     assert "already moving before the date" in r.reason
+
+
+def test_a_change_well_past_an_earlier_drift_keeps_its_verdict() -> None:
+    r = _measure({**_weekly((6, 6, 5, 5)), **after(40, 0)})
+    assert r.verdict is Verdict.WORKING
+
+
+def test_twelve_then_nine_then_one_per_thousand_is_working_for_nearly_every_seed() -> None:
+    working = 0
+    for seed in range(20):
+        rnd = Random(seed)
+        rates = [12] * 14 + [9] * 14
+        days = {
+            A - timedelta(days=28 - i): (250, poisson(rnd, rate * 0.25))
+            for i, rate in enumerate(rates)
+        }
+        days |= {d: (250, poisson(rnd, 0.25)) for d in after(0, 0)}
+        working += _measure(days).verdict is Verdict.WORKING
+    assert working >= 19
+
+
+def test_a_rare_rewrite_gone_after_the_date_is_working() -> None:
+    # one rewrite every other day for four weeks, then none
+    days = {d: (40, i % 2) for i, d in enumerate(before())}
+    r = _measure({**days, **after(40, 0)})
+    assert r.verdict is Verdict.WORKING
+    assert "before weeks swung" in r.reason

@@ -4,8 +4,10 @@ pause), at local times so the weeks line up with the applied date."""
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from datetime import date, datetime, timedelta
+from random import Random
 
 from capcom.changes.measure import local_midnight
 from capcom.types import ChangeMark, Event, EventKind, Request
@@ -103,3 +105,24 @@ def after(n: int, episodes: int, days: int = 15) -> dict[date, tuple[int, int]]:
 
 def now_after(days: int = 15) -> datetime:
     return local_midnight(A + timedelta(days=days)) + timedelta(hours=12)
+
+
+def overnight(d: date, project: str = PROJECT) -> list[Request]:
+    """An idle pause across midnight: a request at 23:50 on day `d`, and the next
+    at 00:20, rewriting the cache, in the same session."""
+    sid = f"night{d.isoformat()}-{project}"
+    t = local_midnight(d + timedelta(days=1))
+    return [
+        req(session=sid, when=t - timedelta(minutes=10), project=project, cache_read=50_000),
+        req(session=sid, when=t + timedelta(minutes=20), project=project, cache_write_5m=50_000),
+    ]
+
+
+def poisson(rnd: Random, lam: float) -> int:
+    """A Poisson draw (Knuth), for noisy synthetic days."""
+    limit, k, p = math.exp(-lam), 0, 1.0
+    while True:
+        p *= rnd.random()
+        if p <= limit:
+            return k
+        k += 1

@@ -90,3 +90,14 @@ def test_other_kinds_are_never_noticed(tmp_path: Path) -> None:
     _def(d, "worker", ["model: sonnet"])
     f = _finding("skills_unused", "worker", "model: sonnet")
     assert not noticed(SortedIndex(), TABLE, [f], NOW, agent_dirs=[d], marks=[])
+
+
+def test_a_bom_and_an_indented_model_line_are_read(tmp_path: Path) -> None:
+    d = tmp_path / "agents"
+    d.mkdir()
+    p = d / "worker.md"
+    p.write_bytes("﻿---\nname: worker\n  model: sonnet  \n---\nBody.\n".encode())
+    os.utime(p, (NOW.timestamp(), NOW.timestamp()))
+    f = _finding("model_mix", "worker", "model: sonnet")
+    found = noticed(SortedIndex(), TABLE, [f], NOW, agent_dirs=[d], marks=[])
+    assert [n.detail for n in found] == ["model: sonnet"]

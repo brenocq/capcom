@@ -21,9 +21,10 @@ Verdict, on rates only, so a busier or quieter day does not count:
   days', with both a permutation test over days at 95 % (2,000 seeded shuffles
   of the days between before and after, two-sided) and a difference larger than
   the before days' typical swing (their weighted mean absolute deviation from the
-  before rate); otherwise no clear effect. A clear verdict is "can't tell" when
-  the first and second half of the before days differ by the same test: the
-  measure was already moving before the date.
+  before rate); otherwise no clear effect. When the first and second half of the
+  before days differ by the same test (the measure was already moving), a clear
+  verdict holds only if the after days differ the same way from the second half
+  alone, by the same test and by half that move or more; else "can't tell".
 
 Measured saving per week = (before - after) / scale x the after window's base per
 week (requests, or runs) x the unit value (measures.py: what one counted unit was
@@ -36,13 +37,14 @@ from __future__ import annotations
 import math
 import zlib
 from collections.abc import Sequence
-from dataclasses import replace
-from datetime import date, datetime, time, timedelta
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta
+from pathlib import Path
 from random import Random
 from statistics import median
 
+from capcom.changes.daily import DayTallies, day_tallies, local_midnight
 from capcom.changes.measures import ERRORS_ROW, MEASURES, Measure, Tally
-from capcom.checks.facts import Facts, collect
 from capcom.types import ChangeMark, ChangeResult, Index, MeasurePoint, PriceTable, Verdict
 
 BEFORE_WEEKS = 4
@@ -54,23 +56,8 @@ WORKLOAD_FOLD = 4.0  # requests in scope per week changed this much: not compara
 MIN_REQUESTS = 200
 MIN_SHARE = 0.2  # of a usual before week's requests
 
-FactsCache = dict[tuple[datetime, datetime], Facts]
-
-
-def local_midnight(d: date) -> datetime:
-    """The start of local day `d`, as an aware datetime."""
-    return datetime.combine(d, time()).astimezone()
-
-
-def _facts(
-    index: Index, table: PriceTable, since: datetime, until: datetime, cache: FactsCache | None
-) -> Facts:
-    if cache is None:
-        return collect(index, table, since, until)
-    key = (since, until)
-    if key not in cache:
-        cache[key] = collect(index, table, since, until)
-    return cache[key]
+LOW_DAILY_COUNT = 2.0  # a count measure under this many a day before: a binomial test
+TREND_SHARE = 0.5  # past a before window already moving: the change since, over that move
 
 
 def _no_data(mark: ChangeMark, measure: str, reason: str) -> ChangeResult:
@@ -160,22 +147,88 @@ def p_value(before: Sequence[Day], after: Sequence[Day], seed: int) -> float:
     return (hits + 1) / (PERMUTATIONS + 1)
 
 
+def binomial_p(before: Tally, after: Tally) -> float:
+    """Two-sided exact test that the after window's share of the counted events is
+    its share of the base (the same rate per unit of base before and after)."""
+    n = round(before.count + after.count)
+    total = before.base + after.base
+    if n == 0 or total <= 0:
+        return 1.0
+    q = after.base / total
+    k = min(round(after.count), n)
+    if q <= 0 or q >= 1:
+        return 1.0
+
+    def logp(i: int) -> float:
+        return (
+            math.lgamma(n + 1)
+            - math.lgamma(i + 1)
+            - math.lgamma(n - i + 1)
+            + i * math.log(q)
+            + (n - i) * math.log(1 - q)
+        )
+
+    observed = logp(k)
+    p = sum(math.exp(lp) for i in range(n + 1) if (lp := logp(i)) <= observed + 1e-9)
+    return min(1.0, p)
+
+
+def _sum(tallies: Sequence[Tally]) -> Tally:
+    out = Tally()
+    for t in tallies:
+        out.merge(t)
+    return out
+
+
+def _weekly_swing(m: Measure, weeks: Sequence[Tally]) -> float:
+    return swing(_day_points(m, weeks))
+
+
+@dataclass(slots=True)
+class _Test:
+    """How two stretches of days are compared: by counts when they are few a day,
+    else by a permutation test over the days' rates."""
+
+    m: Measure
+    seed: int
+    by_counts: bool
+
+    def p(self, x: Sequence[Tally], y: Sequence[Tally]) -> float:
+        if self.by_counts:
+            return binomial_p(_sum(x), _sum(y))
+        px, py = _day_points(self.m, x), _day_points(self.m, y)
+        return p_value(px, py, self.seed) if px and py else 1.0
+
+    def value(self, days: Sequence[Tally]) -> float:
+        v = self.m.value(_sum(days))
+        return 0.0 if v is None else v
+
+
 def measure_name(kind: str) -> str | None:
     """What a mark of finding `kind` is measured by, or None without a measure."""
     m = MEASURES.get(kind)
     return m.label if m else None
 
 
-def _tally(
-    m: Measure,
+def window_start(mark: ChangeMark) -> date:
+    """The first day a mark's measure reads."""
+    return mark.applied_on - timedelta(days=7 * BEFORE_WEEKS)
+
+
+def measure_all(
     index: Index,
     table: PriceTable,
-    scope: str,
-    since: datetime,
-    until: datetime,
-    cache: FactsCache | None,
-) -> Tally:
-    return m.tally(_facts(index, table, since, until, cache), scope, index)
+    marks: Sequence[ChangeMark],
+    now: datetime,
+    *,
+    day_cache: Path | None = None,
+) -> list[ChangeResult]:
+    """Every mark measured, from one pass over the days they need."""
+    if not marks:
+        return []
+    keys = {(m.kind, m.scope) for m in marks}
+    days = day_tallies(index, table, keys, min(window_start(m) for m in marks), now, day_cache)
+    return [measure(index, table, m, now, tallies=days) for m in marks]
 
 
 def measure(
@@ -184,10 +237,12 @@ def measure(
     mark: ChangeMark,
     now: datetime,
     *,
-    cache: FactsCache | None = None,
+    day_cache: Path | None = None,
+    tallies: DayTallies | None = None,
 ) -> ChangeResult:
     """`mark`'s finding measured before and after its date (module docstring).
-    `cache` keeps the daily facts for other marks measured in the same run."""
+    `tallies` are days already tallied (measure_all); `day_cache` is the file that
+    keeps finished days between runs."""
     m = MEASURES.get(mark.kind)
     if m is None:
         return _no_data(
@@ -196,6 +251,10 @@ def measure(
             f"Can't tell: capcom has no measure for {mark.kind} yet.",
         )
     today = now.astimezone().date()
+    key = (mark.kind, mark.scope)
+    if tallies is None or key not in tallies:
+        tallies = day_tallies(index, table, [key], window_start(mark), now, day_cache)
+    by_day = tallies[key]
     first = next(iter(index.requests()), None)
     logs_start = first.timestamp if first else None
     first_day = logs_start.astimezone().date() if logs_start else mark.applied_on
@@ -203,19 +262,17 @@ def measure(
     before, after = Tally(), Tally()
     days_before: list[Tally] = []
     days_after: list[Tally] = []
-    full_values: list[float] = []
-    full_requests: list[int] = []
+    full_weeks: list[Tally] = []
     week_requests: list[int] = []
     any_values: list[float] = []
     for start, end, is_after, full in _weeks(mark.applied_on, now, logs_start):
         week = Tally()
         d = max(start, first_day)
-        while d < end:
-            since, until = local_midnight(d), min(local_midnight(d + timedelta(days=1)), now)
+        while d < end and d <= today:
+            t = by_day.get(d)
             d += timedelta(days=1)
-            if since >= until:
+            if t is None:
                 continue
-            t = _tally(m, index, table, mark.scope, since, until, cache)
             (days_after if is_after else days_before).append(t)
             week.merge(t)
         value = m.value(week)
@@ -228,11 +285,10 @@ def measure(
             if value is not None and week.requests:
                 any_values.append(value)
                 if full:
-                    full_values.append(value)
-                    full_requests.append(week.requests)
-    before_start = local_midnight(mark.applied_on - timedelta(days=7 * BEFORE_WEEKS))
+                    full_weeks.append(week)
+    before_start = local_midnight(window_start(mark))
     if logs_start is not None:  # clipped to the logs' first day
-        before_start = max(before_start, local_midnight(logs_start.astimezone().date()))
+        before_start = max(before_start, local_midnight(first_day))
     after_from = local_midnight(mark.applied_on + timedelta(days=1))
     before_days = max((local_midnight(mark.applied_on) - before_start) / timedelta(days=1), 0.0)
     after_days = max((now - after_from) / timedelta(days=1), 0.0)
@@ -242,10 +298,10 @@ def measure(
     rpw_b = before.requests / before_weeks if before_weeks else 0.0
     rpw_a = after.requests / after_weeks if after_weeks else 0.0
     # a full week with a fraction of the usual workload swings on a few requests:
-    # charted, but left out of the range shown
-    usual = median(full_requests) if full_requests else 0.0
-    steady = [v for v, n in zip(full_values, full_requests, strict=True) if n >= MIN_SHARE * usual]
-    values = steady or full_values or any_values
+    # charted, but left out of the range shown and of the weekly swing
+    usual = median(w.requests for w in full_weeks) if full_weeks else 0.0
+    steady = [w for w in full_weeks if w.requests >= MIN_SHARE * usual]
+    values = [v for w in (steady or full_weeks) if (v := m.value(w)) is not None] or any_values
     rng = (min(values), max(values)) if values else None
     evidence = tuple(
         (label, f(before, before_weeks), f(after, after_weeks) if after.requests else "-")
@@ -336,25 +392,37 @@ def measure(
                 f"requests a week before, {rpw_a:,.0f} {since_text})."
             ),
         )
-    pts_b, pts_a = _day_points(m, days_before), _day_points(m, days_after)
-    typical = swing(pts_b)
-    seed = zlib.crc32(f"{mark.kind}@{mark.scope}@{mark.applied_on}".encode())
-    p = p_value(pts_b, pts_a, seed) if pts_b and pts_a else 1.0
+    by_counts = m.counted and before_days > 0 and before.count / before_days < LOW_DAILY_COUNT
+    test = _Test(m, zlib.crc32(f"{mark.kind}@{mark.scope}@{mark.applied_on}".encode()), by_counts)
+    # the usual swing: of the before weeks' rates for few counts a day, else of the days'
+    typical = (
+        _weekly_swing(m, steady or full_weeks) if by_counts else swing(_day_points(m, days_before))
+    )
+    p = test.p(days_before, days_after)
     clear = p < ALPHA and abs(a - b) > typical
     if clear:
-        # the same test between the first and second half of the before days: a
-        # measure already moving before the date can't be told apart from a change
-        half = len(pts_b) // 2
-        early, late = pts_b[:half], pts_b[half:]
-        moving = early and late and abs(_wmean(late) - _wmean(early)) > typical
-        if moving and p_value(early, late, seed) < ALPHA:
+        # a measure already moving between the halves of the before days: the change
+        # since must stand well clear of that move, else it can't be told apart
+        half = len(days_before) // 2
+        early, late = days_before[:half], days_before[half:]
+        e_v, l_v = test.value(early), test.value(late)
+        moving = early and late and abs(l_v - e_v) > typical and test.p(early, late) < ALPHA
+        # then the after days must differ clearly from the late half itself, in the
+        # same direction, by at least TREND_SHARE of that move
+        holds = (
+            (a - l_v) * (a - b) > 0
+            and abs(a - l_v) > typical
+            and abs(a - l_v) >= TREND_SHARE * abs(l_v - e_v)
+            and test.p(late, days_after) < ALPHA
+        )
+        if moving and not holds:
             return replace(
                 base,
                 reason=(
                     f"Can't tell: {m.label[0].lower()}{m.label[1:]} was already moving "
-                    f"before the date ({_fmt(m, _wmean(early))} in the first half of the "
-                    f"before days, {_fmt(m, _wmean(late))} in the second), so a change "
-                    "since can't be told apart from that."
+                    f"before the date ({_fmt(m, e_v)} in the first half of the before "
+                    f"days, {_fmt(m, l_v)} in the second), so a change since can't be "
+                    "told apart from that."
                 ),
             )
     verdict = Verdict.NO_EFFECT if not clear else Verdict.WORKING if a < b else Verdict.WORSE
@@ -364,9 +432,10 @@ def measure(
     base_pw = after.base / after_weeks if after_weeks else 0.0
     saving = (b - a) / m.scale * base_pw * unit if verdict is not Verdict.NO_EFFECT else None
     move = "fell" if a < b else "rose" if a > b else "stayed"
+    unit_swing = "before weeks" if by_counts else "before days"
     reason = (
         f"{m.label} {move} from {_fmt(m, b)} to {_fmt(m, a)} {since_text}, over "
-        f"{after.requests:,} requests in scope; the before days swung by about "
+        f"{after.requests:,} requests in scope; the {unit_swing} swung by about "
         f"{_fmt(m, typical)}"
     )
     if saving is not None:

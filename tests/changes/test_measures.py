@@ -17,7 +17,7 @@ from capcom.checks.facts import (
     Rewrite,
     Thread,
 )
-from capcom.types import AgentInfo, Event, EventKind
+from capcom.types import AgentInfo
 from tests.checks.helpers import SortedIndex
 from tests.cost.fakes import T0
 
@@ -38,10 +38,14 @@ def _thread(sid: str, requests: int, agent: str | None = None, project: str = P)
 
 
 def _run(
-    kind: str, facts: Facts, scope: str = P, index: SortedIndex = EMPTY
+    kind: str,
+    facts: Facts,
+    scope: str = P,
+    flagged: dict[tuple[str, str | None], int] | None = None,
+    errors: dict[tuple[str, str | None], int] | None = None,
 ) -> tuple[Tally, float | None]:
     m = MEASURES[kind]
-    t = m.tally(facts, scope, index)
+    t = m.tally(facts, scope, flagged or {}, errors or {})
     return t, m.value(t)
 
 
@@ -122,19 +126,10 @@ def test_model_mix_is_dollars_per_request_with_quality_signals() -> None:
     f.model_mix[("fast-worker", P)] = ModelMix(
         cost=8.0, by_model={"claude-opus-5-5": 6.0, "claude-sonnet-5": 2.0}, top_cost=6.0
     )
-    errs = [
-        Event(
-            EventKind.TOOL_RESULT,
-            "s1",
-            "a1",
-            T0 + timedelta(minutes=i),
-            f"e{i}",
-            {"is_error": i < 2},
-        )
-        for i in range(5)
-    ]
     m = MEASURES["model_mix"]
-    t, value = _run("model_mix", f, scope="fast-worker", index=SortedIndex(evs=errs))
+    t, value = _run(
+        "model_mix", f, scope="fast-worker", flagged={("s1", "a1"): 5}, errors={("s1", "a1"): 2}
+    )
     assert value == pytest.approx(8.0 / 40)
     assert t.usd / t.count == 1.0
     rows = {label: fn(t, 1.0) for label, fn in m.quality}

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
@@ -25,6 +26,8 @@ from typing import IO, Any
 from capcom.types import ChangeMark
 
 MAX_NOTE_CHARS = 500
+MAX_TITLE_CHARS = 200
+MAX_LINE_BYTES = 64 * 1024  # a longer line is not one capcom wrote: skipped
 WHATS = frozenset({"suggested", "other"})
 SOURCES = frozenset({"user", "noticed"})
 
@@ -60,16 +63,34 @@ def _refuse_log_dirs(path: Path, env: dict[str, str] | None = None) -> None:
 
 
 def _lines(fh: IO[bytes]) -> Iterator[dict[str, Any]]:
-    """The file's complete JSON object lines; a partial or bad line is skipped."""
-    for raw in fh:
+    """The file's complete JSON object lines; a partial, bad or overlong line
+    (over MAX_LINE_BYTES) is skipped."""
+    while True:
+        raw = fh.readline(MAX_LINE_BYTES + 1)
+        if not raw:
+            return
+        if len(raw) > MAX_LINE_BYTES:  # skip the rest of the line, unread
+            while raw and not raw.endswith(b"\n"):
+                raw = fh.readline(MAX_LINE_BYTES)
+            continue
         if not raw.endswith(b"\n"):
             return  # a writer is mid-line (or died there): read it next time
         try:
             obj = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         if isinstance(obj, dict):
             yield obj
+
+
+def clean_text(text: str, limit: int | None = None) -> str:
+    """`text` on one line: control characters (newlines included) become spaces;
+    cut at `limit` characters."""
+    out = "".join(
+        " " if unicodedata.category(c) == "Cc" or c in "\u2028\u2029" else c for c in text
+    )
+    out = out.strip()
+    return out[:limit] if limit is not None else out
 
 
 def _date(value: object) -> date | None:
@@ -108,9 +129,9 @@ def _from_event(obj: dict[str, Any]) -> ChangeMark | None:
         kind=kind,
         scope=scope,
         applied_on=applied,
-        title=_str(obj.get("title")),
+        title=clean_text(_str(obj.get("title")), MAX_TITLE_CHARS),
         what=_str(obj.get("what"), "suggested"),
-        note=_str(obj.get("note")),
+        note=clean_text(_str(obj.get("note")), MAX_NOTE_CHARS),
         expected_usd_per_week=float(expected) if isinstance(expected, int | float) else None,
         marked_at=_when(obj.get("marked_at")),
         source=_str(obj.get("source"), "user"),
@@ -141,7 +162,7 @@ def _replay(fh: IO[bytes]) -> tuple[dict[int, ChangeMark], int]:
                 applied_on=applied or m.applied_on,
                 title=m.title,
                 what=m.what,
-                note=note if isinstance(note, str) else m.note,
+                note=clean_text(note, MAX_NOTE_CHARS) if isinstance(note, str) else m.note,
                 expected_usd_per_week=m.expected_usd_per_week,
                 marked_at=m.marked_at,
                 source=m.source,
@@ -196,15 +217,22 @@ def _append(fh: IO[bytes], obj: dict[str, Any]) -> None:
     os.fsync(fh.fileno())
 
 
-def _check_note(note: str) -> None:
+def _check_note(note: str) -> str:
+    """The note as stored: on one line, at most MAX_NOTE_CHARS."""
+    note = clean_text(note)
     if len(note) > MAX_NOTE_CHARS:
         raise ValueError(f"the note is {len(note)} characters; at most {MAX_NOTE_CHARS}")
+    return note
 
 
-def _duplicate(marks: dict[int, ChangeMark], kind: str, scope: str, on: date, skip: int) -> None:
+def _duplicate(marks: dict[int, ChangeMark], kind: str, scope: str) -> None:
+    """One open mark per finding: re-marking means editing its date or unmarking."""
     for m in marks.values():
-        if m.id != skip and (m.kind, m.scope, m.applied_on) == (kind, scope, on):
-            raise ValueError(f"mark {m.id} already records {kind}@{scope} on {on}")
+        if (m.kind, m.scope) == (kind, scope):
+            raise ValueError(
+                f"mark {m.id} already records {kind}@{scope} (applied on {m.applied_on}); "
+                f"change its date, or unmark it first"
+            )
 
 
 def mark(
@@ -220,16 +248,18 @@ def mark(
     path: Path | None = None,
 ) -> ChangeMark:
     """Record that the change for finding `kind`@`scope` was made on `applied_on`.
-    Refuses a second open mark of the same finding on the same date."""
+    Refuses a second open mark of the same finding (kind and scope), whatever its
+    date: re-marking means editing the date or unmarking."""
     if what not in WHATS:
         raise ValueError(f"what must be one of {sorted(WHATS)}")
     if source not in SOURCES:
         raise ValueError(f"source must be one of {sorted(SOURCES)}")
-    _check_note(note)
+    note = _check_note(note)
+    title = clean_text(title, MAX_TITLE_CHARS)
     path = path or store_path()
     with _locked(path) as fh:
         marks, top = _replay(fh)
-        _duplicate(marks, kind, scope, applied_on, skip=0)
+        _duplicate(marks, kind, scope)
         m = ChangeMark(
             id=top + 1,
             kind=kind,
@@ -270,15 +300,13 @@ def edit(
 ) -> ChangeMark:
     """A new date or note for an open mark; KeyError when there is no such mark."""
     if note is not None:
-        _check_note(note)
+        note = _check_note(note)
     path = path or store_path()
     with _locked(path) as fh:
         marks, _ = _replay(fh)
         if id not in marks:
             raise KeyError(f"no open mark {id}")
         old = marks[id]
-        if applied_on is not None:
-            _duplicate(marks, old.kind, old.scope, applied_on, skip=id)
         obj: dict[str, Any] = {"event": "edit", "id": id, "at": datetime.now(UTC).isoformat()}
         if applied_on is not None:
             obj["applied_on"] = applied_on.isoformat()

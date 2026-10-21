@@ -15,12 +15,14 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TextIO
 
-from capcom.changes.measure import BEFORE_WEEKS, MIN_DAYS, MIN_REQUESTS, FactsCache
+from capcom.changes.measure import BEFORE_WEEKS, MIN_DAYS, MIN_REQUESTS
 from capcom.changes.measures import MEASURES
+from capcom.changes.store import MAX_NOTE_CHARS, clean_text
 from capcom.config import Config
 from capcom.types import ChangeMark, ChangeResult, Finding, Index, PriceTable, Verdict
 
 CHECKS_DAYS = 14  # `capcom checks`' default window
+DAY_CACHE = "changes-days.sqlite"  # finished days, in the cache folder
 BAR = 28  # the chart's widest bar, in characters
 VERDICTS = {
     Verdict.WORKING: "working",
@@ -238,7 +240,7 @@ def format_list(results: Sequence[ChangeResult], ctx: _Context) -> str:
             f"{_value(r, r.before):>9}  {_value(r, r.after):>9}  {saving}{expected}"
         )
         other = ", another change" if m.what == "other" else ""
-        lines.append(f"     {m.title} [{ctx.label(m.scope)}]{other}")
+        lines.append(f"     {clean_text(m.title)} [{ctx.label(m.scope)}]{other}")
         lines.append(f"     {r.measure}")
     return "\n".join(lines)
 
@@ -279,11 +281,11 @@ def format_detail(r: ChangeResult, ctx: _Context) -> str:
     marked = f", marked {m.marked_at.astimezone():%Y-%m-%d}" if m.marked_at else ""
     source = " (noticed by capcom)" if m.source == "noticed" else ""
     lines = [
-        f"#{m.id}  {m.title}  [{ctx.label(m.scope)}]",
+        f"#{m.id}  {clean_text(m.title)}  [{ctx.label(m.scope)}]",
         f"    {m.kind}@{ctx.label(m.scope)}: {what} applied on {m.applied_on}{marked}{source}",
     ]
     if m.note:
-        lines.append(f"    note: {m.note}")
+        lines.append(f"    note: {clean_text(m.note, MAX_NOTE_CHARS)}")
     lines.append("")
     lines.append(f"    Verdict: {VERDICTS[r.verdict]}. {r.reason}")
     if r.weeks:
@@ -330,10 +332,11 @@ def run_changes(
     now: datetime | None = None,
     index: Index | None = None,
     path: Path | None = None,
+    day_cache: Path | None = None,
 ) -> int:
     """The marks with their verdicts (`days`: those applied in the last N days, 0:
     all), one mark in detail, or (`noticed`) the changes capcom saw."""
-    from capcom.changes.measure import measure
+    from capcom.changes.measure import measure_all
     from capcom.changes.store import load
 
     out = out or sys.stdout
@@ -353,8 +356,8 @@ def run_changes(
     ctx = _open(config, index)
     if ctx is None:
         return 1
-    cache: FactsCache = {}
-    results = [measure(ctx.index, ctx.table, m, now, cache=cache) for m in marks]
+    cache = day_cache or config.cache_dir / DAY_CACHE
+    results = measure_all(ctx.index, ctx.table, marks, now, day_cache=cache)
     if mark_id is not None:
         print(format_detail(results[0], ctx), file=out)
     else:
