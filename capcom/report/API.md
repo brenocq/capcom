@@ -352,16 +352,18 @@ logs.
             scopes: [{scope, scope_label, saving_usd_per_week, share}],
             findings: [n], overlaps: [kind], judgement_call, counted}],
  findings: [{n, kind, title, scope, scope_label, scope_path, summary, saving_usd_per_week, advice, change,
-             evidence: [Evidence], metrics, overlaps: [kind], counted, visual}],
+             evidence: [Evidence], metrics, overlaps: [kind], counted, overlapped_by: [n],
+             visual}],
  small: {findings, usd_per_week, below_usd_per_week},
  footer}
 ```
 
 `rollups` (`capcom.checks.rollup`) is one row per kind across its scopes (projects, or
 agent types for `scope_noun` "agent type"), largest first and judgement calls last:
-its saving, each scope's `share` of it, the `n` of its findings, the kinds it may
-share dollars with, and whether its findings are all, some or none `counted` in the
-total. Rows of different kinds are not to be added up (`overlaps`); the total is.
+its saving, each scope's `share` of it, the `n` of its findings, `overlaps` (the
+kinds whose counted findings kept one of its findings out of the total, by the
+total's own test; empty when none did), and whether its findings are all, some or
+none `counted` in the total. Rows of different kinds are not to be added up (`overlaps`); the total is.
 Findings under $0.10/week are not in `findings` nor in the total: `small` counts
 them. `judgement_calls` (only when there are any) are findings whose saving trades
 quality (a cheaper model for an agent): never in the total. `footer` says in words
@@ -371,7 +373,12 @@ Findings come ranked by weekly saving; `scope_label` names a project scope as in
 "Projects" (other scopes, an agent type or `all`, as they are). Some savings count the same dollars
 (`overlaps`, from `metrics["overlaps"]`; `overlapping` says whether any do), so they
 are never added up: `total` sums only the findings with `counted` true, picked largest
-first, each one that overlaps none picked before it (`of` counts every finding, `all`
+first, each one that overlaps none picked before it (`overlapped_by` lists the `n`
+of those it overlaps). Two findings overlap when one's kind is in the other's
+`overlaps` and their scopes may hold the same requests: the same scope, `all`, two
+scopes not both project folders, or an agent type and a folder that type ran in
+(`metrics.folders`, from capcom.checks); two agent types, two different folders, or
+an agent type and a folder it never ran in (OpenClaw's included) never do (`of` counts every finding, `all`
 says whether that is every finding); null when there are none. `text` is the sentence
 `capcom checks` prints too, e.g. "up to $46.00/week across 4 findings that don't
 overlap (of 5; overlapping savings are counted once)". `visual` is a small chart from the metrics, or

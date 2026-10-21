@@ -294,29 +294,61 @@ def _judged(f: Finding) -> bool:
     return bool(f.metrics.get("judgement_call"))
 
 
-def counted_findings(findings: Sequence[Finding], dirs: Collection[str]) -> list[bool]:
-    """Which findings a total may add: largest first, each that counts dollars none
-    counted so far does. Two project folders (in `dirs`) are apart; a scope of "all"
-    or an agent type may cover any folder. A judgement call (metrics
+def _places(f: Finding) -> frozenset[str] | None:
+    """The folders an agent-type finding's requests ran in (metrics "folders", set by
+    capcom.checks), None for other scopes."""
+    raw = f.metrics.get("folders")
+    return frozenset(raw) if isinstance(raw, tuple | list) else None
+
+
+def same_place(f: Finding, g: Finding, dirs: Collection[str]) -> bool:
+    """Whether two findings' scopes may hold the same requests. Two project folders
+    (in `dirs`) are apart. An agent type holds only the folders it ran in (its
+    "folders"), so it is apart from another type, from any other folder (OpenClaw's
+    and a heartbeat's included: no subagent runs there) and from a scope label it
+    never ran under. "all", and a scope with no known folders, may cover any."""
+    a, b = f.scope, g.scope
+    if a == b or "all" in (a, b):
+        return True
+    pa, pb = _places(f), _places(g)
+    if pa is not None and pb is not None:
+        return False  # one request has one agent type
+    if pa is not None:
+        return b in pa
+    if pb is not None:
+        return a in pb
+    return a not in dirs or b not in dirs
+
+
+def overlap_blockers(findings: Sequence[Finding], dirs: Collection[str]) -> list[list[int]]:
+    """For each finding, the positions of the findings counted before it whose dollars
+    it may share (empty for a counted one). Largest first, each counts when it
+    shares dollars with none counted so far. A judgement call (metrics
     "judgement_call", such as a cheaper model for an agent) is never counted: its
     saving would shrink every other one on the same requests. Nor is a finding
-    under MIN_LISTED_USD_PER_WEEK."""
-
-    def same_place(a: str, b: str) -> bool:
-        return a == b or a not in dirs or b not in dirs
-
-    kept: list[tuple[str, str]] = []  # (kind, scope) of the findings counted so far
-    counted: list[bool] = []
-    for f in findings:
+    under MIN_LISTED_USD_PER_WEEK; both get no blockers."""
+    kept: list[int] = []
+    out: list[list[int]] = []
+    for i, f in enumerate(findings):
         if _judged(f) or f.saving_usd_per_week < MIN_LISTED_USD_PER_WEEK:
-            counted.append(False)
+            out.append([])
             continue
         over = finding_overlaps(f)
-        ok = not any(k in over and same_place(sc, f.scope) for k, sc in kept)
-        if ok:
-            kept.append((f.kind, f.scope))
-        counted.append(ok)
-    return counted
+        hit = [j for j in kept if findings[j].kind in over and same_place(findings[j], f, dirs)]
+        if not hit:
+            kept.append(i)
+        out.append(hit)
+    return out
+
+
+def counted_findings(findings: Sequence[Finding], dirs: Collection[str]) -> list[bool]:
+    """Which findings a total may add (overlap_blockers): those listed, not a
+    judgement call, and sharing no dollars with a larger one counted."""
+    blockers = overlap_blockers(findings, dirs)
+    return [
+        not hit and not _judged(f) and f.saving_usd_per_week >= MIN_LISTED_USD_PER_WEEK
+        for f, hit in zip(findings, blockers, strict=True)
+    ]
 
 
 def savings_total(findings: Sequence[Finding], dirs: Collection[str]) -> dict[str, Any] | None:

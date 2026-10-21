@@ -69,10 +69,9 @@ function rollupRow(r, byN, titleOf, open) {
   // a judgement call's own section already says it is not in the total
   if (r.judgement_call) { /* no tag */ } else if (r.counted === 'none') tags.push(h('span.tag.over', { text: 'overlaps: not in the total', title: 'Its dollars are counted under the kind it overlaps.' }));
   else if (r.counted === 'some') tags.push(h('span.tag.over', { text: 'partly in the total', title: 'Some of its findings overlap a larger one and are left out of the total.' }));
-  // only the kinds this window found; the most a line can name is three
-  const near = r.overlaps.filter((k) => titleOf.has(k)).map((k) => titleOf.get(k));
-  // named only where it matters: on a kind left out of the total in part or in whole
-  if (near.length && r.counted !== 'all' && !r.judgement_call) tags.push(h('span.note', { text: 'may share dollars with ' + near.slice(0, 3).join(', ') + (near.length > 3 ? `, ${near.length - 3} more` : '') }));
+  // the kinds that kept one of its findings out of the total (none: no line)
+  const near = r.overlaps.map((k) => titleOf.get(k) || k);
+  if (near.length) tags.push(h('span.note', { text: 'may share dollars with ' + near.slice(0, 3).join(', ') + (near.length > 3 ? `, ${near.length - 3} more` : '') }));
   return h('details.rollup', { open: open || null },
     h('summary', null,
       h('span.mtext', null, h('b', { text: r.title }), h('span.note.block', { text: scopes }), tags.length ? h('span.tags', null, ...tags) : null),

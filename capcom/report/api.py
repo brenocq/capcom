@@ -35,6 +35,7 @@ from capcom.report.tally import (
     finding_overlaps,
     iso,
     ms,
+    overlap_blockers,
     project_display,
     project_names,
     savings_total,
@@ -1265,6 +1266,7 @@ def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     names = ctx.names(infos)
     dirs = {info.project_dir for info in infos.values()}
     counted = counted_findings(found, dirs)
+    blockers = overlap_blockers(found, dirs)
     overlapping = any(finding_overlaps(f) for f in found)
     calls = _subagent_calls(ctx, since) if "one_command_subagents" in kinds else {}
     comps = _compactions(ctx, since) if "late_compactions" in kinds else {}
@@ -1288,6 +1290,8 @@ def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
                 "metrics": {k: _plain(v) for k, v in f.metrics.items()},
                 "overlaps": list(finding_overlaps(f)),
                 "counted": counted[i],
+                # the counted findings (their `n`) that kept this one out of the total
+                "overlapped_by": [j + 1 for j in blockers[i]],
                 "visual": _visual(f, calls, comps),
             }
         )
@@ -1317,8 +1321,9 @@ def _rollups(found: Sequence[Finding], rows: Sequence[Mapping[str, Any]]) -> lis
 
     judged = {f.kind for f in found if f.metrics.get("judgement_call")}
     labels = {(r["kind"], r["scope"]): r for r in rows}
+    left_out = [{found[n - 1].kind for n in row["overlapped_by"]} for row in rows]
     out = []
-    for r in sorted(rollup(found), key=lambda r: r.kind in judged):
+    for r in sorted(rollup(found, left_out), key=lambda r: r.kind in judged):
         members = [row for row in rows if row["kind"] == r.kind]
         out.append(
             {

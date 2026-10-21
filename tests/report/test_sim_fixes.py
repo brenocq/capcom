@@ -435,3 +435,46 @@ def test_a_process_before_the_first_cost_state_counts(tmp_path: Path) -> None:
     cal = api.session(_ctx(path), "pre")["calibration"]
     assert (cal["part"]["process"], cal["part"]["processes"]) == (2, 2)
     assert "process 2 of 2" in cal["note"] and "later" not in cal["note"]
+
+
+def _scoped_findings(*args: Any) -> list[Finding]:
+    """A coder agent that ran in alpha only, next to a larger rewrite finding in beta
+    and one in alpha; a long context and the late compaction that ends it."""
+    over = {"overlaps": ["subagent_cache_expiry", "idle_cache_rewrites"]}
+
+    def f(kind: str, scope: str, usd: float, **metrics: Any) -> Finding:
+        return Finding(kind, kind, scope, "s", usd, "a", metrics=metrics)
+
+    return [
+        f("long_running_agents", ALPHA, 50.0, overlaps=["late_compactions"]),
+        f("subagent_cache_expiry", BETA, 40.0, overlaps=["agent_tools_unused"]),
+        f("late_compactions", ALPHA, 20.0, overlaps=["long_running_agents"]),
+        f("agent_tools_unused", "coder", 9.0, **over, folders=(ALPHA, "alpha")),
+        f("agent_tools_unused", "scout", 8.0, **over, folders=(BETA,)),
+        f("idle_cache_rewrites", "openclaw-x", 7.0, overlaps=["agent_tools_unused"]),
+    ]
+
+
+def test_agent_scopes_overlap_only_their_folders(plain: Path) -> None:
+    analysis = Analysis(
+        capcom.timeline.cumulative,
+        capcom.timeline.per_step,
+        real_spikes,
+        FAKE.explain_fn,
+        _scoped_findings,
+    )
+    data = api.checks(_ctx(plain, analysis), {"days": "14"})
+    rows = {(f["kind"], f["scope"]): f for f in data["findings"]}
+    # coder ran in alpha only: the beta rewrites are other requests
+    assert rows[("agent_tools_unused", "coder")]["counted"] is True
+    # scout ran in beta: it shares the beta rewrites' dollars
+    assert rows[("agent_tools_unused", "scout")]["counted"] is False
+    assert rows[("agent_tools_unused", "scout")]["overlapped_by"] == [2]
+    # an OpenClaw scope holds no subagent: it never meets an agent type
+    assert rows[("idle_cache_rewrites", "openclaw-x")]["counted"] is True
+    # the roll-ups name only the kinds that kept a finding out of the total
+    by_kind = {r["kind"]: r for r in data["rollups"]}
+    assert by_kind["long_running_agents"]["overlaps"] == []
+    assert by_kind["late_compactions"]["overlaps"] == ["long_running_agents"]
+    assert by_kind["agent_tools_unused"]["overlaps"] == ["subagent_cache_expiry"]
+    assert by_kind["idle_cache_rewrites"]["overlaps"] == []
