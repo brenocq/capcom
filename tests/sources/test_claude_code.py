@@ -817,3 +817,55 @@ def test_cost_state_next_timestamp(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     # A batch's first decoded time, in file order: what the store fills a
     # batch-ending cost-state from.
     assert [b.first_timestamp for b in batches] == [at(10)]
+
+
+def test_shape_names_deferred_tools_and_sizes_only_the_loaded_schemas(tmp_path: Path) -> None:
+    s = SessionWriter(tmp_path, cwd="/w", session_id="s1")
+    loaded = [
+        {"name": "Read", "description": "synthetic", "input_schema": {"type": "object"}},
+        {"name": "Bash", "description": "synthetic", "input_schema": {"type": "object"}},
+    ]
+    deferred = [
+        {
+            "name": f"mcp__srv__t{i}",
+            "description": "synthetic " * 50,
+            "input_schema": {"type": "object"},
+            "defer_loading": True,
+        }
+        for i in range(3)
+    ]
+    s.write(
+        {
+            "type": "api-request-shape",
+            "sessionId": "s1",
+            "shapeHash": "h1",
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "shape": {"system": [], "tools": [*loaded, *deferred, {"defer_loading": False}]},
+        }
+    )
+    s.close()
+    (shape,) = events(parse(session_log(s.path)), EventKind.TOOL_SET)
+    assert shape.attrs["names"] == ("Read", "Bash", "mcp__srv__t0", "mcp__srv__t1", "mcp__srv__t2")
+    assert shape.attrs["deferred_names"] == ("mcp__srv__t0", "mcp__srv__t1", "mcp__srv__t2")
+    compact = json.dumps([*loaded, {"defer_loading": False}], separators=(",", ":"))
+    assert shape.attrs["tools_size_tokens"] == estimate_tokens(len(compact))
+    assert int(shape.attrs["size_tokens"] or 0) > 3 * int(shape.attrs["tools_size_tokens"] or 0)
+
+
+def test_a_slash_command_is_a_skill_invocation_by_name_only(tmp_path: Path) -> None:
+    s = SessionWriter(tmp_path, cwd="/w", session_id="s1")
+    s.user_prompt(
+        at(1),
+        "<command-message>pdf</command-message>\n<command-name>/pdf</command-name>\n"
+        "<command-args>synthetic secret args</command-args>",
+    )
+    s.user_prompt(at(2), "<command-name>/plugin:docx</command-name>")
+    s.user_prompt(at(3), "a prompt that mentions <command-name>/xlsx</command-name> in passing")
+    s.user_prompt(at(4), "<command-name>not a name</command-name>")
+    s.close()
+    found = events(parse(session_log(s.path)), EventKind.SKILLS_INVOKED)
+    assert [e.attrs for e in found] == [
+        {"names": ("pdf",), "source": "slash_command"},
+        {"names": ("plugin:docx",), "source": "slash_command"},
+    ]
+    assert "secret" not in repr(found)
