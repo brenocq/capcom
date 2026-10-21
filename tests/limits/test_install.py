@@ -44,7 +44,7 @@ def read(cfg: Config) -> dict[str, object]:
     return data
 
 
-def answer(reply: str, then: Callable[[], None] | None = None) -> Callable[[str], str]:
+def answer(reply: str, then: Callable[[], object] | None = None) -> Callable[[str], str]:
     def ask(question: str) -> str:
         assert "Make this change?" in question
         if then is not None:
