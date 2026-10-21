@@ -73,13 +73,11 @@ def format_spikes(
         lines.append(f"{n:>3}. +{usd(s.excess_usd)}  {day_hm(s.start)}  {where}")
         lines.append(f"     {exps[0].title}")
         for e in exps:
-            conf = CONFIDENCE_LABELS[e.confidence]
-            label = (
-                CAUSE_LABELS[e.cause]
-                if e.confidence is not Confidence.UNEXPLAINED
-                else ("Unexplained")
-            )
-            lines.append(f"     {label}, {conf}: {usd(e.excess_usd)}")
+            if e.confidence is Confidence.UNEXPLAINED or e.cause is CauseKind.UNEXPLAINED:
+                lines.append(f"     Unexplained: {usd(e.excess_usd)}")
+            else:
+                conf = CONFIDENCE_LABELS[e.confidence]
+                lines.append(f"     {CAUSE_LABELS[e.cause]}: {usd(e.excess_usd)} ({conf})")
             if e is not exps[0]:
                 lines.append(f"       {e.title}")
             if e.summary:

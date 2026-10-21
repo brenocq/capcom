@@ -516,7 +516,11 @@ class Spike:
 class CauseKind(StrEnum):
     """The causes in design.md, "Causes (explain)"."""
 
-    IDLE_REWRITE = "idle_rewrite"  # cache rewritten after a pause past its lifetime
+    # A cache rewritten after a gap past its lifetime, by who was waiting (the stable
+    # sub-kinds checks use too: `capcom.explain.shared.EXPIRY_SUB_KINDS`):
+    IDLE_REWRITE = "idle_rewrite"  # "idle_expiry": the user was away (main thread, no tool)
+    TOOL_WAIT_EXPIRY = "tool_wait_expiry"  # the agent's own tool call ran past the lifetime
+    LATE_RESUME_EXPIRY = "late_resume_expiry"  # a finished subagent was resumed late
     COMPACTION = "compaction"  # cache rewritten after a compaction (or one ran late)
     MODEL_SWITCH = "model_switch"
     TOOL_SET_CHANGE = "tool_set_change"  # tools, connectors or skills changed mid-session
@@ -526,6 +530,7 @@ class CauseKind(StrEnum):
     LONG_REPORT = "long_report"  # a long subagent report reread by the parent
     THINKING_HEAVY = "thinking_heavy"
     POLLING = "polling"  # the same tool call repeated in a row
+    PARALLEL_SUBAGENTS = "parallel_subagents"  # many subagents' own work at once
     UNEXPLAINED = "unexplained"
 
 

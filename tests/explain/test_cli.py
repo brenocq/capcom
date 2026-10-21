@@ -54,7 +54,7 @@ def test_spikes_view(tmp_path: Path) -> None:
     assert "3 spikes; 2 matched to a cause in the logs" in text
     # ranked by excess: the idle rewrite first
     assert text.index("Cache rebuilt after 78 min idle") < text.index("The same Bash call")
-    assert "Idle past cache lifetime, clear cause: $1.90" in text
+    assert "Idle past cache lifetime: $1.90 (clear cause)" in text
     assert "What to change:" in text
     assert "Reading them would have cost $1.90 less." in text
     assert "(1 more spikes; raise --limit to see them)" in text

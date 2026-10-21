@@ -9,6 +9,8 @@ from capcom.types import CauseKind, Confidence
 
 CAUSE_LABELS: dict[CauseKind, str] = {
     CauseKind.IDLE_REWRITE: "Idle past cache lifetime",
+    CauseKind.TOOL_WAIT_EXPIRY: "Cache expired during a tool call",
+    CauseKind.LATE_RESUME_EXPIRY: "Subagent resumed late",
     CauseKind.COMPACTION: "Compaction",
     CauseKind.MODEL_SWITCH: "Model switch",
     CauseKind.TOOL_SET_CHANGE: "Tool or prompt change",
@@ -18,6 +20,7 @@ CAUSE_LABELS: dict[CauseKind, str] = {
     CauseKind.LONG_REPORT: "Long subagent report",
     CauseKind.THINKING_HEAVY: "Thinking-heavy turns",
     CauseKind.POLLING: "Polling and repetition",
+    CauseKind.PARALLEL_SUBAGENTS: "Parallel subagents' work",
     CauseKind.UNEXPLAINED: "No rule fits",
 }
 
