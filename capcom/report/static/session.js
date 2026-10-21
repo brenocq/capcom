@@ -10,6 +10,9 @@ import {
 import { niceTicks, activeAxis, xAxis } from './charts.js';
 import { timelineMissing } from './spend.js';
 
+// agent types whose lanes are open, kept across redraws (a theme switch, another session)
+const expandedTypes = new Set();
+
 export async function renderSession(main, r) {
   const d = await api('session/' + encodeURIComponent(r.arg || ''));
   // the API's times are ISO; the charts below place them in epoch ms
@@ -219,14 +222,35 @@ function unfolded(d) {
   types.forEach(([type, list], k) => {
     const color = SERIES[(k + 1) % SERIES.length] || OTHER_COLOR;
     const maxUsd = maxOf(list.map((a) => a.usd), 1e-9);
-    lanes.push(h('div.lab', null, h('span', null, h('b', { text: type }), ` ×${list.length}`)),
-      h('div.lane', null, list.map((a) => {
-        const l = x(a.first) * 100, w = Math.max((x(a.last) - x(a.first)) * 100, 0.3);
-        return tipOn(h('span', { style: `left:${l.toFixed(2)}%;width:${w.toFixed(2)}%;background:${color};opacity:${(0.45 + 0.55 * a.usd / maxUsd).toFixed(2)}` }),
-          `${type} · ${hm(new Date(a.first))} to ${hm(new Date(a.last))}`, [
-            { label: 'Requests', value: String(a.requests) }, { label: 'Tool calls', value: String(a.tool_calls) },
-            { label: 'Peak context', value: tokens(a.peak_context) }, { label: 'Cost', value: usd(a.usd) }]);
-      })));
+    const bar = (a) => {
+      const l = x(a.first) * 100, w = Math.max((x(a.last) - x(a.first)) * 100, 0.3);
+      return tipOn(h('span', { style: `left:${l.toFixed(2)}%;width:${w.toFixed(2)}%;background:${color};opacity:${(0.45 + 0.55 * a.usd / maxUsd).toFixed(2)}` }),
+        `${a.description || type} · ${hm(new Date(a.first))} to ${hm(new Date(a.last))}`, [
+          { label: 'Requests', value: String(a.requests) }, { label: 'Tool calls', value: String(a.tool_calls) },
+          { label: 'Peak context', value: tokens(a.peak_context) }, { label: 'Cost', value: usd(a.usd) }]);
+    };
+    if (list.length === 1) {
+      const [a] = list;
+      lanes.push(h('div.lab', null, h('span', null, h('b', { text: type }), ' ×1'),
+        a.description ? h('span.what', { text: a.description, title: a.description }) : null),
+      h('div.lane', null, bar(a)));
+      return;
+    }
+    // several of one type share a lane; the toggle adds a row per agent, by its spawn description
+    const shown = expandedTypes.has(type);
+    const rows = list.flatMap((a, i) => {
+      const name = a.description || `${type} ${i + 1}`;
+      return [h('div.lab.sub', { hidden: !shown }, h('span.what', { text: name, title: name })),
+        h('div.lane.sub', { hidden: !shown }, bar(a))];
+    });
+    const toggle = h('button.lanetoggle', { type: 'button', 'aria-expanded': String(shown), title: `Show each ${type} agent`, onclick: () => {
+      const open = !expandedTypes.has(type);
+      if (open) expandedTypes.add(type); else expandedTypes.delete(type);
+      toggle.setAttribute('aria-expanded', String(open));
+      for (const el of rows) el.hidden = !open;
+    } }, s('svg', { width: 10, height: 10, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 2.6, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' }, s('path', { d: 'M9 5l7 7-7 7' })),
+    h('span', null, h('b', { text: type }), ` ×${list.length}`));
+    lanes.push(h('div.lab', null, toggle), h('div.lane', null, list.map(bar)), ...rows);
   });
 
   // x labels: the start, each resume after a squeezed pause, the end

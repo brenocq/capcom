@@ -3,7 +3,9 @@
 routes, encodes and handles errors.
 
 Privacy: the payloads carry titles, project folders, paths, model, tool and agent
-names, counts, times and dollars; never a prompt, a reply or a spawn description.
+names, counts, times and dollars, and the session detail labels each subagent with
+its spawn description (the few words the Agent call names the task with); never a
+prompt or a reply.
 """
 
 from __future__ import annotations
@@ -648,7 +650,7 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
         kind = (ai.agent_type if ai else None) or "(unknown agent)"
         by_type.setdefault(kind, []).append(span)
         agents_json.append(
-            {"agent_id": aid, "agent_type": kind}
+            {"agent_id": aid, "agent_type": kind, "description": ai.description if ai else None}
             | span.to_json(ctx.tz)
             | {"finished": ai.finished if ai else None}
         )

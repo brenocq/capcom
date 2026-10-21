@@ -136,7 +136,7 @@ def build_index(path: Path) -> Path:
         models={"claude-opus-5-5": ModelUsage(cost_usd=1.0)},
     )  # fmt: skip
     _put(ix, _log(ALPHA, "s1"), [s1, *S1_MAIN, *SYNTH, compaction, cost_state])
-    scout = AgentInfo("a1", "s1", agent_type="scout", description="hidden text", finished=True)
+    scout = AgentInfo("a1", "s1", agent_type="scout", description="Map the parser", finished=True)
     _put(ix, _log(ALPHA, "s1", "a1"), [scout, *S1_AGENT])
     s2 = SessionInfo("s2", TMP, cwd="/tmp/scratch/1", first_seen=S2[0].timestamp)
     _put(ix, _log(TMP, "s2"), [s2, *S2])

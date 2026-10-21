@@ -195,9 +195,13 @@ def test_session_detail(client: Client) -> None:
     assert cal["capcom_usd"] == pytest.approx(usd(TODAY), abs=1e-5)
 
 
-def test_session_detail_privacy(client: Client) -> None:
-    body = json.dumps(client.get("/api/session/s1")[1])
-    assert "hidden text" not in body  # the spawn description stays out
+def test_spawn_description_labels_only_its_agent(client: Client) -> None:
+    data = client.get("/api/session/s1")[1]
+    [agent] = data["agents"]
+    assert agent["description"] == "Map the parser"
+    assert json.dumps(data).count("Map the parser") == 1
+    for path in ("overview", "spend", "sessions", "live", "spikes", "checks", "limits"):
+        assert "Map the parser" not in json.dumps(client.get(f"/api/{path}")[1]), path
 
 
 def test_session_not_found(client: Client) -> None:

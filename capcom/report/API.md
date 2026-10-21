@@ -32,7 +32,9 @@ Conventions:
   whole local days, today included.
 - Placeholder replies (`<synthetic>` models) are left out, as in `capcom top`.
 - Payloads carry titles, project folders, paths, model, tool and agent names, counts,
-  times and dollars; never prompt, reply or spawn-description text.
+  times and dollars; never prompt or reply text. The session detail labels each
+  subagent with its spawn description, the few words Claude Code's Agent call names
+  the task with; no other endpoint carries it.
 - Session titles are Claude Code's own generated titles (the `ai-title` record it
   derives from the conversation). capcom shows them as labels and stores nothing
   else of the conversation.
@@ -211,8 +213,8 @@ counts every matching session, temporary folders included (`temporary` of them).
  requests: {t, agent, context, usd, output, cache_write, estimated},   # columns, time order
  thinned: {requests, kept, spikes} | null,
  main: {first, last, requests, usd, tool_calls, peak_context} | null,
- agents: [{agent_id, agent_type, first, last, requests, usd, tool_calls,
-           peak_context, finished}],
+ agents: [{agent_id, agent_type, description, first, last, requests, usd, tool_calls,
+           peak_context, finished}],   # time order; description null when not logged
  agent_types: [{agent_type, spawns, tool_calls, median_tool_calls, average_peak_context,
                 usd, share}],   # main: spawns and median_tool_calls null (one thread)
  pauses: [{start, end, minutes, next_usd, next_cache_write}],    # gaps of 5 minutes or more
