@@ -14,7 +14,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, tzinfo
+from datetime import UTC, datetime, tzinfo
 from typing import Any, TextIO
 
 from capcom.config import Config
@@ -62,19 +62,27 @@ class Part:
 
 
 def part_of(index: Index, cs: CostState, table: PriceTable) -> Part:
-    """Where `cs`'s window sits in its session (one pass over its requests)."""
+    """Where `cs`'s window sits in its session (one pass over its requests).
+
+    Processes are counted from the starts the cost-states record, plus the ones that
+    wrote none: one more when the session has requests before the first recorded
+    start, and one more when it has requests after this (the last) cost-state's
+    window. Processes with no cost-state between two recorded starts leave no trace
+    in the logs, so `processes` is a lower bound."""
     since, until = window(cs)
     starts_fn = getattr(index, "process_starts", None)
     starts = (starts_fn(cs.session_id) if starts_fn else {}).get(cs.session_id, [])
     if cs.start_time_ms is not None and cs.start_time_ms not in starts:
         starts = sorted([*starts, cs.start_time_ms])
-    process = starts.index(cs.start_time_ms) + 1 if cs.start_time_ms is not None else None
-    total, earlier, later = 0.0, False, False
+    first_start = datetime.fromtimestamp(starts[0] / 1000, UTC) if starts else None
+    total, earlier, later, before_first = 0.0, False, False, False
     first = last = None
     for r in index.requests(session_id=cs.session_id):
         if is_placeholder(r.model):
             continue
         total += price(r, table).total
+        if first_start is not None and r.timestamp < first_start:
+            before_first = True
         if since is not None and r.timestamp < since:
             earlier = True
         elif until is None or r.timestamp < until:
@@ -82,7 +90,10 @@ def part_of(index: Index, cs: CostState, table: PriceTable) -> Part:
             last = r.timestamp
         else:
             later = True
-    return Part(since, until, first, last, process, max(len(starts), 1), earlier, total, later)
+    ahead = 1 if before_first else 0
+    process = starts.index(cs.start_time_ms) + 1 + ahead if cs.start_time_ms is not None else None
+    processes = max(len(starts), 1) + ahead + (1 if later else 0)
+    return Part(since, until, first, last, process, processes, earlier, total, later)
 
 
 def _when(t: datetime | None, tz: tzinfo | None) -> str:
@@ -114,8 +125,11 @@ def difference_note(c: Calibration, p: Part, tz: tzinfo | None = None) -> str | 
         if p.process is not None and p.processes > 1
         else "one process"
     )
+    span = f"from {_when(p.since or p.first, tz)}"
+    if p.later:
+        span += f" to {_when(p.last, tz)}, later requests not in it"
     return (
-        f"Claude Code's cost-state counts only {which} (from {_when(p.since or p.first, tz)}): "
+        f"Claude Code's cost-state counts only {which} ({span}): "
         f"capcom counts {usd(c.capcom_usd)} for that part, {usd(p.session_usd)} for the "
         "whole session."
     )

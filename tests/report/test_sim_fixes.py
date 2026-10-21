@@ -387,9 +387,12 @@ def test_requests_after_the_last_cost_state(tmp_path: Path) -> None:
     )
     ix.close()
     cal = api.session(_ctx(path), "on")["calibration"]
-    assert cal["part"]["whole_session"] is False and cal["part"]["process"] == 1
-    assert cal["part"]["text"].endswith("one process, later requests not in it")
-    assert cal["note"] is not None and "one process" in cal["note"]
+    # the later requests are a second process that wrote no cost-state yet
+    assert cal["part"]["whole_session"] is False
+    assert (cal["part"]["process"], cal["part"]["processes"]) == (1, 2)
+    assert cal["part"]["text"].endswith("process 1 of 2, later requests not in it")
+    assert cal["note"] is not None and "later requests not in it" in cal["note"]
+    assert "process 1 of 2" in cal["note"]
     out = io.StringIO()
     run_calibrate(
         load_config(), 20, days=7, index=open_index(path, readonly=True), out=out, now=NOW, tz=UTC
@@ -415,3 +418,20 @@ def test_cause_filter_is_in_the_cache_key(cause_client: Client) -> None:
     _, b, _ = cause_client.get("/api/spikes?days=1&cause=parallel_subagents")
     assert a["cause"] == "tool_wait_expiry" and b["cause"] == "parallel_subagents"
     assert {s["key"] for s in a["spikes"]} != {s["key"] for s in b["spikes"]}
+
+
+def test_a_process_before_the_first_cost_state_counts(tmp_path: Path) -> None:
+    """Requests before the only recorded start were a process that wrote none."""
+    path = tmp_path / "index.sqlite"
+    ix = open_index(path)
+    old = [req("pre", NOW - timedelta(days=3), GAMMA, output=40_000)]
+    new = [req("pre", NOW - timedelta(hours=h), GAMMA, output=60_000) for h in (3, 2)]
+    start = int((NOW - timedelta(hours=4)).timestamp() * 1000)
+    m = {"claude-opus-5-5": ModelUsage(cost_usd=usd(new))}
+    cs = CostState("pre", 50, usd(new), m, start, None, new[-1].timestamp, None)
+    info = SessionInfo("pre", GAMMA, cwd="/home/user/gamma", last_seen=new[-1].timestamp)
+    _put(ix, _log(GAMMA, "pre"), [info, *old, *new, cs])
+    ix.close()
+    cal = api.session(_ctx(path), "pre")["calibration"]
+    assert (cal["part"]["process"], cal["part"]["processes"]) == (2, 2)
+    assert "process 2 of 2" in cal["note"] and "later" not in cal["note"]

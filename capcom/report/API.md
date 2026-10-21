@@ -237,11 +237,15 @@ session's first and last request stay. Totals, `main`, `agents` and
 come from `capcom.cost.calibrate`). Claude Code's cost-state counts one process: `part`
 is the stretch of the session it compares, from the process start (`since`) to the
 first record after the cost-state (`until`, null while open), with its first and
-last request; `process` of `processes` numbers it among the processes that wrote a
-cost-state (null without a start time), and `whole_session` is false when the
-session has requests before it (a resumed session). `capcom_usd` is that part;
+last request; `process` of `processes` numbers it among the session's processes
+(null without a start time): the starts the cost-states record, plus one process
+for requests before the first recorded start and one for requests after this
+cost-state's window (a process that has written none yet), so `processes` is a
+lower bound. `whole_session` is false when the session has requests outside the
+part (resumed before, or running on after). `capcom_usd` is that part;
 `session_usd` is every request, as `totals.usd`; `note` says so in one line when
-they differ ("Claude Code's cost-state counts only process 2 of 3 ..."), else null.
+they differ ("Claude Code's cost-state counts only process 2 of 3 (from ...)", with
+"later requests not in it" when the session ran on after it), else null.
 `capcom calibrate` prints the same part per session (`--days`, `--project`). A session whose replies are all placeholders has
 0 active seconds. A session is
 `running` when it wrote within the last 10 minutes.
