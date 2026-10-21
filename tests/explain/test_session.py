@@ -80,6 +80,7 @@ def test_spawned_fan_out_counts_only_new_threads() -> None:
     in_span = [r for r in [*main, *old, call] if at(10) <= r.timestamp < at(20)]
     s = session_spike(w, 10, 20, baseline=sum(cost(r) for r in in_span))
     found = by_cause(run(w, s))
+    assert set(found) == {CauseKind.FAN_OUT, CauseKind.UNEXPLAINED}  # fan-out and the rest
     e = found[CauseKind.FAN_OUT]
     # only the prefixes: each new agent's first request's cache writes
     assert e.excess_usd == pytest.approx(sum(prefix(r) for r in new[::2]))
@@ -227,7 +228,7 @@ def test_parallel_verifiers_are_charged_their_prefixes_only() -> None:
     # the agents' own work goes to the other rules or to the unexplained rest, and every
     # dollar of the excess is in one explanation
     assert sum(x.excess_usd for x in out) == pytest.approx(s.excess_usd)
-    assert CauseKind.UNEXPLAINED in found or CauseKind.CONTEXT_GROWTH in found
+    assert set(found) == {CauseKind.FAN_OUT, CauseKind.CONTEXT_GROWTH, CauseKind.UNEXPLAINED}
 
 
 def test_spikes_view_totals_by_cause_add_up() -> None:
@@ -247,7 +248,7 @@ def test_spikes_view_totals_by_cause_add_up() -> None:
 
 
 def test_small_fan_out_shows_beside_growth_and_the_rest() -> None:
-    # the bcbbaac4 shape: eleven verifiers whose prefixes are under a tenth of a spike
+    # eleven verifiers whose prefixes are under a tenth of a spike
     # mostly made of their own long work
     w = World()
     main = steady_main(w, 60)

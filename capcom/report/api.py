@@ -1031,8 +1031,16 @@ def spikes(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     for i, sp in enumerate(shown):
         item = _spike_json(ctx, sp, causes.get(sp, []), infos, agents, names)
         items.append({"n": i + 1} | item | {"window": _spike_window(ctx, sp)})
+    # matched as capcom.explain.matched counts it: its causes other than UNEXPLAINED
+    # cover at least KEEP_SHARE (a tenth) of the spike's excess
     explained_count = sum(
-        1 for sp in found if any(e.cause != CauseKind.UNEXPLAINED for e in causes.get(sp, ()))
+        1
+        for sp in found
+        if (
+            got := sum(e.excess_usd for e in causes.get(sp, ()) if e.cause != CauseKind.UNEXPLAINED)
+        )
+        > 0
+        and got >= 0.10 * sp.excess_usd
     )
     return {
         "days": days,

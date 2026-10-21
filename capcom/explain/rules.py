@@ -544,26 +544,6 @@ def classify(rw: Rewrite) -> None:
         rw.evidence.append(wrote)
         return
 
-    # a prompt that shrank with no compact_boundary: something cut the context early
-    # on (Claude Code drops old tool results without logging a compaction), so the
-    # cache is rebuilt from the cut on
-    drop = p.usage.context - r.usage.context
-    if drop >= TRIM_MIN_TOKENS and drop >= TRIM_SHARE * p.usage.context:
-        rw.reason, rw.confidence, rw.trimmed = CauseKind.COMPACTION, Confidence.LIKELY, True
-        rw.evidence = [
-            _ev(
-                f"The prompt went from {fmt.approx(p.usage.context)} to "
-                f"{fmt.approx(r.usage.context)} tokens between the requests at "
-                f"{fmt.clock(p.timestamp)} and {fmt.clock(r.timestamp)}, with no "
-                "compact_boundary between them",
-                m,
-                r,
-            ),
-            _ev(f"Only the first {fmt.approx(r.usage.cache_read)} were read from the cache", m, r),
-            wrote,
-        ]
-        return
-
     if expired:
         _idle(rw, Confidence.LIKELY, how, wrote)
         return
@@ -590,6 +570,26 @@ def classify(rw: Rewrite) -> None:
     if deltas:
         rw.reason, rw.confidence = CauseKind.TOOL_SET_CHANGE, Confidence.LIKELY
         rw.evidence = [_delta_line(m, e) for e in deltas[-3:]] + [wrote]
+        return
+    # a prompt that shrank with no compact_boundary and none of the causes above (a
+    # tool or connector removed also shrinks it): something cut the context early
+    # on (Claude Code drops old tool results without logging a compaction), so the
+    # cache is rebuilt from the cut on
+    drop = p.usage.context - r.usage.context
+    if drop >= TRIM_MIN_TOKENS and drop >= TRIM_SHARE * p.usage.context:
+        rw.reason, rw.confidence, rw.trimmed = CauseKind.COMPACTION, Confidence.LIKELY, True
+        rw.evidence = [
+            _ev(
+                f"The prompt went from {fmt.approx(p.usage.context)} to "
+                f"{fmt.approx(r.usage.context)} tokens between the requests at "
+                f"{fmt.clock(p.timestamp)} and {fmt.clock(r.timestamp)}, with no "
+                "compact_boundary between them",
+                m,
+                r,
+            ),
+            _ev(f"Only the first {fmt.approx(r.usage.cache_read)} were read from the cache", m, r),
+            wrote,
+        ]
         return
     rw.reason, rw.confidence = CauseKind.UNEXPLAINED, Confidence.UNEXPLAINED
     rw.evidence = [
@@ -1735,12 +1735,14 @@ RULES: tuple[Callable[[SpikeView], list[Candidate]], ...] = (
 
 
 def merge(cands: list[Candidate]) -> list[Candidate]:
-    """One candidate per cause: excesses add up, the largest part names it."""
-    by: dict[CauseKind, list[Candidate]] = {}
+    """One candidate per cause: excesses add up, the largest part names it. A trim
+    (a prompt cut with no compaction record) stays apart from the logged compactions:
+    its title, advice and summary say something else."""
+    by: dict[tuple[CauseKind, bool], list[Candidate]] = {}
     for c in cands:
-        by.setdefault(c.cause, []).append(c)
+        by.setdefault((c.cause, c.advice == _TRIM_ADVICE), []).append(c)
     out = []
-    for cause, group in by.items():
+    for (cause, _), group in by.items():
         if len(group) == 1:
             out.append(group[0])
             continue

@@ -36,12 +36,18 @@ def has(e: Explanation, text: str) -> bool:
 REST = "The rest of the spike: no rule fits"
 
 
-def only(w: World, s: Spike) -> Explanation:
-    """The spike's one cause (or its one UNEXPLAINED), apart from the unmatched rest."""
+def only(w: World, s: Spike, rest: float | None = None) -> Explanation:
+    """The spike's one cause (or its one UNEXPLAINED), apart from the unmatched rest.
+    The two add up to the spike's excess, so a test that pins the cause's dollars pins
+    the rest's; `rest`, when given, is the rest's size in dollars."""
     out = run(w, s)
+    assert sum(x.excess_usd for x in out) == pytest.approx(s.excess_usd)
     causes = [x for x in out if x.title != REST]
     assert len(causes) == 1, [(x.cause, x.excess_usd) for x in out]
-    assert all(x.cause is CauseKind.UNEXPLAINED for x in out if x.title == REST)
+    rests = [x for x in out if x.title == REST]
+    assert all(x.cause is CauseKind.UNEXPLAINED for x in rests)
+    if rest is not None:
+        assert sum(x.excess_usd for x in rests) == pytest.approx(rest)
     return causes[0]
 
 
@@ -136,20 +142,20 @@ def test_rewrite_after_compaction() -> None:
 
 
 def test_context_trimmed_without_a_compaction_record() -> None:
-    # a 912k prompt, then 10 s later 830k with only its first 36k read from the cache
+    # a 608k prompt, then 10 s later 522k with only its first 25k read from the cache
     w = World()
-    w.req(0, cache_write_1h=900_000)
-    w.req(1, cache_read=900_000, cache_write_1h=12_000)
-    r = w.req(1 + 10 / 60, cache_read=36_000, cache_write_1h=794_000)
+    w.req(0, cache_write_1h=600_000)
+    w.req(1, cache_read=600_000, cache_write_1h=8_000)
+    r = w.req(1 + 10 / 60, cache_read=25_000, cache_write_1h=497_000)
     e = only(w, spike([r], baseline=0.1))
     assert e.cause is CauseKind.COMPACTION
     assert e.confidence is Confidence.LIKELY
     assert e.title == "Context trimmed without a compaction record, cache rebuilt"
-    assert e.excess_usd == pytest.approx(794_000 * 9.5 / 1e6)
-    assert has(e, "The prompt went from 912k to 830k tokens between the requests at")
+    assert e.excess_usd == pytest.approx(497_000 * 9.5 / 1e6)
+    assert has(e, "The prompt went from 608k to 522k tokens between the requests at")
     assert has(e, "with no compact_boundary between them")
-    assert has(e, "Only the first 36k were read from the cache")
-    assert "shrank from 912k to 830k tokens with no compaction record" in e.summary
+    assert has(e, "Only the first 25k were read from the cache")
+    assert "shrank from 608k to 522k tokens with no compaction record" in e.summary
 
 
 @pytest.mark.parametrize(
@@ -591,10 +597,12 @@ def test_a_tiny_rest_is_folded_into_the_largest_cause() -> None:
     w.req(2, cache_read=200_000)
     r2 = w.req(80, cache_write_1h=205_000)
     s = replace(spike([r2]), cost_usd=1.93, baseline_usd=0.0)  # $0.03 left, 1.6 %
-    e = only(w, s)
+    e = only(w, s, rest=0.0)
     assert e.cause is CauseKind.IDLE_REWRITE
     assert len(run(w, s)) == 1
     assert e.excess_usd == pytest.approx(1.93)
+    # the summary names the dollars the line shows, the folded cents included
+    assert "$1.93 is counted here" in e.summary
 
 
 def test_machine_wide_spike_and_order() -> None:
@@ -667,7 +675,78 @@ def test_a_small_clear_cause_is_kept() -> None:
 )
 def test_a_small_cause_under_the_floor_folds_into_the_rest(tokens: int, ttl_known: bool) -> None:
     w, s = _idle_world(tokens, ttl_known)
-    e = only(w, s)
+    e = only(w, s, rest=0.0)
     assert e.cause is CauseKind.UNEXPLAINED
     assert e.excess_usd == pytest.approx(25.0)
     assert has(e, "Closest: ")
+
+
+def test_a_connector_removed_is_a_tool_change_not_a_trim() -> None:
+    # an MCP server disconnects: its instructions and 55 deferred tools leave the
+    # prompt, which shrinks from 210k to 180k with no compaction record
+    w = World()
+    w.req(0, cache_write_1h=200_000)
+    w.req(1, cache_read=200_000, cache_write_1h=10_000)
+    gone = tuple(f"mcp__srv__tool{k}" for k in range(55))
+    w.event(EventKind.TOOL_SET, 1.5, source="mcp_instructions_delta", added=(), removed=("srv",))
+    w.event(EventKind.TOOL_SET, 1.5, source="deferred_tools_delta", added=(), removed=gone)
+    r = w.req(2, cache_read=4_000, cache_write_1h=176_000)
+    e = only(w, spike([r], baseline=0.1))
+    assert e.cause is CauseKind.TOOL_SET_CHANGE
+    assert e.confidence is Confidence.LIKELY
+    assert has(e, "deferred_tools_delta at")
+
+
+def test_a_cold_cache_on_the_assumed_lifetime_is_not_a_trim() -> None:
+    # 5-minute entries, reads only: the lifetime is assumed, and the prompt also shrank
+    w = World()
+    w.req(0, cache_write_5m=200_000)
+    w.req(1, cache_read=200_000)
+    r = w.req(30, cache_read=4_000, cache_write_5m=170_000)
+    e = only(w, spike([r], baseline=0.1))
+    assert e.cause is CauseKind.IDLE_REWRITE
+    assert e.confidence is Confidence.LIKELY
+
+
+def test_a_trim_and_a_logged_compaction_stay_apart() -> None:
+    w = World()
+    w.req(0, cache_write_1h=300_000)
+    w.req(1, cache_read=300_000)
+    w.event(EventKind.COMPACTION, 2, trigger="auto", pre_tokens=300_000, post_tokens=40_000)
+    comp = w.req(3, cache_write_1h=40_000)
+    w.req(4, cache_read=40_000, cache_write_1h=160_000)
+    trim = w.req(4.2, cache_read=4_000, cache_write_1h=150_000)
+    out = run(w, spike([comp, trim], baseline=0.1))
+    titles = {e.title: e for e in out if e.cause is CauseKind.COMPACTION}
+    assert set(titles) == {
+        "Cache rewritten after a compaction",
+        "Context trimmed without a compaction record, cache rebuilt",
+    }
+    logged = titles["Cache rewritten after a compaction"]
+    trimmed = titles["Context trimmed without a compaction record, cache rebuilt"]
+    assert logged.excess_usd == pytest.approx(40_000 * 9.5 / 1e6)
+    assert trimmed.excess_usd == pytest.approx(150_000 * 9.5 / 1e6, abs=0.01)  # + tiny rest
+    assert logged.advice != trimmed.advice
+
+
+def test_a_small_clear_cause_under_the_share_floor_folds_into_the_rest() -> None:
+    w, s = _idle_world(200_000)
+    s = replace(s, cost_usd=100.0)  # $1.90 of $100: over $0.50, but under 3 %
+    e = only(w, s, rest=0.0)
+    assert e.cause is CauseKind.UNEXPLAINED
+    assert e.excess_usd == pytest.approx(100.0)
+
+
+def test_a_spike_is_matched_only_when_its_causes_cover_a_tenth() -> None:
+    from capcom.explain import matched
+    from capcom.explain.cli import format_spikes
+
+    w, small = _idle_world(200_000)
+    small = replace(small, cost_usd=50.0)  # $1.90 of $50: kept (3.8 %), not a tenth
+    big = replace(small, cost_usd=10.0)  # $1.90 of $10: a tenth and more
+    for s, want in ((small, False), (big, True)):
+        out = run(w, s)
+        assert any(e.cause is CauseKind.IDLE_REWRITE for e in out)
+        assert matched(s, out) is want
+    text = format_spikes(explain(w.index, TABLE, [small, big]), 5, {}, {})
+    assert text.startswith("2 spikes; 1 matched to a cause")

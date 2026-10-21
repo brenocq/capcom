@@ -10,6 +10,7 @@ from typing import TextIO
 
 from capcom.config import Config
 from capcom.explain import explain
+from capcom.explain import matched as is_matched
 from capcom.explain.fmt import CAUSE_LABELS, CONFIDENCE_LABELS, day_hm, usd
 from capcom.types import CauseKind, Confidence, Explanation, Index, PriceTable, Spike
 
@@ -48,9 +49,7 @@ def format_spikes(
         by_spike.setdefault(e.spike, []).append(e)
     spikes = sorted(by_spike, key=lambda s: (-s.excess_usd, s.start))
     total = sum(s.excess_usd for s in spikes)
-    matched = sum(
-        1 for s in spikes if any(e.cause is not CauseKind.UNEXPLAINED for e in by_spike[s])
-    )
+    matched = sum(1 for s in spikes if is_matched(s, by_spike[s]))
     lines = [
         f"{len(spikes)} spikes; {matched} matched to a cause in the logs; together "
         f"{usd(total)} above the usual pace.",
