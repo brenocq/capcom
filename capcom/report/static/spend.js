@@ -69,7 +69,7 @@ export function spikeList(sp, days, limit = 4) {
       h('span.meta', null, projectChip(m), h('span', { text: spikeWhen(m) })),
       h('b', { text: spikeText(m).title }),
       spikeText(m).rest ? h('span.rest', { text: spikeText(m).rest }) : null,
-      h('span.tags', null, h('span.tag', { text: spikeText(m).tag }),
+      h('span.tags', null, spikeText(m).same ? null : h('span.tag', { text: spikeText(m).tag }),
         h('span.plus', { text: `+${usd(m.excess_usd)}` }),
         h('span.note', { text: `${m.requests} request${m.requests === 1 ? '' : 's'}, ${usd(m.cost_usd)} in all` })))));
   const more = sp.count > rows.length ? `${sp.count} spike${sp.count === 1 ? '' : 's'} in all, +${usd(sp.excess_usd)} over their baselines; the largest are marked. ` : '';

@@ -289,7 +289,7 @@ def test_spikes_times_causes_and_largest(spikes_index: Path) -> None:
     big = max(items, key=lambda it: it["excess_usd"])
     assert data["largest"] == big["key"]
     colors = {c["cause"]: c["color"] for c in data["causes"]}
-    assert colors["tool_wait_expiry"] == "var(--s1)" and colors["parallel_subagents"] == "var(--s4)"
+    assert colors["tool_wait_expiry"] == "var(--s1)" and colors["parallel_subagents"] == "var(--s2)"
     labels = {c["cause"]: c["label"] for c in data["causes"]}
     assert labels["parallel_subagents"] != labels["tool_wait_expiry"]
     one = api.spikes(ctx, {"days": "1", "cause": "parallel_subagents"})
@@ -359,3 +359,35 @@ def test_calibrate_cli_rows_and_filters(resumed: Path, plain: Path) -> None:
     out = io.StringIO()
     run_calibrate(load_config(), 20, project="gamma", index=ix, out=out, now=NOW, tz=UTC)
     assert "process 2 of 2" in out.getvalue()
+
+
+def test_requests_after_the_last_cost_state(tmp_path: Path) -> None:
+    """A session that ran on in a process that has not written a cost-state yet: the
+    compared part says so, and --days counts the session's own last record."""
+    path = tmp_path / "index.sqlite"
+    ix = open_index(path)
+    early = [req("on", NOW - timedelta(days=12, hours=h), GAMMA, output=50_000) for h in (3, 2)]
+    late = [req("on", NOW - timedelta(hours=1), GAMMA, output=80_000)]
+    start = int((NOW - timedelta(days=12, hours=4)).timestamp() * 1000)
+    m = {"claude-opus-5-5": ModelUsage(cost_usd=usd(early))}
+    cs = CostState("on", 50, usd(early), m, start, None, early[-1].timestamp, late[0].timestamp)
+    _put(
+        ix,
+        _log(GAMMA, "on"),
+        [
+            SessionInfo("on", GAMMA, cwd="/home/user/gamma", last_seen=late[0].timestamp),
+            *early,
+            cs,
+            *late,
+        ],
+    )
+    ix.close()
+    cal = api.session(_ctx(path), "on")["calibration"]
+    assert cal["part"]["whole_session"] is False and cal["part"]["process"] == 1
+    assert cal["part"]["text"].endswith("one process, later requests not in it")
+    assert cal["note"] is not None and "one process" in cal["note"]
+    out = io.StringIO()
+    run_calibrate(
+        load_config(), 20, days=7, index=open_index(path, readonly=True), out=out, now=NOW, tz=UTC
+    )
+    assert "later requests not in it" in out.getvalue()

@@ -1,7 +1,7 @@
 // Checks: setup warnings drawn from real usage, ranked by the weekly saving, each
 // with its evidence, a small chart from its numbers and the change to paste.
 
-import { h, usd, pct, tokens, seg, empty, setQuery, sessionHref, stamp, maxOf, copyButton, daysText } from './lib.js';
+import { h, usd, pct, monthDay, hm, tokens, seg, empty, setQuery, sessionHref, maxOf, copyButton, daysText } from './lib.js';
 import { pendingBlock } from './sessions.js';
 
 const RANGES = [[7, '7 days'], [14, '14 days'], [30, '30 days']];
@@ -27,7 +27,8 @@ export async function renderChecks(main, r) {
     head.insertBefore(h('div.totalbox', { title: t.text },
       h('span.label', { text: totalLabel(t) }),
       h('span.big', null, 'up to ' + usd(t.usd_per_week, 0), h('small', { text: ' a week' })),
-      h('span.note', { text: t.text[0].toUpperCase() + t.text.slice(1) + '.' })), head.lastChild);
+      // the label says what it adds; the note only what it leaves out
+      t.judgement_calls ? h('span.note', { text: `Judgement calls, up to ${usd(t.judgement_calls.usd_per_week, 0)}/wk more, are listed apart and not in it.` }) : null), head.lastChild);
   }
   if (d.overlapping) {
     main.append(h('p.notice', { text: 'Some of these savings count the same dollars: a long context and the late compaction that ends it, say. Each saving is an “up to” on its own; the total counts each dollar once, over the findings that do not overlap.' }));
@@ -41,7 +42,7 @@ export async function renderChecks(main, r) {
   if (counted.length) {
     main.append(h('section.card.rollups', null, h('h2', { text: 'By kind' }),
       h('p.note', { style: 'margin:0 0 8px', text: 'Each kind across the places it was found, with the share of each. Open a row for its findings.' }),
-      counted.map((r, i) => rollupRow(r, byN, titleOf, i === 0))));
+      counted.map((r) => rollupRow(r, byN, titleOf, false))));
   }
   if (judged.length) {
     const sum = judged.reduce((a, r) => a + r.saving_usd_per_week, 0);
@@ -65,15 +66,18 @@ function rollupRow(r, byN, titleOf, open) {
   const scopes = r.scopes.length === 1 && r.scopes[0].scope === 'all' ? 'across every project'
     : `across ${r.scopes.length} ${noun}: ` + r.scopes.slice(0, 4).map((x) => `${x.scope_label} ${pct(x.share)}`).join(', ') + (r.scopes.length > 4 ? `, ${r.scopes.length - 4} more` : '');
   const tags = [];
-  if (r.judgement_call) tags.push(h('span.tag', { text: 'judgement call, not in the total' }));
-  else if (r.counted === 'none') tags.push(h('span.tag.over', { text: 'overlaps: not in the total', title: 'Its dollars are counted under the kind it overlaps.' }));
+  // a judgement call's own section already says it is not in the total
+  if (r.judgement_call) { /* no tag */ } else if (r.counted === 'none') tags.push(h('span.tag.over', { text: 'overlaps: not in the total', title: 'Its dollars are counted under the kind it overlaps.' }));
   else if (r.counted === 'some') tags.push(h('span.tag.over', { text: 'partly in the total', title: 'Some of its findings overlap a larger one and are left out of the total.' }));
-  if (r.overlaps.length) tags.push(h('span.note', { text: 'may share dollars with ' + r.overlaps.map((k) => titleOf.get(k) || k).join(', ') }));
+  // only the kinds this window found; the most a line can name is three
+  const near = r.overlaps.filter((k) => titleOf.has(k)).map((k) => titleOf.get(k));
+  // named only where it matters: on a kind left out of the total in part or in whole
+  if (near.length && r.counted !== 'all' && !r.judgement_call) tags.push(h('span.note', { text: 'may share dollars with ' + near.slice(0, 3).join(', ') + (near.length > 3 ? `, ${near.length - 3} more` : '') }));
   return h('details.rollup', { open: open || null },
     h('summary', null,
       h('span.mtext', null, h('b', { text: r.title }), h('span.note.block', { text: scopes }), tags.length ? h('span.tags', null, ...tags) : null),
       h('span.save', null, h('small', { text: 'up to ' }), usd(r.saving_usd_per_week, r.saving_usd_per_week < 10 ? 2 : 0) + '/wk')),
-    h('div.rfind', null, findings.map((f) => card(f))));
+    h('div.rfind', null, findings.map((f) => card(f, true))));
 }
 
 
@@ -84,12 +88,15 @@ export function totalLabel(t) {
   return `Across ${n} that don't overlap` + (t.all ? '' : ` (of ${t.of})`);
 }
 
-function card(f) {
+// A finding; inside its kind's row (`scoped`) it is headed by its scope instead of
+// the kind's title, which the row already says.
+function card(f, scoped = false) {
+  const scopeName = f.scope && f.scope !== 'all' ? (f.scope_label || f.scope) : 'Every project';
   const box = h('section.card.check');
   box.append(h('div.chead', null,
     h('span.n', { text: String(f.n) }),
     h('div.ctext', null,
-      h('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;align-items:baseline' }, h('h2', { text: f.title }), f.scope && f.scope !== 'all' ? h('span.chip', { text: f.scope_label || f.scope, title: f.scope_path || null }) : null,
+      h('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;align-items:baseline' }, h('h2', { text: scoped ? scopeName : f.title, title: scoped ? (f.scope_path || null) : null }), !scoped && f.scope && f.scope !== 'all' ? h('span.chip', { text: f.scope_label || f.scope, title: f.scope_path || null }) : null,
         f.counted ? null : h('span.tag.over', { text: f.metrics && f.metrics.judgement_call ? 'judgement call' : 'overlaps a larger finding', title: 'Not added to the total.' })),
       h('p.para', { text: f.summary })),
     h('span.save', { title: 'Estimated at this window’s pace' }, h('small', { text: 'up to ' }), usd(f.saving_usd_per_week, f.saving_usd_per_week < 10 ? 2 : 0) + '/wk')));
@@ -105,7 +112,7 @@ function body(f) {
     left.append(h('div.facts', null, h('h3', { text: 'Evidence in the logs' }),
       h('ul.evidence', null, f.evidence.map((e) => h('li', null,
         e.session_id ? h('a', { href: sessionHref(e.session_id), text: e.label }) : h('span', { text: e.label }),
-        e.timestamp ? h('span.note', { text: ' · ' + stamp(new Date(e.timestamp)) }) : null)))));
+        e.timestamp ? h('span.note', { text: ' · ' + `${monthDay(new Date(e.timestamp))} ${hm(new Date(e.timestamp))}` }) : null)))));
   }
   const fix = h('div.fix', null, h('h3', { text: 'What to change' }), h('p', { text: f.advice }));
   if (f.change) fix.append(h('pre.change', { text: f.change }), h('div', null, copyButton(f.change)));

@@ -322,3 +322,4 @@ details.rollup .tags { display: flex; flex-wrap: wrap; gap: 6px; align-items: ba
 .causechip i { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
 .causechip[aria-pressed="true"] { background: var(--sel); font-weight: 600; }
 .causechip:hover { background: var(--l15); }
+.causechips { align-items: center; margin: -6px 0 0; }

@@ -273,7 +273,10 @@ export const SPIKE_KINDS = {
 export function spikeText(m) {
   const kind = SPIKE_KINDS[m.kind] || [m.kind, m.kind];
   const rest = m.mostly_unexplained && m.cause !== 'unexplained' ? `mostly unexplained: ${usd(m.unexplained_usd)} of ${usd(m.excess_usd)}` : null;
-  return { title: m.headline || kind[0], tag: m.cause_label || kind[1], unexplained: m.cause === 'unexplained', rest };
+  const title = m.headline || kind[0], tag = m.cause_label || kind[1];
+  // `same`: the title already starts with the tag's words, so the tag would repeat it
+  const same = title.toLowerCase().startsWith(tag.toLowerCase());
+  return { title, tag, same, unexplained: m.cause === 'unexplained', rest };
 }
 
 // The Spikes page for one spike: a window of whole days that starts on or before it.

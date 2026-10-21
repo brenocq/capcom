@@ -54,10 +54,11 @@ class Part:
     processes: int  # processes that wrote a cost-state (at least 1)
     earlier: bool  # requests before the window: a resumed session
     session_usd: float  # every request of the session
+    later: bool = False  # requests after the window: a process with no cost-state yet
 
     @property
     def whole(self) -> bool:
-        return not self.earlier
+        return not self.earlier and not self.later
 
 
 def part_of(index: Index, cs: CostState, table: PriceTable) -> Part:
@@ -68,7 +69,7 @@ def part_of(index: Index, cs: CostState, table: PriceTable) -> Part:
     if cs.start_time_ms is not None and cs.start_time_ms not in starts:
         starts = sorted([*starts, cs.start_time_ms])
     process = starts.index(cs.start_time_ms) + 1 if cs.start_time_ms is not None else None
-    total, earlier = 0.0, False
+    total, earlier, later = 0.0, False, False
     first = last = None
     for r in index.requests(session_id=cs.session_id):
         if is_placeholder(r.model):
@@ -79,7 +80,9 @@ def part_of(index: Index, cs: CostState, table: PriceTable) -> Part:
         elif until is None or r.timestamp < until:
             first = first or r.timestamp
             last = r.timestamp
-    return Part(since, until, first, last, process, max(len(starts), 1), earlier, total)
+        else:
+            later = True
+    return Part(since, until, first, last, process, max(len(starts), 1), earlier, total, later)
 
 
 def _when(t: datetime | None, tz: tzinfo | None) -> str:
@@ -90,13 +93,15 @@ def _when(t: datetime | None, tz: tzinfo | None) -> str:
 
 
 def part_text(p: Part, tz: tzinfo | None = None) -> str:
-    """'Oct 16 10:02 to Oct 21 14:10, process 2 of 3', or 'whole session'."""
+    """'Oct 16 10:02 to Oct 21 14:10, process 2 of 3', or 'whole session'; with
+    ', later requests not in it' when the session ran on after the cost-state."""
     if p.whole:
         return "whole session"
     span = f"{_when(p.since or p.first, tz)} to {_when(p.last, tz)}"
+    tail = ", later requests not in it" if p.later else ""
     if p.process is not None and p.processes > 1:
-        return f"{span}, process {p.process} of {p.processes}"
-    return f"{span}, the last process"
+        return f"{span}, process {p.process} of {p.processes}{tail}"
+    return f"{span}, one process{tail}"
 
 
 def difference_note(c: Calibration, p: Part, tz: tzinfo | None = None) -> str | None:
@@ -107,7 +112,7 @@ def difference_note(c: Calibration, p: Part, tz: tzinfo | None = None) -> str | 
     which = (
         f"process {p.process} of {p.processes}"
         if p.process is not None and p.processes > 1
-        else "the last process"
+        else "one process"
     )
     return (
         f"Claude Code's cost-state counts only {which} (from {_when(p.since or p.first, tz)}): "
@@ -220,7 +225,8 @@ def run_calibrate(
     states = []
     for cs in index.last_cost_states():
         info = infos.get(cs.session_id)
-        seen = cs.timestamp or (info.last_seen if info else None)
+        # active in the window: its last record, or its cost-state's
+        seen = max((t for t in (cs.timestamp, info.last_seen if info else None) if t), default=None)
         if since is not None and (seen is None or seen < since):
             continue
         if project and not _matches(project, info, names):

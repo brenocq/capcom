@@ -104,9 +104,10 @@ function calibration(c, t) {
     h('div.vals', null, h('span', null, 'Claude Code', h('b', { text: usd(c.claude_code_usd) })), h('span', null, 'capcom', h('b', { text: usd(c.capcom_usd) }))));
 }
 
-// "the last process (Oct 16 10:02 to Oct 21 14:10, process 2 of 3)"
+// "process 2 of 3 (Oct 16 10:02 to Oct 21 14:10)", or "one process (...)"
 function partWords(p) {
-  return p.process && p.processes > 1 ? `process ${p.process} of ${p.processes} (${p.text.split(', process')[0]})` : `the last process (${p.text.split(', the last')[0]})`;
+  const span = p.text.split(', ')[0];
+  return p.process && p.processes > 1 ? `process ${p.process} of ${p.processes} (${span})` : `one process (${span})`;
 }
 
 function unfolded(d) {

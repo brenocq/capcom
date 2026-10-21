@@ -45,7 +45,7 @@ export async function renderSpikes(main, r) {
   }
   // filter chips, one per cause of the window, in its color
   if (d.causes.length > 1 || d.cause) {
-    titles.append(h('div.chips', null, h('span.note', { text: 'Cause' }),
+    main.append(h('div.chips.causechips', null, h('span.note', { text: 'Cause' }),
       d.causes.map((c) => {
         const on = d.cause === c.cause;
         return h('button.tag.filter.causechip', { type: 'button', 'aria-pressed': String(on), title: on ? 'Show every cause' : `Show the spikes ${c.label.toLowerCase()} explains`, onclick: () => pickCause(on ? null : c.cause) },
@@ -134,7 +134,7 @@ function detail(it) {
   const box = h('section.card.detail');
   box.append(h('div.tags', null,
     projectChip(it),
-    txt.tag !== txt.title ? h('span.tag', { text: txt.tag }) : null,
+    txt.same ? null : h('span.tag', { text: txt.tag }),
     conf ? h('span', { class: `tag conf ${conf}`, text: top.confidence_label || CONFIDENCE[conf] || conf }) : null,
     it.scope === 'session' ? h('span.tag', { text: 'session-wide', title: 'Found over all the threads of the session together, where a fan-out of subagents shows.' }) : null,
     h('span.note', { text: `${when(it.start)} · ${where(it)}` })));
@@ -146,7 +146,7 @@ function detail(it) {
   const others = causes.filter((c) => c !== top);
   if (others.length) {
     box.append(h('div.also', null, h('span.label', { text: 'Also behind it' }),
-      others.map((c) => h('span', null, h('b', { text: c.cause_label }), c.title && c.title !== c.cause_label ? ` ${c.title} ` : ' ', h('span.plus', { text: '+' + usd(c.excess_usd) })))));
+      others.map((c) => h('span', null, h('b', { text: c.title && c.title.toLowerCase().startsWith(c.cause_label.toLowerCase()) ? c.title : c.cause_label }), c.title && !c.title.toLowerCase().startsWith(c.cause_label.toLowerCase()) ? ` ${c.title} ` : ' ', h('span.plus', { text: '+' + usd(c.excess_usd) })))));
   }
   if (it.window) box.append(windowChart(it));
 
@@ -154,7 +154,7 @@ function detail(it) {
   const facts = h('div.facts', null, h('h3', { text: 'Evidence in the logs' }),
     // every row with its date: its own record's, else the spike's start
     evidence.length ? h('ul.evidence', null, evidence.map((e) => h('li', null, h('span', { text: e.label }),
-      h('span.note', { text: ' · ' + stamp(new Date(e.timestamp || it.start)) + (e.timestamp ? '' : ' (the spike)') }))))
+      h('span.note', { text: ' · ' + when(e.timestamp || it.start) }))))
       : h('p.note', { text: causes.length ? 'No log record was cited.' : it.explanations ? 'No cause was matched.' : 'Causes are matched from milestone 3.' }));
   const fix = h('div.fix', null, h('h3', { text: 'What to change' }),
     spikeAdvice(causes).map((a) => h('p', { text: a })),

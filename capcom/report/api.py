@@ -949,11 +949,11 @@ with contextlib.suppress(Exception):  # like Analysis, a broken module is only m
 # others and the unexplained rest in gray.
 CAUSE_PALETTE = (
     CauseKind.TOOL_WAIT_EXPIRY,
-    CauseKind.LATE_RESUME_EXPIRY,
-    CauseKind.IDLE_REWRITE,
     CauseKind.PARALLEL_SUBAGENTS,
+    CauseKind.IDLE_REWRITE,
+    CauseKind.CONTEXT_GROWTH,
+    CauseKind.LATE_RESUME_EXPIRY,
     CauseKind.FAN_OUT,
-    CauseKind.COMPACTION,
 )
 
 

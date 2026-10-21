@@ -285,8 +285,9 @@ whatever the filter (`project` null for spikes without a session), so its sums e
 the unfiltered `excess_usd`. With `?cause=`, `count`, `excess_usd`, `explained` and
 `spikes` keep the spikes with an explanation of that cause, while `causes` still
 lists every cause (the page's filter chips). A cause's `color` is a CSS value: the
-validated palette (`--s1`..`--s6`, in order) for tool-wait expiries, late-resumed
-subagents, idle rewrites, parallel subagents' work, fan-out and compaction, gray for
+validated palette (`--s1`..`--s6`, in order) for tool-wait expiries, parallel
+subagents' work, idle rewrites, context growth, late-resumed subagents and fan-out
+(the largest causes on real data, in about that order), gray for
 the others and the unexplained rest; it is the same in every window. `spikes` lists the 40
 largest by excess, numbered in time order. `scope` is `thread` (one agent thread,
 `agent_id` null for the main thread) or `session` (all threads of the session). The
