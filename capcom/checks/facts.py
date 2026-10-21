@@ -13,10 +13,15 @@ rate sum R0 to R1 cost
 which is the item's size times the price each of those requests paid per prompt
 token. Long contexts are priced instead at the cache-read price of the tokens
 past the useful size (what rereading them cost), so they never count the cache
-write premium a rewrite finding counts on the same request. Subagent rewrites
-that follow a tool call which ran past the cache lifetime are kept apart from idle
-ones (`tool_waits`). Nothing here holds a whole log or every request in memory:
-only the threads, their open items and per-item totals.
+write premium a rewrite finding counts on the same request. A rewrite after a
+pause past the cache lifetime has one of three causes (expiry_kind): the thread's
+last tool call ran past the lifetime (`tool_waits`, any thread), a subagent was
+resumed late by its parent (`resumes`), or the main thread waited on the user
+(`idle`). Main threads also keep a histogram of their contexts (10k-token buckets
+with the read price summed per bucket), so the session checks can price the
+rereads above any line without holding the requests. Nothing here holds a whole
+log or every request in memory: only the threads, their open items and per-item
+totals.
 """
 
 from __future__ import annotations
@@ -56,11 +61,40 @@ REWRITE_SHARE = 0.5  # a request writing this share of its prompt rewrote the ca
 MIN_REWRITE_TOKENS = 10_000
 CACHE_TTL_5M = timedelta(minutes=5)
 CACHE_TTL_1H = timedelta(hours=1)
-# A tool result this close before a rewrite ends the pause: the thread was waiting
-# on that tool, not idle (as in explain's rule for tool waits).
-TOOL_WAIT_REACH = timedelta(minutes=1)
+# The three causes of a cache expiry, named as explain names them. These mirror
+# capcom.explain.shared (EXPIRY_CAUSES, expiry_kind) until it is on main; then import
+# them from there instead.
+TOOL_WAIT_EXPIRY = "tool_wait_expiry"  # a tool's result came back past the lifetime
+LATE_RESUME_EXPIRY = "late_resume_expiry"  # a subagent resumed late by its parent
+IDLE_EXPIRY = "idle_expiry"  # the main thread waited on the user
+EXPIRY_CAUSES = (TOOL_WAIT_EXPIRY, LATE_RESUME_EXPIRY, IDLE_EXPIRY)
+
+
+def expiry_kind(
+    gap: timedelta, lifetime: timedelta, tool_ran: timedelta | None, subagent: bool
+) -> str | None:
+    """Why a cache expired over a pause of `gap`: None within the lifetime (never
+    under 5 minutes); a tool wait when a tool's result came back after the lifetime
+    (`tool_ran`, from the request that called it); else a late resume for a
+    subagent, or the user away for a main thread."""
+    if gap <= max(lifetime, timedelta(minutes=5)):
+        return None
+    if tool_ran is not None and tool_ran > lifetime:
+        return TOOL_WAIT_EXPIRY
+    return LATE_RESUME_EXPIRY if subagent else IDLE_EXPIRY
+
+
 AGENT_TOOLS = frozenset({"Agent", "Task"})
 EVIDENCE_PER_FINDING = 5
+# A fresh agent after a handoff rebuilds part of its context: a handoff note, the
+# files it rereads. Charged once per handoff at the thread's cache-write price.
+HANDOFF_TOKENS = 40_000
+BUCKET_TOKENS = 10_000  # the context histogram's bucket (a multiple divides LONG_CONTEXT)
+RESUME_GAP = timedelta(minutes=10)  # a main-thread pause this long starts a new run
+# Tool names the agent types called are read this far back at least, so the
+# tools: line a check pastes does not depend on a short window.
+CALL_LOOKBACK = timedelta(days=30)
+TOP_FAMILIES = ("fable", "opus")  # priced above Sonnet; model_mix prices them as Sonnet
 
 ItemKey = tuple[str, ...]
 ThreadKey = tuple[str, str | None]  # (session_id, agent_id)
@@ -107,6 +141,14 @@ class Thread:
     pending: dict[str, ToolCall] = field(default_factory=dict)  # the last request's calls
     result_at: datetime | None = None  # when the last of those calls' results came back
     result_call: ToolCall | None = None
+    above: bool = False  # the last request's context was past LONG_CONTEXT
+    write_1h: bool = False  # the thread's last cache write used the 1-hour lifetime
+    away_at: datetime | None = None  # the last away_summary
+    # main threads: context bucket -> [requests, sum of read rates, sum of ctx x rate]
+    hist: dict[int, list[float]] = field(default_factory=dict)
+    resumes: list[tuple[datetime, int]] = field(default_factory=list)  # (time, context)
+    days: set[str] = field(default_factory=set)  # main threads: local days with requests
+    handoff_usd: float = 0.0  # HANDOFF_TOKENS at the thread's latest write price
 
 
 @dataclass(slots=True)
@@ -120,6 +162,7 @@ class Rewrite:
     evidence: list[tuple[float, Evidence]] = field(default_factory=list)
     causes: dict[str, int] = field(default_factory=dict)  # e.g. the tool waited on -> count
     longest: timedelta = timedelta(0)
+    confirmed: int = 0  # idle rewrites after an away_summary (the user was away)
 
 
 @dataclass(slots=True)
@@ -129,6 +172,8 @@ class LongContext:
     excess_usd: float = 0.0
     max_context: int = 0
     evidence: dict[ThreadKey, tuple[int, Evidence]] = field(default_factory=dict)
+    # per thread: [rereads past the line (USD), handoff cost (USD), crossings]
+    per_thread: dict[ThreadKey, list[float]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -139,6 +184,24 @@ class Compaction:
     pre_tokens: int
     excess_usd: float = 0.0  # turns before it above LATE_COMPACTION
     turns: int = 0
+    trigger: str | None = None
+    handoff_usd: float = 0.0  # HANDOFF_TOKENS at the thread's write price
+
+
+@dataclass(slots=True)
+class ModelMix:
+    """One agent type's spend in one project, and its requests on a model priced
+    above Sonnet (TOP_FAMILIES) with what they would have cost on Sonnet."""
+
+    cost: float = 0.0
+    by_model: dict[str, float] = field(default_factory=dict)
+    threads: set[ThreadKey] = field(default_factory=set)
+    top_cost: float = 0.0
+    top_as_sonnet: float = 0.0
+    top_requests: int = 0
+    top_output: int = 0
+    top_calls: int = 0
+    top_threads: set[ThreadKey] = field(default_factory=set)
 
 
 @dataclass(slots=True)
@@ -162,6 +225,11 @@ class Facts:
     long_context: dict[str, LongContext] = field(default_factory=dict)
     compactions: dict[ThreadKey, list[Compaction]] = field(default_factory=dict)
     shape_tool_tokens: list[float] = field(default_factory=list)
+    resumes: dict[str, Rewrite] = field(default_factory=dict)  # subagents resumed late
+    # tool names each (agent type, project) called, over CALL_LOOKBACK at least
+    type_calls: dict[tuple[str, str], set[str]] = field(default_factory=dict)
+    model_mix: dict[tuple[str, str], ModelMix] = field(default_factory=dict)
+    session_span: dict[str, timedelta] = field(default_factory=dict)  # first to last seen
 
     @property
     def weeks(self) -> float:
@@ -265,8 +333,34 @@ _INTERESTING = frozenset(
         EventKind.TOOL_RESULT,
         EventKind.COMPACTION,
         EventKind.SPAWN,
+        EventKind.AWAY,
     }
 )
+
+
+def write_rate(req: Request, table: PriceTable, one_hour: bool) -> float:
+    """USD per token of writing to the cache at `req`'s model and price, with the
+    1-hour or the 5-minute lifetime."""
+    usage = Usage(cache_write_1h=1_000_000) if one_hour else Usage(cache_write_5m=1_000_000)
+    b = price_usage(
+        req.model,
+        usage,
+        table,
+        speed=req.speed,
+        inference_geo=req.inference_geo,
+        when=req.timestamp,
+    )
+    return b.cache_write / 1_000_000
+
+
+def sonnet_of(model: str) -> str | None:
+    """The Sonnet of the same version for a model of TOP_FAMILIES (the table prices
+    the closest Sonnet version when that one is missing); None for other models."""
+    name = normalize(model)
+    for family in TOP_FAMILIES:
+        if f"-{family}-" in name or name.endswith(f"-{family}"):
+            return name.replace(family, "sonnet", 1)
+    return None
 
 
 class _Pass:
@@ -274,6 +368,22 @@ class _Pass:
         self.index = index
         self.table = table
         self.f = Facts(since=since, until=until)
+        self._reads: dict[tuple[str, str | None, str | None, object], float] = {}
+        self._writes: dict[tuple[str, str | None, str | None, object, bool], float] = {}
+
+    def read_rate(self, r: Request) -> float:
+        key = (r.model, r.speed, r.inference_geo, r.timestamp.date())
+        rate = self._reads.get(key)
+        if rate is None:
+            rate = self._reads[key] = read_rate(r, self.table)
+        return rate
+
+    def write_rate(self, r: Request, one_hour: bool) -> float:
+        key = (r.model, r.speed, r.inference_geo, r.timestamp.date(), one_hour)
+        rate = self._writes.get(key)
+        if rate is None:
+            rate = self._writes[key] = write_rate(r, self.table, one_hour)
+        return rate
 
     # -- threads and items
 
@@ -343,7 +453,10 @@ class _Pass:
             elif tool in AGENT_TOOLS and size > LONG_REPORT_TOKENS:
                 tid = a.get("tool_use_id")
                 self.open(t, ("report", e.key, tid if isinstance(tid, str) else ""), size)
+        elif e.kind is EventKind.AWAY:
+            t.away_at = e.timestamp
         elif e.kind is EventKind.COMPACTION:
+            t.above = False  # the context starts again below the line
             for key in [k for k in t.items if k[:2] not in _SURVIVES_COMPACTION]:
                 self.close(t, key)
         elif e.kind is EventKind.SPAWN:
@@ -423,31 +536,59 @@ class _Pass:
         rewrote = ctx >= MIN_REWRITE_TOKENS and u.cache_write >= REWRITE_SHARE * ctx
         if t.last is not None and not placeholder and rewrote:
             gap = r.timestamp - t.last
+            # the lifetime the write used; a pause under 5 minutes is never an expiry
             ttl = CACHE_TTL_1H if u.cache_write_1h > 0 else CACHE_TTL_5M
+            who = (
+                "main thread"
+                if r.agent_id is None
+                else f"subagent {f.agent_type(r.agent_id) or '?'}"
+            )
             if t.last_model is not None and model != t.last_model:
                 label = f"{t.last_model} to {model}, {u.cache_write:,} tokens rewritten"
                 self.rewrite(f.switches, project, r, label)
-            elif gap > ttl:
+            elif (
+                cause := expiry_kind(gap, ttl, self.tool_ran(t), r.agent_id is not None)
+            ) is not None:
                 minutes = gap.total_seconds() / 60
-                wait = self.tool_wait(t, r, ttl)
-                if wait is not None:
-                    call, ran = wait
-                    what = tool_label(call)
-                    who = f"subagent {f.agent_type(r.agent_id) or '?'}"
+                if cause == TOOL_WAIT_EXPIRY and t.result_call is not None:
+                    call, ran = t.result_call, self.tool_ran(t) or gap
                     label = (
-                        f"{who} waited {ran.total_seconds() / 60:.0f} min on {what}, "
+                        f"{who} waited {ran.total_seconds() / 60:.0f} min on {tool_label(call)}, "
                         f"{u.cache_write:,} tokens rewritten"
                     )
                     rw = self.rewrite(f.tool_waits, project, r, label)
                     rw.causes[call.name] = rw.causes.get(call.name, 0) + 1
                     rw.longest = max(rw.longest, ran)
-                else:
-                    label = f"{minutes:.0f} min idle, {u.cache_write:,} tokens rewritten"
-                    self.rewrite(f.idle, project, r, label)
+                elif cause == LATE_RESUME_EXPIRY:
+                    label = (
+                        f"{who} resumed {minutes:.0f} min after its last turn, "
+                        f"{u.cache_write:,} tokens rewritten"
+                    )
+                    rw = self.rewrite(f.resumes, project, r, label)
+                    rw.longest = max(rw.longest, gap)
+                else:  # IDLE_EXPIRY: the user was away
+                    away = t.away_at is not None and t.away_at >= t.last
+                    note = ", after an away_summary" if away else ""
+                    label = f"{minutes:.0f} min idle{note}, {u.cache_write:,} tokens rewritten"
+                    rw = self.rewrite(f.idle, project, r, label)
+                    rw.confirmed += 1 if away else 0
+                    rw.longest = max(rw.longest, gap)
+
+        if u.cache_write_1h > 0:
+            t.write_1h = True
+        elif u.cache_write_5m > 0:
+            t.write_1h = False
+        reread = 0.0 if placeholder else self.read_rate(r)
+        if r.agent_id is None and reread > 0:
+            self.main_thread(t, r, ctx, reread)
+        if not placeholder:
+            self.model_mix(r, cost, project)
 
         # context past the useful size
-        reread = read_rate(r, self.table) if ctx > LONG_CONTEXT and not placeholder else 0.0
-        if ctx > LONG_CONTEXT and reread > 0:
+        above_line = ctx > LONG_CONTEXT and reread > 0
+        if above_line:
+            tk = (t.session_id, t.agent_id)
+            handoff = HANDOFF_TOKENS * self.write_rate(r, t.write_1h)
             late = self.next_late_compaction(t, r.timestamp)
             band = (min(ctx, LATE_COMPACTION) - LONG_CONTEXT) * reread
             above = max(0, ctx - LATE_COMPACTION) * reread
@@ -455,12 +596,18 @@ class _Pass:
             if late is not None:
                 late.excess_usd += above
                 late.turns += 1 if above > 0 else 0
+                if not late.handoff_usd:
+                    late.handoff_usd = handoff
                 above = 0.0
-            lc.threads.add((t.session_id, t.agent_id))
+            acc = lc.per_thread.setdefault(tk, [0.0, 0.0, 0])
+            acc[0] += band + above
+            if not t.above:  # one handoff per crossing of the line
+                acc[1] += handoff
+                acc[2] += 1
+            lc.threads.add(tk)
             lc.turns += 1
             lc.excess_usd += band + above
             lc.max_context = max(lc.max_context, ctx)
-            tk = (t.session_id, t.agent_id)
             if ctx > lc.evidence.get(tk, (0, None))[0]:
                 who = (
                     "main thread"
@@ -476,6 +623,9 @@ class _Pass:
                 )
                 lc.evidence[tk] = (ctx, ev)
 
+        if r.agent_id is not None and r.tool_calls:
+            kind = f.agent_type(r.agent_id) or "(unknown agent)"
+            f.type_calls.setdefault((kind, project), set()).update(tc.name for tc in r.tool_calls)
         for tc in r.tool_calls:
             f.calls_by_session.setdefault(r.session_id, set()).add(tc.name)
             f.calls_by_thread.setdefault((r.session_id, r.agent_id), set()).add(tc.name)
@@ -493,17 +643,54 @@ class _Pass:
         t.result_at = t.result_call = None
         if not placeholder:
             t.last_model = model
+            t.above = above_line
 
-    def tool_wait(self, t: Thread, r: Request, ttl: timedelta) -> tuple[ToolCall, timedelta] | None:
-        """(the call, how long it ran) when subagent thread `t` was waiting on a tool
-        before `r`: its last request's calls came back past the cache lifetime, and
-        `r` followed the last result within TOOL_WAIT_REACH."""
-        if t.agent_id is None or t.last is None or t.result_at is None or t.result_call is None:
+    def main_thread(self, t: Thread, r: Request, ctx: int, rate: float) -> None:
+        """A main-thread request into its thread's context histogram, and a resume
+        when it follows a pause of RESUME_GAP or more."""
+        b = t.hist.get(ctx // BUCKET_TOKENS)
+        if b is None:
+            b = t.hist[ctx // BUCKET_TOKENS] = [0.0, 0.0, 0.0]
+        b[0] += 1
+        b[1] += rate
+        b[2] += ctx * rate
+        t.days.add(r.timestamp.astimezone().date().isoformat())
+        t.handoff_usd = HANDOFF_TOKENS * self.write_rate(r, t.write_1h)
+        if t.last is not None and r.timestamp - t.last >= RESUME_GAP:
+            t.resumes.append((r.timestamp, ctx))
+
+    def model_mix(self, r: Request, cost: float, project: str) -> None:
+        if r.agent_id is None:
+            return
+        kind = self.f.agent_type(r.agent_id) or "(unknown agent)"
+        mm = self.f.model_mix.get((kind, project))
+        if mm is None:
+            mm = self.f.model_mix[(kind, project)] = ModelMix()
+        model = normalize(r.model)
+        tk = (r.session_id, r.agent_id)
+        mm.cost += cost
+        mm.by_model[model] = mm.by_model.get(model, 0.0) + cost
+        mm.threads.add(tk)
+        sonnet = sonnet_of(model)
+        if sonnet is None:
+            return
+        b = price_usage(
+            sonnet, r.usage, self.table, inference_geo=r.inference_geo, when=r.timestamp
+        )
+        mm.top_cost += cost
+        mm.top_as_sonnet += b.total
+        mm.top_requests += 1
+        mm.top_output += r.usage.output
+        mm.top_calls += len(r.tool_calls)
+        mm.top_threads.add(tk)
+
+    @staticmethod
+    def tool_ran(t: Thread) -> timedelta | None:
+        """How long the last of thread `t`'s previous request's tool calls ran: from
+        that request to its result; None when no result came back."""
+        if t.last is None or t.result_at is None or t.result_call is None:
             return None
-        ran = t.result_at - t.last
-        if ran <= ttl or r.timestamp - t.result_at > TOOL_WAIT_REACH:
-            return None
-        return t.result_call, ran
+        return t.result_at - t.last
 
     def rewrite(self, into: dict[str, Rewrite], project: str, r: Request, label: str) -> Rewrite:
         excess = rewrite_excess(r, self.table)
@@ -546,11 +733,24 @@ class _Pass:
                 f.spawn_types.setdefault(a.tool_use_id, a.agent_type)
         for e in self.index.events(f.since, f.until, kinds=frozenset({EventKind.COMPACTION})):
             pre = _int(e.attrs.get("pre_tokens"))
-            comp = Compaction((e.session_id, e.agent_id), e.timestamp, e.key, pre)
+            trigger = e.attrs.get("trigger")
+            comp = Compaction(
+                (e.session_id, e.agent_id),
+                e.timestamp,
+                e.key,
+                pre,
+                trigger=trigger if isinstance(trigger, str) else None,
+            )
             f.compactions.setdefault(comp.thread, []).append(comp)
         for comps in f.compactions.values():
             comps.sort(key=lambda c: c.timestamp)
 
+        early = min(f.since, f.until - CALL_LOOKBACK)
+        for r in self.index.requests(early, f.since) if early < f.since else ():
+            if r.agent_id is not None and r.tool_calls:
+                kind = f.agent_type(r.agent_id) or "(unknown agent)"
+                calls = f.type_calls.setdefault((kind, r.project_dir), set())
+                calls.update(tc.name for tc in r.tool_calls)
         events = self.index.events(f.since - LOOKBACK, f.until, kinds=_INTERESTING)
         requests = self.index.requests(f.since, f.until)
         for _, _, _, rec in heapq.merge(_tagged(events, 0), _tagged(requests, 1)):
@@ -563,6 +763,8 @@ class _Pass:
                 self.close(t, key)
         for s in self.index.sessions():
             f.session_project.setdefault(s.session_id, s.project_dir)
+            if s.first_seen is not None and s.last_seen is not None:
+                f.session_span[s.session_id] = s.last_seen - s.first_seen
         return f
 
 
