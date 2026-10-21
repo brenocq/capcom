@@ -7,12 +7,16 @@ Each category uses the model's own rate from the price table (cache reads are 0.
 input on most models but 0.05x on Opus and Sonnet 5.5 and 0.025x on Fable 5.1).
 On top: a long-context rate set when the prompt is above the model's threshold
 (the whole request at those rates), the fast-mode multiplier when `speed` is
-"fast", and the geo multiplier for `inference_geo`, each on every token category.
+"fast", and the geo multiplier for `inference_geo` (models 4.6 and later), each on
+every token category. A request older than a price change uses the older price.
+Thinking is part of output and is not priced again.
 """
 
 from __future__ import annotations
 
-from capcom.cost.prices import lookup
+from datetime import datetime
+
+from capcom.cost.prices import lookup, price_at
 from capcom.types import CostBreakdown, PriceTable, Request, Usage
 
 PER_MTOK = 1_000_000
@@ -24,9 +28,12 @@ def price_usage(
     table: PriceTable,
     speed: str | None = None,
     inference_geo: str | None = None,
+    when: datetime | None = None,
 ) -> CostBreakdown:
-    """The cost of `usage` on `model` (what `price` does, without a Request)."""
+    """The cost of `usage` on `model` at time `when` (what `price` does, without a
+    Request). `when` picks an older price from the table's `previous` rows."""
     p, exact = lookup(table, model)
+    p = price_at(table, p, when)
     rate_in, rate_out = p.input, p.output
     rate_w5, rate_w1, rate_read = p.cache_write_5m, p.cache_write_1h, p.cache_read
     lc = p.long_context
@@ -39,7 +46,7 @@ def price_usage(
             mult *= p.fast_multiplier
         elif p.input > 0:
             exact = False  # fast mode on a model without a listed fast price
-    if inference_geo:
+    if inference_geo and p.geo_pricing:
         mult *= table.geo_multipliers.get(inference_geo, 1.0)
     scale = mult / PER_MTOK
     web = (
@@ -66,4 +73,5 @@ def price(request: Request, table: PriceTable) -> CostBreakdown:
         table,
         speed=request.speed,
         inference_geo=request.inference_geo,
+        when=request.timestamp,
     )

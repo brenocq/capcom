@@ -41,6 +41,9 @@ def test_exact_id() -> None:
         ("claude-3-5-haiku-latest", "claude-3-5-haiku-20241022"),
         ("anthropic/claude-opus-5-5", "claude-opus-5-5"),
         ("us.anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5-20250929"),
+        ("global.anthropic.claude-opus-5-5-v1:0", "claude-opus-5-5"),
+        ("us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5-20250929"),
+        ("anthropic.claude-haiku-4-5-20251001-v1:0", "claude-haiku-4-5-20251001"),
         ("claude-sonnet-4@20250514", "claude-sonnet-4-20250514"),
     ],
 )
@@ -90,3 +93,17 @@ def test_rules_in_the_table() -> None:
     assert lookup(T, "claude-sonnet-5-5")[0].cache_read == pytest.approx(0.05 * 2)
     assert lookup(T, "claude-fable-5-1")[0].cache_read == pytest.approx(0.025 * 10)
     assert lookup(T, "claude-opus-4-8")[0].cache_read == pytest.approx(0.1 * 5)
+
+
+def test_geo_pricing_from_4_6_on() -> None:
+    assert lookup(T, "claude-opus-5-5")[0].geo_pricing
+    assert lookup(T, "claude-opus-4-6")[0].geo_pricing
+    assert lookup(T, "claude-sonnet-4-6")[0].geo_pricing
+    assert not lookup(T, "claude-opus-4-5")[0].geo_pricing
+    assert not lookup(T, "claude-haiku-4-5")[0].geo_pricing
+
+
+def test_price_history() -> None:
+    [(until, old)] = T.previous["claude-sonnet-5-5"]
+    assert until == date(2026, 10, 8)
+    assert old.cache_read == 0.2 and old.input == 2 and old.model == "claude-sonnet-5-5"

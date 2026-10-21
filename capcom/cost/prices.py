@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
+from datetime import UTC, date, datetime
 from functools import cache
 from importlib import resources
 from typing import Any
@@ -22,7 +22,8 @@ ZERO_MODEL = "<unpriced>"
 _DATE = re.compile(r"-(\d{8})$")
 _SUFFIX = re.compile(r"\[[^\]]*\]$")  # e.g. "claude-sonnet-4-5[1m]"
 _VERTEX_DATE = re.compile(r"@(\d{8})$")  # e.g. "claude-sonnet-4@20250514"
-_BEDROCK = re.compile(r"^(?:[a-z]{2,4}\.)?anthropic\.")  # e.g. "us.anthropic.claude-..."
+# e.g. "us.anthropic.claude-...", "global.anthropic.claude-...", "us-gov.anthropic.claude-..."
+_BEDROCK = re.compile(r"^(?:[a-z0-9]+(?:-[a-z0-9]+)*\.)*anthropic\.")
 _BEDROCK_VERSION = re.compile(r"-v\d+(?::\d+)?$")  # e.g. "...-v1:0"
 
 
@@ -48,6 +49,7 @@ def _price(model: str, row: dict[str, Any]) -> Price:
         cache_read=float(row["cache_read"]),
         long_context=long_context,
         fast_multiplier=None if fast is None else float(fast),
+        geo_pricing=bool(row.get("geo", False)),
     )
 
 
@@ -55,11 +57,21 @@ def parse_prices(data: dict[str, Any]) -> PriceTable:
     """A PriceTable from prices.json's structure. Aliases become extra keys that map
     to their model's Price (whose `model` is the canonical id)."""
     models: dict[str, Price] = {}
-    for model, row in data.get("models", {}).items():
+    rows: dict[str, dict[str, Any]] = data.get("models", {})
+    for model, row in rows.items():
         p = _price(model, row)
         models[model] = p
         for alias in row.get("aliases", ()):
             models.setdefault(alias, p)
+    previous: dict[str, tuple[tuple[date, Price], ...]] = {}
+    for model, entries in data.get("previous", {}).items():
+        base = rows.get(model)
+        if base is None:
+            continue
+        history = [
+            (date.fromisoformat(e["valid_until"]), _price(model, {**base, **e})) for e in entries
+        ]
+        previous[model] = tuple(sorted(history, key=lambda h: h[0], reverse=True))
     return PriceTable(
         checked=date.fromisoformat(data["checked"]),
         sources=tuple(data.get("sources", ())),
@@ -67,6 +79,7 @@ def parse_prices(data: dict[str, Any]) -> PriceTable:
         web_search_per_1k=float(data.get("web_search_per_1k", 0.0)),
         web_fetch_per_1k=float(data.get("web_fetch_per_1k", 0.0)),
         geo_multipliers={k: float(v) for k, v in data.get("geo_multipliers", {}).items()},
+        previous=previous,
     )
 
 
@@ -88,6 +101,31 @@ def normalize(model: str) -> str:
     name = _BEDROCK_VERSION.sub("", name)
     name = _VERTEX_DATE.sub(r"-\1", name)
     return name
+
+
+def is_placeholder(model: str) -> bool:
+    """`<synthetic>` and the like: Claude Code's stand-in replies (errors, interrupts),
+    not model calls. capcom leaves them out of totals and calibrations alike."""
+    return model.strip().startswith("<")
+
+
+def price_at(table: PriceTable, p: Price, when: datetime | None) -> Price:
+    """`p` as it was priced at `when` (the table's `previous` rows), else `p`."""
+    if when is None:
+        return p
+    day = when.astimezone(UTC).date() if when.tzinfo else when.date()
+    chosen = p
+    for valid_until, old in table.previous.get(p.model, ()):  # newest first
+        if day < valid_until:
+            chosen = old
+    return chosen
+
+
+def canonical(table: PriceTable, model: str) -> str:
+    """The table id `model` prices as when it is an exact match, else its normalized
+    name (the key for per-model totals on both sides of a calibration)."""
+    p, exact = lookup(table, model)
+    return p.model if exact else normalize(model)
 
 
 def zero_price() -> Price:

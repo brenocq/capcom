@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-import importlib
+import sqlite3
 import sys
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TextIO, cast
+from typing import TextIO
 
 from capcom.config import Config
-from capcom.cost.calibrate import TARGET_SPREAD, SessionCheck, check_sessions
+from capcom.cost.calibrate import TARGET_SPREAD, calibrate
 from capcom.cost.model import price
-from capcom.cost.prices import load_prices, normalize
-from capcom.types import Index, PriceTable, Request
+from capcom.cost.prices import is_placeholder, load_prices, normalize
+from capcom.types import Calibration, Index, PriceTable, Request
 
 GROUPINGS = ("project", "session", "agent", "model", "day")
 TEMPORARY = "(temporary)"  # project folders under /tmp, grouped as one
@@ -73,7 +73,7 @@ def group_key(
         model = normalize(req.model)
         return model, model
     if by == "day":
-        day = req.timestamp.astimezone(UTC).date().isoformat()
+        day = req.timestamp.astimezone().date().isoformat()  # local time
         return day, day
     raise ValueError(f"unknown grouping {by!r}; one of {', '.join(GROUPINGS)}")
 
@@ -90,6 +90,8 @@ def aggregate(
     agent_types = agent_types or {}
     rows: dict[str, Row] = {}
     for req in requests:
+        if is_placeholder(req.model):
+            continue  # not a model call (same rule as calibrate)
         key, label = group_key(req, by, titles, agent_types)
         row = rows.get(key)
         if row is None:
@@ -106,7 +108,7 @@ def aggregate(
         row.usd_cache_write += cost.cache_write
         row.usd_output += cost.output + cost.web
         row.estimated_output += req.output_estimated
-        row.inexact_price += not cost.exact_price and not req.model.startswith("<")
+        row.inexact_price += not cost.exact_price
     if by == "day":
         return sorted(rows.values(), key=lambda r: r.key, reverse=True)
     return sorted(rows.values(), key=lambda r: (-r.total, r.key))
@@ -214,11 +216,25 @@ def format_top(rows: list[Row], by: str, limit: int) -> str:
 
 
 def _open_index(config: Config) -> Index | None:
-    """The store's index, read-only; None when there is none yet."""
-    if not config.index_path.exists():
+    """The store's index, read-only; None (after saying why) when it cannot be read."""
+    from capcom.store.index import open_index
+
+    try:
+        return open_index(config.index_path, readonly=True)
+    except (FileNotFoundError, RuntimeError, ValueError, sqlite3.Error) as err:
+        print(f"capcom: cannot read the index at {config.index_path} ({err})", file=sys.stderr)
+        print("run `capcom scan` first", file=sys.stderr)
         return None
-    store = importlib.import_module("capcom.store.index")
-    return cast(Index, store.open_index(config.index_path, readonly=True))
+
+
+def window_start(days: int, now: datetime | None = None) -> datetime | None:
+    """Local midnight `days - 1` days before today (days <= 0: no window), so the
+    window holds `days` whole local days, today included."""
+    if days <= 0:
+        return None
+    local_now = (now or datetime.now(UTC)).astimezone()
+    midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return (midnight - timedelta(days=days - 1)).astimezone(UTC)
 
 
 def _titles(index: Index) -> dict[str, str]:
@@ -240,18 +256,17 @@ def run_top(
         return 2
     index = index or _open_index(config)
     if index is None:
-        print(f"no index at {config.index_path}; run `capcom scan` first", file=sys.stderr)
         return 1
     table = load_prices()
-    since = None
-    if days > 0:
-        since = (now or datetime.now(UTC)) - timedelta(days=days)
+    since = window_start(days, now)
     titles = _titles(index) if by == "session" else {}
     agent_types: dict[str, str] = {}
     if by == "agent":
         agent_types = {a.agent_id: a.agent_type for a in index.agents() if a.agent_type}
     rows = aggregate(index.requests(since=since), by, table, titles, agent_types)
-    window = f"last {days} days" if days > 0 else "all time"
+    window = "all time"
+    if since is not None:
+        window = f"last {days} days, local time, since {since.astimezone():%Y-%m-%d %H:%M}"
     print(f"capcom top, by {by}, {window} (prices checked {table.checked})\n", file=out)
     if not rows:
         print("no requests in this window", file=out)
@@ -266,13 +281,13 @@ def _spread(capcom_usd: float, cc_usd: float) -> str:
     return f"{(capcom_usd - cc_usd) / cc_usd:+.1%}"
 
 
-def format_calibration(checks: list[SessionCheck], titles: Mapping[str, str], limit: int) -> str:
-    ordered = sorted(checks, key=lambda c: -c.calibration.claude_code_usd)
+def format_calibration(checks: list[Calibration], titles: Mapping[str, str], limit: int) -> str:
+    ordered = sorted(checks, key=lambda c: -c.claude_code_usd)
     shown = ordered[:limit] if limit > 0 else ordered
     header = ["session", "cost-state", "capcom", "spread", "scope"]
     body = []
     for c in shown:
-        cal = c.calibration
+        cal = c
         label = titles.get(cal.session_id) or cal.session_id[:8]
         scope = "comparable" if c.comparable else ", ".join(c.reasons)
         body.append(
@@ -288,12 +303,12 @@ def format_calibration(checks: list[SessionCheck], titles: Mapping[str, str], li
     if limit > 0 and len(ordered) > limit:
         parts.append(f"{len(ordered) - limit} more sessions (--limit)")
 
-    def summary(name: str, group: list[SessionCheck]) -> str:
+    def summary(name: str, group: list[Calibration]) -> str:
         if not group:
             return f"{name}: none"
-        cc = sum(c.calibration.claude_code_usd for c in group)
-        mine = sum(c.calibration.capcom_usd for c in group)
-        within = sum(1 for c in group if abs(c.calibration.spread) <= TARGET_SPREAD)
+        cc = sum(c.claude_code_usd for c in group)
+        mine = sum(c.capcom_usd for c in group)
+        within = sum(1 for c in group if abs(c.spread) <= TARGET_SPREAD)
         return (
             f"{name}: {len(group)} sessions, {within} within {TARGET_SPREAD:.0%}, "
             f"cost-state {usd(cc)}, capcom {usd(mine)} ({_spread(mine, cc)})"
@@ -304,7 +319,7 @@ def format_calibration(checks: list[SessionCheck], titles: Mapping[str, str], li
     parts.append(summary("all", checks))
     per_model: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
     for c in comparable:
-        for model, (mine, cc) in c.calibration.per_model.items():
+        for model, (mine, cc) in c.per_model.items():
             per_model[model][0] += mine
             per_model[model][1] += cc
     if per_model:
@@ -333,9 +348,8 @@ def run_calibrate(
     out = out or sys.stdout
     index = index or _open_index(config)
     if index is None:
-        print(f"no index at {config.index_path}; run `capcom scan` first", file=sys.stderr)
         return 1
-    checks = check_sessions(index, load_prices())
+    checks = calibrate(index, load_prices())
     if not checks:
         print("no session has a cost-state record", file=out)
         return 0

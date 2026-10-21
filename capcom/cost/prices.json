@@ -13,29 +13,8 @@
   "unit": "USD per million tokens",
   "web_search_per_1k": 10.0,
   "web_fetch_per_1k": 0.0,
-  "geo_multipliers": {"us": 1.1},
-  "models": {
-    "claude-fable-5-1": {"input": 10, "output": 50, "cache_write_5m": 12.5, "cache_write_1h": 20, "cache_read": 0.25},
-    "claude-fable-5": {"input": 10, "output": 50, "cache_write_5m": 12.5, "cache_write_1h": 20, "cache_read": 1.0},
-    "claude-opus-5-5": {"input": 4, "output": 20, "cache_write_5m": 5, "cache_write_1h": 8, "cache_read": 0.2, "fast_multiplier": 2},
-    "claude-opus-5": {"input": 5, "output": 25, "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.5, "fast_multiplier": 2},
-    "claude-opus-4-8": {"input": 5, "output": 25, "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.5, "fast_multiplier": 2},
-    "claude-opus-4-7": {"input": 5, "output": 25, "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.5},
-    "claude-opus-4-6": {"input": 5, "output": 25, "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.5},
-    "claude-opus-4-5-20251101": {"input": 5, "output": 25, "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.5, "aliases": ["claude-opus-4-5"]},
-    "claude-opus-4-1-20250805": {"input": 15, "output": 75, "cache_write_5m": 18.75, "cache_write_1h": 30, "cache_read": 1.5, "aliases": ["claude-opus-4-1"]},
-    "claude-opus-4-20250514": {"input": 15, "output": 75, "cache_write_5m": 18.75, "cache_write_1h": 30, "cache_read": 1.5, "aliases": ["claude-opus-4-0", "claude-opus-4"]},
-    "claude-sonnet-5-5": {"input": 2, "output": 10, "cache_write_5m": 2.5, "cache_write_1h": 4, "cache_read": 0.1},
-    "claude-sonnet-5": {"input": 2, "output": 10, "cache_write_5m": 2.5, "cache_write_1h": 4, "cache_read": 0.2},
-    "claude-sonnet-4-6": {"input": 3, "output": 15, "cache_write_5m": 3.75, "cache_write_1h": 6, "cache_read": 0.3},
-    "claude-sonnet-4-5-20250929": {"input": 3, "output": 15, "cache_write_5m": 3.75, "cache_write_1h": 6, "cache_read": 0.3, "aliases": ["claude-sonnet-4-5"]},
-    "claude-sonnet-4-20250514": {"input": 3, "output": 15, "cache_write_5m": 3.75, "cache_write_1h": 6, "cache_read": 0.3, "aliases": ["claude-sonnet-4-0", "claude-sonnet-4"]},
-    "claude-haiku-5-5": {
-      "input": 0.1, "output": 0.5, "cache_write_5m": 0.125, "cache_write_1h": 0.2, "cache_read": 0.01,
-      "long_context": {"threshold_tokens": 100000, "input": 0.5, "output": 2.5, "cache_write_5m": 0.625, "cache_write_1h": 1.0, "cache_read": 0.05}
-    },
-    "claude-haiku-4-5-20251001": {"input": 1, "output": 5, "cache_write_5m": 1.25, "cache_write_1h": 2, "cache_read": 0.1, "aliases": ["claude-haiku-4-5"]},
-    "claude-3-5-haiku-20241022": {"input": 0.8, "output": 4, "cache_write_5m": 1.0, "cache_write_1h": 1.6, "cache_read": 0.08, "aliases": ["claude-3-5-haiku-latest"]}
+  "geo_multipliers": {
+    "us": 1.1
   },
   "unverified": {
     "claude-3-7-sonnet-20250219": "not on the pricing page on 2026-10-21; left out, priced as the closest family (flagged)",
@@ -44,8 +23,38 @@
   },
   "notes": [
     "Thinking is billed as output and already inside output_tokens.",
-    "geo_multipliers apply to every token category when usage.inference_geo matches (models 4.6 and later).",
+    "geo_multipliers apply to every token category when usage.inference_geo matches, on models marked geo (4.6 and later).",
     "fast_multiplier applies to every token category when usage.speed is 'fast', with the cache rates on top.",
-    "long_context: when the prompt (input + cache reads + cache writes) is above threshold_tokens, the whole request uses those rates."
-  ]
+    "long_context: when the prompt (input + cache reads + cache writes) is above threshold_tokens, the whole request uses those rates.",
+    "previous: older prices per model, newest first; a request before valid_until (UTC date, exclusive) uses the row with these fields replaced."
+  ],
+  "models": {
+    "claude-fable-5-1": {"input": 10, "output": 50, "cache_write_5m": 12.5, "cache_write_1h": 20, "cache_read": 0.25, "geo": true},
+    "claude-fable-5": {"input": 10, "output": 50, "cache_write_5m": 12.5, "cache_write_1h": 20, "cache_read": 1.0, "geo": true},
+    "claude-opus-5-5": {"input": 4, "output": 20, "cache_write_5m": 5, "cache_write_1h": 8, "cache_read": 0.2, "fast_multiplier": 2, "geo": true},
+    "claude-opus-5": {"input": 5, "output": 25, "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.5, "fast_multiplier": 2, "geo": true},
+    "claude-opus-4-8": {"input": 5, "output": 25, "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.5, "fast_multiplier": 2, "geo": true},
+    "claude-opus-4-7": {"input": 5, "output": 25, "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.5, "geo": true},
+    "claude-opus-4-6": {"input": 5, "output": 25, "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.5, "geo": true},
+    "claude-opus-4-5-20251101": {"input": 5, "output": 25, "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.5, "aliases": ["claude-opus-4-5"]},
+    "claude-opus-4-1-20250805": {"input": 15, "output": 75, "cache_write_5m": 18.75, "cache_write_1h": 30, "cache_read": 1.5, "aliases": ["claude-opus-4-1"]},
+    "claude-opus-4-20250514": {"input": 15, "output": 75, "cache_write_5m": 18.75, "cache_write_1h": 30, "cache_read": 1.5, "aliases": ["claude-opus-4-0", "claude-opus-4"]},
+    "claude-sonnet-5-5": {"input": 2, "output": 10, "cache_write_5m": 2.5, "cache_write_1h": 4, "cache_read": 0.1, "geo": true},
+    "claude-sonnet-5": {"input": 2, "output": 10, "cache_write_5m": 2.5, "cache_write_1h": 4, "cache_read": 0.2, "geo": true},
+    "claude-sonnet-4-6": {"input": 3, "output": 15, "cache_write_5m": 3.75, "cache_write_1h": 6, "cache_read": 0.3, "geo": true},
+    "claude-sonnet-4-5-20250929": {"input": 3, "output": 15, "cache_write_5m": 3.75, "cache_write_1h": 6, "cache_read": 0.3, "aliases": ["claude-sonnet-4-5"]},
+    "claude-sonnet-4-20250514": {"input": 3, "output": 15, "cache_write_5m": 3.75, "cache_write_1h": 6, "cache_read": 0.3, "aliases": ["claude-sonnet-4-0", "claude-sonnet-4"]},
+    "claude-haiku-5-5": {"input": 0.1, "output": 0.5, "cache_write_5m": 0.125, "cache_write_1h": 0.2, "cache_read": 0.01, "long_context": {"threshold_tokens": 100000, "input": 0.5, "output": 2.5, "cache_write_5m": 0.625, "cache_write_1h": 1.0, "cache_read": 0.05}, "geo": true},
+    "claude-haiku-4-5-20251001": {"input": 1, "output": 5, "cache_write_5m": 1.25, "cache_write_1h": 2, "cache_read": 0.1, "aliases": ["claude-haiku-4-5"]},
+    "claude-3-5-haiku-20241022": {"input": 0.8, "output": 4, "cache_write_5m": 1.0, "cache_write_1h": 1.6, "cache_read": 0.08, "aliases": ["claude-3-5-haiku-latest"]}
+  },
+  "previous": {
+    "claude-sonnet-5-5": [
+      {
+        "valid_until": "2026-10-08",
+        "cache_read": 0.2,
+        "why": "cost-state priced Sonnet 5.5 cache reads at 0.20 in every session up to 2026-10-07 and at 0.10 from 2026-10-18 (no Sonnet 5.5 session in between); the day after the last 0.20 session"
+      }
+    ]
+  }
 }

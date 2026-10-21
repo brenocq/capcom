@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pytest
 
 from capcom.cost.model import price, price_usage
@@ -59,6 +61,35 @@ def test_fast_mode_without_a_listed_price_is_flagged() -> None:
     c = price(req(model="claude-sonnet-5-5", output=M, speed="fast"), T)
     assert c.output == pytest.approx(10)
     assert not c.exact_price
+
+
+def test_thinking_is_not_counted_twice() -> None:
+    c = price(req(output=M, thinking=600_000), T)
+    assert c.output == pytest.approx(20)
+    assert c.total == pytest.approx(20)
+
+
+def test_geo_multiplier_only_on_models_from_4_6() -> None:
+    assert price(req(model="claude-opus-4-6", input=M, geo="us"), T).input == pytest.approx(5.5)
+    old = price(req(model="claude-opus-4-5", input=M, geo="us"), T)
+    assert old.input == pytest.approx(5)
+    old = price(req(model="claude-haiku-4-5", input=M, geo="us"), T)
+    assert old.input == pytest.approx(1)
+
+
+def test_older_prices_apply_to_older_requests() -> None:
+    before = datetime(2026, 10, 7, 23, 59, tzinfo=UTC)
+    after = datetime(2026, 10, 8, 0, 0, tzinfo=UTC)
+    old = price(req(model="claude-sonnet-5-5", when=before, cache_read=M, output=M), T)
+    assert old.cache_read == pytest.approx(0.2)
+    assert old.output == pytest.approx(10)  # the rest of the row is unchanged
+    new = price(req(model="claude-sonnet-5-5", when=after, cache_read=M), T)
+    assert new.cache_read == pytest.approx(0.1)
+    assert price_usage("claude-sonnet-5-5", Usage(cache_read=M), T).cache_read == pytest.approx(0.1)
+    u = Usage(cache_read=M)
+    assert price_usage("claude-sonnet-5-5", u, T, when=before).cache_read == pytest.approx(0.2)
+    # other models have no history
+    assert price(req(when=before, cache_read=M), T).cache_read == pytest.approx(0.2)
 
 
 def test_geo_multiplier() -> None:

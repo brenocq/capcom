@@ -2,105 +2,96 @@
 
 What cost-state counts (measured on 2,241 sessions, Claude Code 2.1.27x-2.1.306):
 
-- Every model call of the *current process*, main thread and subagents alike, since
-  `startTime` (the process start). A resumed session that does not restore the old
-  totals starts again from zero, so only requests from `startTime` on compare.
+- Every model call of the *current process*, main thread and subagents alike, from
+  `startTime` (the process start) to the moment the record was written. A resumed
+  session that does not restore the old totals starts again from zero, so only
+  requests in [startTime, the cost-state's timestamp] compare.
 - Model calls the transcript never shows: away summaries, compactions, WebFetch's
   page summarizer and WebSearch's own call (large uncached input: this is why its
   inputTokens can be 100-1,000x the logged input), and a small fixed Haiku call per
   process. The auto-mode classifier (`serverClassifierRequest`) is server-side and
   not in cost-state.
 - Its own price table, which can lag the pricing page (Sonnet 5.5 cache reads were
-  $0.20 per MTok in sessions up to 2026-10-07, $0.10 from 2026-10-18).
+  $0.20 per MTok up to 2026-10-07: prices.json's `previous`).
 
 So a session's spread is meaningful only when its window has none of those side
-calls: `SessionCheck.comparable` says so, and `reasons` says why not.
+calls: `Calibration.comparable` says so, and `reasons` says why not.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from capcom.cost.model import price
-from capcom.cost.prices import normalize
+from capcom.cost.prices import canonical, is_placeholder
 from capcom.types import Calibration, CostState, EventKind, Index, PriceTable
 
 SIDE_CALL_TOOLS = frozenset({"WebFetch", "WebSearch"})
 SIDE_CALL_EVENTS = frozenset({EventKind.AWAY, EventKind.COMPACTION})
 MIN_COMPARABLE_USD = 0.10  # below this a fixed per-process side call is above 2 %
 TARGET_SPREAD = 0.02
+# A model only cost-state knows is ignored below this share of the session or this
+# many dollars (the small Haiku call every process makes).
+IGNORED_SIDE_MODEL_SHARE = 0.01
+IGNORED_SIDE_MODEL_USD = 0.01
+# Index.requests' `until` is exclusive and log times have millisecond resolution.
+_TICK = timedelta(milliseconds=1)
 
 
-@dataclass(frozen=True, slots=True)
-class SessionCheck:
-    """A calibration and whether it is comparable (no side calls in its window)."""
-
-    calibration: Calibration
-    comparable: bool
-    reasons: tuple[str, ...] = ()
-    requests: int = 0
-    estimated_output: int = 0  # requests whose output count is an estimate
-    inexact_price: int = 0  # requests priced as their closest family
+def window(cs: CostState) -> tuple[datetime | None, datetime | None]:
+    """[since, until) of the requests a cost-state covers."""
+    since = None
+    if cs.start_time_ms is not None:
+        since = datetime.fromtimestamp(cs.start_time_ms / 1000, UTC)
+    until = cs.timestamp + _TICK if cs.timestamp is not None else None
+    return since, until
 
 
-def _window_start(cs: CostState) -> datetime | None:
-    if cs.start_time_ms is None:
-        return None
-    return datetime.fromtimestamp(cs.start_time_ms / 1000, UTC)
-
-
-def check_session(index: Index, cs: CostState, table: PriceTable) -> SessionCheck:
-    """Price the session's requests (main and subagents) from the cost-state's
-    `startTime` on and compare them with the cost-state, in total and per model."""
-    since = _window_start(cs)
+def check_session(index: Index, cs: CostState, table: PriceTable) -> Calibration:
+    """Price the session's requests (main and subagents) in the cost-state's window
+    and compare them with it, in total and per model (keyed by the table's id)."""
+    since, until = window(cs)
     per_model: dict[str, float] = defaultdict(float)
     reasons: set[str] = set()
-    n = est = inexact = 0
-    for req in index.requests(since=since, session_id=cs.session_id):
-        cost = price(req, table)
-        per_model[normalize(req.model)] += cost.total
-        n += 1
-        est += req.output_estimated
-        inexact += not cost.exact_price
+    estimated = 0
+    for req in index.requests(since=since, until=until, session_id=cs.session_id):
+        if is_placeholder(req.model):
+            continue
+        per_model[canonical(table, req.model)] += price(req, table).total
+        estimated += req.output_estimated
         for call in req.tool_calls:
             if call.name in SIDE_CALL_TOOLS:
                 reasons.add(call.name)
-    for ev in index.events(since=since, session_id=cs.session_id, kinds=SIDE_CALL_EVENTS):
+    events = index.events(
+        since=since, until=until, session_id=cs.session_id, kinds=SIDE_CALL_EVENTS
+    )
+    for ev in events:
         reasons.add(ev.kind.value)
     cc_models: dict[str, float] = defaultdict(float)
     for model, mu in cs.models.items():
-        cc_models[normalize(model)] += mu.cost_usd
+        cc_models[canonical(table, model)] += mu.cost_usd
+    floor = max(IGNORED_SIDE_MODEL_USD, IGNORED_SIDE_MODEL_SHARE * cs.total_cost_usd)
     for model, usd in cc_models.items():
-        if usd > 0 and per_model.get(model, 0.0) == 0.0:
+        if usd >= floor and per_model.get(model, 0.0) == 0.0:
             reasons.add("model only in cost-state")
+    if since is None:
+        reasons.add("no startTime")
     if cs.total_cost_usd < MIN_COMPARABLE_USD:
         reasons.add("below $0.10")
-    if est:
+    if estimated:
         reasons.add("estimated output")
     keys = sorted(set(per_model) | set(cc_models))
-    calibration = Calibration(
+    return Calibration(
         session_id=cs.session_id,
         capcom_usd=sum(per_model.values()),
         claude_code_usd=cs.total_cost_usd,
         per_model={m: (per_model.get(m, 0.0), cc_models.get(m, 0.0)) for m in keys},
-    )
-    return SessionCheck(
-        calibration=calibration,
         comparable=not reasons,
         reasons=tuple(sorted(reasons)),
-        requests=n,
-        estimated_output=est,
-        inexact_price=inexact,
     )
-
-
-def check_sessions(index: Index, table: PriceTable) -> list[SessionCheck]:
-    return [check_session(index, cs, table) for cs in index.last_cost_states()]
 
 
 def calibrate(index: Index, table: PriceTable) -> list[Calibration]:
-    """One Calibration per session with a cost-state (see `check_sessions` for the
-    comparable flag)."""
-    return [c.calibration for c in check_sessions(index, table)]
+    """One Calibration per session with a cost-state, against its last one."""
+    return [check_session(index, cs, table) for cs in index.last_cost_states()]

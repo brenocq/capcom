@@ -302,6 +302,8 @@ class Price:
     cache_read: float
     long_context: LongContextPrice | None = None
     fast_multiplier: float | None = None  # applies to every category when speed == "fast"
+    # True when the table's geo_multipliers apply (models 4.6 and later)
+    geo_pricing: bool = False
 
 
 @dataclass(frozen=True, slots=True)
