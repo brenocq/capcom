@@ -43,6 +43,7 @@ from capcom.explain.shared import (
     LATE_COMPACTION,
     LATE_RESUME_EXPIRY,
     LONG_CONTEXT,
+    RESTART_CONTEXT,
     TOOL_WAIT_EXPIRY,
     expiry_kind,
 )
@@ -75,7 +76,6 @@ EVIDENCE_PER_FINDING = 5
 # A fresh agent's starting context when its thread's own is unknown (the thread
 # began before the window, or its first request in it is already big).
 HANDOFF_TOKENS = 40_000
-START_KNOWN_BELOW = LONG_CONTEXT * 2 // 3  # a first context above this is not a start
 BUCKET_TOKENS = 10_000  # the context histogram's bucket (a multiple divides LONG_CONTEXT)
 RESUME_GAP = timedelta(minutes=10)  # a main-thread pause this long starts a new run
 # Tool names the agent types called are read this far back at least, so the
@@ -166,7 +166,8 @@ class LongContext:
     excess_usd: float = 0.0
     max_context: int = 0
     evidence: dict[ThreadKey, tuple[int, Evidence]] = field(default_factory=dict)
-    # per thread: [saving of the simulated handoffs (USD), handoffs, turns past the line]
+    # per thread: [saving of the simulated handoffs (USD), handoffs, turns past the
+    # line, rereads past the line (USD, the old ceiling)]
     per_thread: dict[ThreadKey, list[float]] = field(default_factory=dict)
 
 
@@ -650,25 +651,30 @@ class _Pass:
         price `rate`), the formulas of long_running_agents and late_compactions."""
         f = self.f
         if t.start is None:
-            t.start = ctx if ctx <= START_KNOWN_BELOW else HANDOFF_TOKENS
+            # conservative: a fresh agent that continues the work needs its files and
+            # state back, so it restarts at RESTART_CONTEXT at least
+            first = ctx if ctx <= LONG_CONTEXT else 0
+            t.start = max(first, RESTART_CONTEXT)
         step = ctx - t.prev_ctx if t.prev_ctx is not None else 0
         t.prev_ctx = ctx
         tk = (t.session_id, t.agent_id)
         # a handoff each time the simulated agent passes the line: a fresh one starts
-        # at the thread's starting context and grows by the thread's own increments
+        # at the restart context, written once (5-minute lifetime for a subagent, the
+        # thread's own otherwise), and grows by the thread's own increments
         sim = ctx if t.sim is None else max(t.sim + step, min(ctx, t.start))
         cost = sim * rate
         handoff = sim > LONG_CONTEXT
         if handoff:
             sim = t.start
-            cost = sim * self.write_rate(r, t.write_1h)
+            cost = sim * self.write_rate(r, t.write_1h and t.agent_id is None)
         t.sim = sim
         if ctx > LONG_CONTEXT or handoff:
             lc = f.long_context.setdefault(t.project, LongContext())
-            acc = lc.per_thread.setdefault(tk, [0.0, 0, 0])
+            acc = lc.per_thread.setdefault(tk, [0.0, 0, 0, 0.0])
             acc[0] += ctx * rate - cost
             acc[1] += 1 if handoff else 0
             acc[2] += 1 if ctx > LONG_CONTEXT else 0
+            acc[3] += max(0, ctx - LONG_CONTEXT) * rate  # the old ceiling, for comparison
             lc.threads.add(tk)
             lc.turns += 1 if ctx > LONG_CONTEXT else 0
             lc.max_context = max(lc.max_context, ctx)
@@ -687,19 +693,23 @@ class _Pass:
                 )
                 lc.evidence[tk] = (ctx, ev)
         # a late compaction run at LATE_COMPACTION instead: from the turn the context
-        # passed it, the thread restarts at the compaction's logged post size
+        # passed it, the thread restarts at the compaction's logged post size (or
+        # RESTART_CONTEXT if larger), written once, and regrows the same way
+        restart = False
         if t.late_sim is None and ctx > LATE_COMPACTION:
             comp = self.next_late_compaction(t, r.timestamp)
             if comp is not None:
-                t.late_comp = comp
-                t.late_sim = float(comp.post_tokens or t.start)
+                t.late_comp, restart = comp, True
+                t.late_sim = float(max(comp.post_tokens, RESTART_CONTEXT))
         elif t.late_sim is not None and t.late_comp is not None:
-            q = t.late_comp.post_tokens or t.start
+            q = max(t.late_comp.post_tokens, RESTART_CONTEXT)
             t.late_sim = max(t.late_sim + step, min(ctx, q))
             if t.late_sim > LATE_COMPACTION:
-                t.late_sim = float(q)
+                t.late_sim, restart = float(q), True
         if t.late_sim is not None and t.late_comp is not None:
-            t.late_comp.excess_usd += (ctx - t.late_sim) * rate
+            one_hour = t.write_1h and t.agent_id is None
+            cost = t.late_sim * (self.write_rate(r, one_hour) if restart else rate)
+            t.late_comp.excess_usd += ctx * rate - cost
             t.late_comp.turns += 1
 
     def expiry(

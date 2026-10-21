@@ -58,23 +58,31 @@ def _simulated(contexts: list[int], start: int) -> float:
     return saving
 
 
+LONG_SAVING = 100 * 200_000 * READ_RATE - 100_000 * WRITE_RATE - 99 * 100_000 * READ_RATE
+
+
 def test_a_long_thread_saves_what_a_handed_off_agent_would_not_read() -> None:
-    # 200k on every turn, from before the window: a fresh agent starts at 40k, the
-    # handoff writes it once, the next turns read it
-    f = only(_checks(index(run(10, cache_read=200_000))), "long_running_agents")
-    assert f.saving_usd_per_week == pytest.approx(
-        10 * 200_000 * READ_RATE - 40_000 * WRITE_RATE - 9 * 40_000 * READ_RATE
-    )
-    assert f.metrics["turns"] == 10 and f.metrics["handoffs"] == 1
+    # 200k on every turn: a fresh agent restarts at 100k (its files and state back),
+    # the handoff writes that once, the next turns read it
+    f = only(_checks(index(run(100, cache_read=200_000))), "long_running_agents")
+    assert f.saving_usd_per_week == pytest.approx(LONG_SAVING)
+    assert f.metrics["turns"] == 100 and f.metrics["handoffs"] == 1
+    assert "restarts at about 100.0k tokens" in f.summary
+    # never more than the rereads past the line could save once the restart is paid
+    assert f.saving_usd_per_week <= 100 * 100_000 * READ_RATE
 
 
-def test_a_growing_thread_hands_off_at_its_own_start_and_grows_the_same_way() -> None:
-    # from 20k, 10k more per turn up to 310k: two handoffs back to 20k
-    contexts = [20_000 + 10_000 * i for i in range(30)]
+def test_a_short_stay_past_the_line_does_not_pay_for_the_restart() -> None:
+    assert "long_running_agents" not in kinds(_checks(index(run(10, cache_read=200_000))))
+
+
+def test_a_growing_thread_restarts_at_100k_and_grows_the_same_way() -> None:
+    # from 20k, 1k more per turn up to 319k: back to 100k at each crossing
+    contexts = [20_000 + 1_000 * i for i in range(300)]
     reqs = [r for i, c in enumerate(contexts) for r in run(1, start=1 + i, cache_read=c)]
     f = only(_checks(index(reqs)), "long_running_agents")
-    assert f.saving_usd_per_week == pytest.approx(_simulated(contexts, 20_000))
-    assert f.metrics["handoffs"] == 2
+    assert f.saving_usd_per_week == pytest.approx(_simulated(contexts, 100_000))
+    assert f.metrics["handoffs"] == 4
 
 
 def test_contexts_under_150k_are_not_long_running() -> None:
@@ -86,8 +94,11 @@ def test_a_late_compaction_saves_what_compacting_at_400k_would_not_read() -> Non
     evs = [ev(EventKind.COMPACTION, 15, pre_tokens=520_000, post_tokens=50_000, trigger="auto")]
     found = _checks(index(reqs, evs))
     late = only(found, "late_compactions")
-    # compacted at the line, the thread restarts at the logged 50k
-    assert late.saving_usd_per_week == pytest.approx(10 * 450_000 * READ_RATE)
+    # compacted at the line, the thread restarts at 100k (more than the logged 50k),
+    # written once
+    assert late.saving_usd_per_week == pytest.approx(
+        10 * 500_000 * READ_RATE - 100_000 * WRITE_RATE - 9 * 100_000 * READ_RATE
+    )
     assert late.metrics["max_pre_tokens"] == 520_000
     # the handoff is the other way to the same rereads
     long = only(found, "long_running_agents")
@@ -363,7 +374,7 @@ def test_events_before_the_window_still_set_what_its_requests_carry() -> None:
 
 
 def test_findings_are_ranked_by_weekly_saving() -> None:
-    reqs = run(10, cache_read=500_000) + _rewrite_after(30, cache_write_5m=100_000)
+    reqs = run(30, session="s9", cache_read=500_000) + _rewrite_after(30, cache_write_5m=100_000)
     found = _checks(index(reqs))
     assert len(found) >= 2
     savings = [f.saving_usd_per_week for f in found]
@@ -371,17 +382,13 @@ def test_findings_are_ranked_by_weekly_saving() -> None:
 
 
 def test_logs_that_begin_inside_the_window_set_its_pace() -> None:
-    reqs = run(10, start=60 * 24 * 5.5, cache_read=200_000)  # logs begin 1.5 days before the end
+    reqs = run(100, start=60 * 24 * 5.5, cache_read=200_000)  # logs begin 1.5 days before the end
     f = only(
         run_checks(SortedIndex(reqs=reqs), TABLE, SINCE, UNTIL, agent_dirs=[]),
         "long_running_agents",
     )
     span = UNTIL - reqs[0].timestamp
-    assert f.saving_usd_per_week == pytest.approx(
-        (10 * 200_000 * READ_RATE - 40_000 * WRITE_RATE - 9 * 40_000 * READ_RATE)
-        * timedelta(days=7)
-        / span
-    )
+    assert f.saving_usd_per_week == pytest.approx(LONG_SAVING * timedelta(days=7) / span)
 
 
 def test_no_requests_gives_no_findings() -> None:

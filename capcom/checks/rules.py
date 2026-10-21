@@ -30,7 +30,6 @@ from pathlib import Path
 from capcom.checks.agents import AgentDefinition
 from capcom.checks.facts import (
     EVIDENCE_PER_FINDING,
-    HANDOFF_TOKENS,
     LONG_REPORT_TOKENS,
     Account,
     Compaction,
@@ -47,6 +46,7 @@ from capcom.explain.shared import (
     LATE_COMPACTION,
     LATE_RESUME_EXPIRY,
     LONG_CONTEXT,
+    RESTART_CONTEXT,
     TOOL_WAIT_EXPIRY,
 )
 from capcom.types import AttrValue, Evidence, Finding
@@ -1021,9 +1021,11 @@ def long_running_agents(facts: Facts) -> list[Finding]:
 
     floored at zero. The simulated agent follows the thread's own requests: it
     grows by the same per-request increments, and each time it passes
-    LONG_CONTEXT a fresh agent takes over at the thread's starting context (its
-    first request's, or HANDOFF_TOKENS when that is unknown or already big), whose
-    first request writes that context to the cache instead of reading. Prices are
+    LONG_CONTEXT a fresh agent takes over at max(the thread's first context,
+    RESTART_CONTEXT): conservative, since an agent that continues the work needs its
+    files and state back. Its first request writes that context to the cache
+    (5-minute lifetime for a subagent, the thread's own otherwise) instead of
+    reading it. Prices are
     the read price of each request (a rewrite's premium is left to the rewrite
     findings). Heartbeat sessions (facts.heartbeat) are left to
     `heartbeat_growing_session`. An earlier compaction is the other way to the
@@ -1058,8 +1060,9 @@ def long_running_agents(facts: Facts) -> list[Finding]:
                 f"{len(threads)} thread(s) ({subagents} subagents) ran {turns:,} turns past "
                 f"{_k(LONG_CONTEXT)} tokens, up to {_k(biggest)}; every such turn rereads "
                 f"the whole context. Handing off at {_k(LONG_CONTEXT)} ({handoffs} "
-                "handoff(s), each fresh agent starting from its thread's first context "
-                "and growing as the thread did) would have read that much less."
+                f"handoff(s), assuming a fresh agent restarts at about "
+                f"{_k(RESTART_CONTEXT)} tokens and grows as the thread did) would have "
+                "read that much less."
             ),
             advice=(
                 "One task per agent: hand off with a short note and start fresh, or "
@@ -1072,7 +1075,8 @@ def long_running_agents(facts: Facts) -> list[Finding]:
                 "max_context": biggest,
                 "threshold": LONG_CONTEXT,
                 "handoffs": handoffs,
-                "start_tokens_default": HANDOFF_TOKENS,
+                "restart_tokens": RESTART_CONTEXT,
+                "past_line_usd": round(sum(v[3] for v in per_thread), 6),
             },
         )
         if f:
@@ -1085,8 +1089,9 @@ def late_compactions(facts: Facts) -> list[Finding]:
     compaction, floored at zero: from the turn its thread passed LATE_COMPACTION to
     the compaction, each turn's context x read price less the same for a thread
     compacted then (facts.simulate): it restarts at the post-compaction size the
-    logs show and grows by the thread's own increments (compacting again at the
-    line). It overlaps `long_running_agents`, the other way to the same dollars."""
+    logs show (or RESTART_CONTEXT if larger), written once, and grows by the
+    thread's own increments (compacting again at the line). It overlaps
+    `long_running_agents`, the other way to the same dollars."""
     per_project: dict[str, list[Compaction]] = defaultdict(list)
     beats = _heartbeats(facts)
     for (sid, _aid), comps in facts.compactions.items():
@@ -1109,7 +1114,9 @@ def late_compactions(facts: Facts) -> list[Finding]:
             summary=(
                 f"{len(comps)} compaction(s) started above {_k(LATE_COMPACTION)} tokens "
                 f"({', '.join(_k(p) for p in pres[:5])}); the turns before them reread "
-                "everything; compacting at the line would have saved the difference."
+                f"everything; compacting at the line (assuming a restart at about "
+                f"{_k(RESTART_CONTEXT)} tokens or the logged post size) saves the "
+                "difference."
             ),
             advice=(
                 f"Compact by hand when the context passes {_k(LATE_COMPACTION)}, or end the "

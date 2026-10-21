@@ -60,12 +60,12 @@ def test_the_view_prints_the_rollup_first_and_counts_small_findings(tmp_path: Pa
     text = out.getvalue()
     head = text.index("By kind")
     assert (
-        "Long-running agents: up to $21.06/week across 2 projects" in text[head:]
+        "Long-running agents: up to $10.64/week across 2 projects" in text[head:]
     )  # 2 days of logs
     assert text.index("By kind") < text.index("By scope")
     assert "Model switches" not in text  # $0.08/week: under the floor
     assert "1 more finding(s) under $0.10/week not listed" in text
-    assert "Together: up to $21.06/week" in text
+    assert "Together: up to $10.64/week" in text
 
 
 def test_a_judgement_call_is_listed_but_kept_out_of_the_total(tmp_path: Path) -> None:
@@ -80,7 +80,7 @@ def test_a_judgement_call_is_listed_but_kept_out_of_the_total(tmp_path: Path) ->
     assert "The coder agent runs on Opus" in text
     assert "+ a judgement call: not added to the total" in text
     assert "* overlaps" not in text  # long-running is counted, not pushed out
-    assert "Together: up to $10.53/week across 1 finding that doesn't overlap" in text
+    assert "Together: up to $5.32/week across 1 finding that doesn't overlap" in text
 
 
 def test_the_website_total_leaves_judgement_calls_out_and_names_them() -> None:

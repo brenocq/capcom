@@ -19,6 +19,8 @@ from capcom.types import CauseKind
 LONG_CONTEXT = 150_000  # past this a thread is long: hand off, /clear or compact
 LATE_COMPACTION = 400_000  # a compaction from above this ran late
 GROWTH_FLOOR = LONG_CONTEXT * 2 // 3  # context growth is only looked at from here
+# a fresh agent that continues the work restarts here (its files and state back)
+RESTART_CONTEXT = LONG_CONTEXT * 2 // 3
 CONTEXT_STEPS = (LONG_CONTEXT, LATE_COMPACTION)  # the sizes a title or evidence names
 
 TOOL_WAIT_EXPIRY = "tool_wait_expiry"  # the agent waited on its own tool call
