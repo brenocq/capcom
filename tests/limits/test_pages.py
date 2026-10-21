@@ -119,7 +119,7 @@ console.log(JSON.stringify({{ text: texts(el), paths: paths(el) }}));
     text = got["text"]
     assert "42%" in text and "At the reset, 70%; 80% range 60% to the limit." in text
     assert "runs out around" in text and "Not recording" not in text
-    fills = [p for p in got["paths"] if str(p.get("fill", "")).startswith("url(#fan")]
+    fills = [p for p in got["paths"] if "fan-fill" in str(p.get("style", ""))]
     assert len(fills) == 1  # the 80 % band
     dashed = [p for p in got["paths"] if p.get("stroke-dasharray") == "6 4"]
     assert len(dashed) == 1  # the median
