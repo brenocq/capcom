@@ -314,7 +314,8 @@ def savings_total(findings: Sequence[Finding], dirs: Collection[str]) -> dict[st
     picked = [f for f, ok in zip(findings, flags, strict=True) if ok]
     usd = sum(f.saving_usd_per_week for f in picked)
     n = len(picked)
-    text = f"up to ${usd:,.2f}/week across {n} finding{'' if n == 1 else 's'} that don't overlap"
+    them = "finding that doesn't" if n == 1 else "findings that don't"
+    text = f"up to ${usd:,.2f}/week across {n} {them} overlap"
     if n < len(findings):
         text += f" (of {len(findings)}; overlapping savings are counted once)"
     return {

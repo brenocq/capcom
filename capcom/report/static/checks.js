@@ -26,7 +26,8 @@ export async function renderChecks(main, r) {
     // the same line as `capcom checks` prints: a total only over findings that count separate dollars
     head.insertBefore(h('div.totalbox', { title: t.text },
       h('span.label', { text: totalLabel(t) }),
-      h('span.big', null, 'up to ' + usd(t.usd_per_week, 0), h('small', { text: ' a week' }))), head.lastChild);
+      h('span.big', null, 'up to ' + usd(t.usd_per_week, 0), h('small', { text: ' a week' })),
+      h('span.note', { text: t.text[0].toUpperCase() + t.text.slice(1) + '.' })), head.lastChild);
   }
   if (d.overlapping) {
     main.append(h('p.notice', { text: 'Some of these savings count the same dollars: a long context and the late compaction that ends it, say. Each saving is an “up to” on its own; the total counts each dollar once, over the findings that do not overlap.' }));

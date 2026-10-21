@@ -123,8 +123,10 @@ class ProjectNames:
         home_s = str(home if home is not None else Path.home())
         claw = folder_name(openclaw_root)
         paths: dict[str, str] = {}
+        dirs: set[str] = set()
         for s in sessions:
             project_dir, cwd = (s.project_dir, s.cwd) if isinstance(s, SessionInfo) else s
+            dirs.add(project_dir)
             if project_dir in paths or not cwd:
                 continue
             if is_temporary(project_dir) and not _under(project_dir, claw):
@@ -135,14 +137,20 @@ class ProjectNames:
                     paths[project_dir] = str(cand)
                     break
         base = cls(paths, claw, str(openclaw_root), home_s)
-        labels = {d: base._own_label(d) for d in paths}
+        # every folder's label, OpenClaw ones and folders no cwd explains included,
+        # so a repo named "openclaw" and the OpenClaw state dir are told apart
+        labels = {
+            d: base._own_label(d)
+            for d in dirs
+            if base.is_openclaw(d) or not is_temporary(d) or d in paths
+        }
         seen: dict[str, list[str]] = {}
         for d, label in labels.items():
             seen.setdefault(label, []).append(d)
-        for dirs in seen.values():
-            if len(dirs) > 1:  # same last part: tell them apart by the path
-                for d in dirs:
-                    labels[d] = _home_path(paths[d], home_s)
+        for same in seen.values():
+            if len(same) > 1:  # same last part: tell them apart by the path
+                for d in same:
+                    labels[d] = base._full_path(d)
         return cls(paths, base.openclaw_dir, base.openclaw_root, home_s, labels)
 
     def is_openclaw(self, project_dir: str) -> bool:
@@ -172,6 +180,14 @@ class ProjectNames:
             return path.rstrip("/").rsplit("/", 1)[-1] or path
         return project_dir
 
+    def _full_path(self, project_dir: str) -> str:
+        """The folder's path ("~/..."), the OpenClaw root for its state dir, else
+        the folder name."""
+        known = self.paths.get(project_dir)
+        if not known and self.openclaw_dir and project_dir == self.openclaw_dir:
+            known = self.openclaw_root
+        return _home_path(known, self.home) if known else project_dir
+
     def label(self, project_dir: str) -> str:
         """The display name of a folder, or of a table key `key` returned."""
         if project_dir.startswith("temporary (") and project_dir.endswith(")"):
@@ -193,8 +209,7 @@ class ProjectNames:
             return "/tmp"
         if is_temporary(project_dir) and not self.is_openclaw(project_dir):
             return self.path(self.key(project_dir))
-        known = self.paths.get(project_dir)
-        return _home_path(known, self.home) if known else project_dir
+        return self._full_path(project_dir)
 
 
 @dataclass(frozen=True, slots=True)

@@ -303,6 +303,10 @@ def status(ctx: Context) -> dict[str, Any]:
     return out
 
 
+# today's same-time comparison waits for a baseline of at least $1, or an hour of today
+SAME_HOUR_MIN_USD = 1.0
+
+
 def overview(ctx: Context) -> dict[str, Any]:
     today_since = ctx.midnight()
     week_since = ctx.midnight(6)
@@ -379,7 +383,19 @@ def overview(ctx: Context) -> dict[str, Any]:
             },
         }
 
-    elapsed = max((ctx.now - week_since).total_seconds(), 1.0)  # 6 full days + today so far
+    # averages count only the days with history: from the first request's local
+    # midnight, at most the 7 previous days and 6 full days of the week; a full day
+    # counts as one whatever its length (daylight-saving changes)
+    reqs = iter(ctx.index.requests())
+    first = next(reqs, None)
+    getattr(reqs, "close", lambda: None)()  # release the cursor
+    first_day = ctx.local(first.timestamp).date() if first is not None else ctx.today()
+    history = max(min((ctx.today() - first_day).days, 7), 0)  # previous days with data
+    full_days = min(history, 6)
+    today_s = max((ctx.now - today_since).total_seconds(), 0.0)
+    elapsed = max(full_days * 86400 + today_s, 1.0)
+    same_hour_avg = prev_same_hour / history if history else 0.0
+    comparable = history > 0 and (same_hour_avg >= SAME_HOUR_MIN_USD or today_s >= 3600)
     running = sum(
         1
         for s in infos.values()
@@ -390,12 +406,18 @@ def overview(ctx: Context) -> dict[str, Any]:
         "running_sessions": running,
         "today": block(today, today_since),
         "week": block(week, week_since)
-        | {"days": 7, "full_days": 6, "elapsed_days": round(elapsed / 86400, 4)},
+        | {
+            "days": full_days + 1,
+            "full_days": full_days,
+            "elapsed_days": round(elapsed / 86400, 4),
+        },
         "previous_7_days": {
             "since": iso(prev_since, ctx.tz),
-            "daily_average_usd": prev_usd / 7,
-            "same_hour_average_usd": round(prev_same_hour / 7, 6),
+            "days": history,
+            "daily_average_usd": prev_usd / history if history else 0.0,
+            "same_hour_average_usd": round(same_hour_avg, 6),
             "same_hour": clock.strftime("%H:%M"),
+            "comparable": comparable,
         },
         "spending_now": {"usd_last_hour": round(last_hour.usd, 6), "spark": spark_json},
         "cumulative_today": None if cum is None else _cumulative_json(cum, step, ctx.now),

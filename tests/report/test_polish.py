@@ -12,7 +12,7 @@ import pytest
 
 from capcom.config import Config
 from capcom.cost.top import run_top
-from capcom.report.server import ApiCache, Site, generation
+from capcom.report.server import ApiCache, DataVersion, Site, generation
 from capcom.store.index import open_index
 from capcom.types import SessionInfo
 from tests.report.conftest import FAKE, NOW, TABLE, _log, _put, req, serve, usd
@@ -147,6 +147,53 @@ def test_cache_answers_repeats_and_a_new_scan_invalidates(tmp_path: Path) -> Non
         assert len(site.cache) == 1  # the old generation's entries are gone
 
 
+def test_cache_ignores_unknown_params_and_idle_scans(tmp_path: Path) -> None:
+    path = tmp_path / "index.sqlite"
+    _history(path, [req("h", NOW - timedelta(hours=1), TOY, input=10_000)])
+    site = _site(path)
+    assert site.cache is not None
+    for client in serve(site):
+        client.get("/api/spend?days=7")
+        client.get("/api/spend?days=7&_=12345")  # a cache-buster the endpoint never reads
+        client.get("/api/overview?range=7d")
+        client.get("/api/overview")
+        assert site.cache.misses == 2 and site.cache.hits == 2
+
+
+def test_a_wal_only_write_under_an_open_reader_is_seen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another connection stays open, so the write stays in the WAL; with the files'
+    sizes and times frozen (two commits in one tick), data_version still moves."""
+    import os
+    import sqlite3
+
+    path = tmp_path / "index.sqlite"
+    _history(path, [req("h", NOW - timedelta(hours=1), TOY, input=10_000)])
+    keep = sqlite3.connect(path)  # held open: no checkpoint on the writer's close
+    watch = DataVersion(path)
+    before = generation(path, watch)
+    stat = os.stat
+    frozen = {p: stat(p) for p in (path, path.with_name(path.name + "-wal")) if p.exists()}
+
+    class FrozenOs:  # the server module's `os`, with the index files' stat frozen
+        def __getattr__(self, name: str) -> Any:
+            return getattr(os, name)
+
+        @staticmethod
+        def stat(p: Any) -> Any:
+            return frozen.get(Path(p)) or stat(p)
+
+    monkeypatch.setattr("capcom.report.server.os", FrozenOs())
+    ix = open_index(path)
+    _put(ix, _log(TOY, "w"), [SessionInfo("w", TOY, cwd="/x"), req("w", NOW, TOY, input=5)])
+    ix.close()
+    assert generation(path, watch) != before
+    assert generation(path, watch) == generation(path, watch)  # no write: no change
+    keep.close()
+    watch.close()
+
+
 def test_cache_is_bounded_and_expires() -> None:
     cache = ApiCache(max_bytes=400, ttl=10.0)
     for i in range(10):
@@ -163,3 +210,79 @@ def test_no_cache(projects_index: Path) -> None:
     site = _site(projects_index, cache=None)
     for client in serve(site):
         assert client.get("/api/overview")[0] == 200
+
+
+# --------------------------------------------------------------------------- short history
+
+
+def _history(path: Path, reqs: list[Any]) -> None:
+    ix = open_index(path)
+    _put(ix, _log(TOY, "h"), [SessionInfo("h", TOY, cwd="/x"), *reqs])
+    ix.close()
+
+
+def test_averages_count_only_days_with_history(tmp_path: Path) -> None:
+    """Two days of history: the averages divide by the days that have data."""
+    path = tmp_path / "index.sqlite"
+    old = [req("h", (NOW - timedelta(days=d)).replace(hour=8), TOY, input=70_000) for d in (1, 2)]
+    _history(path, [*old, req("h", NOW.replace(hour=9), TOY, input=70_000)])
+    for client in serve(_site(path)):
+        d = client.get("/api/overview")[1]
+    prev = d["previous_7_days"]
+    assert prev["days"] == 2
+    assert prev["daily_average_usd"] == pytest.approx(usd(old) / 2, abs=1e-6)
+    assert prev["same_hour_average_usd"] == pytest.approx(usd(old) / 2, abs=1e-6)
+    assert d["week"]["full_days"] == 2 and d["week"]["days"] == 3
+    assert d["week"]["elapsed_days"] == pytest.approx(2 + 15 / 24, abs=1e-3)
+
+
+def test_same_time_comparison_waits_for_a_baseline(tmp_path: Path) -> None:
+    """A cent of baseline at 00:30: no comparison; at 15:00 there is one."""
+    path = tmp_path / "index.sqlite"
+    _history(
+        path, [req("h", NOW - timedelta(days=1, hours=15) + timedelta(minutes=10), TOY, input=10)]
+    )
+    early = NOW.replace(hour=0, minute=30)
+    for client in serve(_site(path, clock=lambda: early)):
+        prev = client.get("/api/overview")[1]["previous_7_days"]
+    assert 0 < prev["same_hour_average_usd"] < 1
+    assert prev["comparable"] is False
+    for client in serve(_site(path)):
+        assert client.get("/api/overview")[1]["previous_7_days"]["comparable"] is True
+
+
+def test_today_against_the_same_hour_across_daylight_saving(tmp_path: Path) -> None:
+    """New York left daylight saving on 2026-11-01: local hours still line up."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    ny = ZoneInfo("America/New_York")
+    now = datetime(2026, 11, 4, 15, 0, tzinfo=ny)
+    path = tmp_path / "index.sqlite"
+    early, late = [], []
+    for d in range(1, 8):
+        day = (now - timedelta(days=d)).date()
+        early.append(
+            req("h", datetime(day.year, day.month, day.day, 8, tzinfo=ny), TOY, input=70_000)
+        )
+        late.append(
+            req("h", datetime(day.year, day.month, day.day, 20, tzinfo=ny), TOY, input=700_000)
+        )
+    _history(path, sorted([*early, *late], key=lambda r: r.timestamp))
+    for client in serve(_site(path, clock=lambda: now, tz=ny)):
+        d = client.get("/api/overview")[1]
+    prev = d["previous_7_days"]
+    assert prev["days"] == 7 and prev["same_hour"] == "15:00"
+    assert prev["same_hour_average_usd"] == pytest.approx(usd(early) / 7, abs=1e-6)
+    assert prev["daily_average_usd"] == pytest.approx(usd(early + late) / 7, abs=1e-6)
+    assert d["week"]["elapsed_days"] == pytest.approx(6 + 15 / 24, abs=1e-3)
+
+
+def test_savings_total_says_one_finding_in_the_singular() -> None:
+    from capcom.report.tally import savings_total
+    from capcom.types import Finding
+
+    one = savings_total([Finding("k", "T", "all", "s", 2.0, "a")], set())
+    assert one is not None and "1 finding that doesn't overlap" in one["text"]
+    two = savings_total([Finding("k", "T", "all", "s", 2.0, "a")] * 2, set())
+    assert two is not None and "2 findings that don't overlap" in two["text"]
