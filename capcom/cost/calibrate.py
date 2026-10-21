@@ -116,8 +116,10 @@ _TOKENS = ("input", "output", "cache_read", "cache_write")
 def _fits(base: CostState, c: CostState) -> bool:
     """Whether `c`'s totals can have grown from `base`'s (a process that restored
     them): no cost and no token count of any model smaller, no shorter duration,
-    and a process start (its time less the duration's growth) not before `base`
-    was written. A part not known on either side does not rule `base` out."""
+    and a process that can have started after `base` was written. The exit is
+    known only to lie between `c`'s time and the next record, and totalDuration
+    includes the idle time before it, so the latest possible start is the next
+    record less the duration's growth. A part not known does not rule `base` out."""
     if c.total_cost_usd < base.total_cost_usd:
         return False
     for model, b in base.models.items():
@@ -129,9 +131,10 @@ def _fits(base: CostState, c: CostState) -> bool:
     grown = c.total_duration_ms - base.total_duration_ms
     if grown < 0:
         return False
-    if c.timestamp is None or base.timestamp is None:
+    until = window(c)[1]
+    if until is None or base.timestamp is None:
         return True
-    return c.timestamp - timedelta(milliseconds=grown) + STEP_SLACK >= base.timestamp
+    return until - timedelta(milliseconds=grown) + STEP_SLACK >= base.timestamp
 
 
 def _minus(c: CostState, base: CostState | None) -> dict[str, ModelUsage]:

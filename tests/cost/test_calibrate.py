@@ -348,14 +348,18 @@ def test_the_base_must_have_no_more_tokens_and_be_written_before_the_start() -> 
     b = step_cs(200, 22.0, 300, 301, 2 * H, cache_read=4 * M)
     got = steps([step_cs(50, 10.0, 30, 31, H // 2, cache_read=2 * M), a, b])
     assert got[-1].usd == pytest.approx(12.0)  # grew from the $10 record
-    # From `early`, c's process started at minute 200 less 165 (after `early` was
-    # written); from `later`, at minute 40, before `later` was: it restored `early`.
+    # c exited by minute 201 (the next record). From `early`, its process started by
+    # minute 201 less 165 (after `early` was written); from `later`, by minute 41,
+    # before `later` was: it restored `early`.
     early = step_cs(50, 10.0, 30, 31, 25 * 60_000)
     later = step_cs(100, 20.0, 60, 61, 30 * 60_000)
-    c = step_cs(200, 25.0, 200, None, 190 * 60_000)
+    c = step_cs(200, 25.0, 200, 201, 190 * 60_000)
     got = steps([early, later, c])
     assert got[-1].usd == pytest.approx(15.0)
     assert got[-1].since == at(34)
+    # An exit long after the last record (idle before it) does not rule `later` out.
+    idle = step_cs(200, 25.0, 200, 300, 190 * 60_000)
+    assert steps([early, later, idle])[-1].usd == pytest.approx(5.0)
 
 
 def test_a_step_never_starts_before_its_base_was_written() -> None:
