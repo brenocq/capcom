@@ -1,0 +1,18 @@
+# Design notes and briefs: kept locally, never committed (as in kittex)
+docs/
+# Branch work (one worktree per branch, see AGENTS.md)
+.worktrees/
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+# Reports and indexes built from real logs: private, never committed
+out/
+*.sqlite
+*.sqlite-*
