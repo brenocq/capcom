@@ -23,7 +23,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from svg import PANEL, bands, card, keyframes, r, series_colors, usd
+from svg import PANEL, bands, card, eased_at, keyframes, r, series_colors, spike_pins, usd
 
 PX, PY, PW, PH = PANEL
 LOOP = 9.0
@@ -134,13 +134,10 @@ def adding_up(data: dict[str, Any]) -> str:
         f'<clipPath id="ac"><rect class="{reveal}" x="{x0 - 2}" y="{y0 - 30}" '
         f'width="{w + 6}" height="{h + 34}"/></clipPath>'
     )
-    pins, last = [], -99.0
-    for m in data["spend_project"]["spikes"]["marks"]:
-        i = min(range(len(times)), key=lambda k: abs(times[k] - m["t"] / 1000))
-        px, py = points[i]
-        px = max(px, last + 17)
-        last = px
-        at = draw[0] + (px - x0) / w * (draw[1] - draw[0])
+    pins = []
+    marks = data["spend_project"]["spikes"]["marks"]
+    for n, px, py in spike_pins(marks, times, total, points, 4, 20):
+        at = draw[0] + eased_at((px - x0) / w) * (draw[1] - draw[0])
         k = c.step(
             "transform:scale(0)",
             "transform:scale(1)",
@@ -150,10 +147,10 @@ def adding_up(data: dict[str, Any]) -> str:
             origin="50% 50%",
         )
         pins.append(
-            f'<g class="{k}"><circle cx="{r(px)}" cy="{r(py - 13)}" r="7.5" '
+            f'<g class="{k}"><circle cx="{r(px)}" cy="{r(py - 10)}" r="7.5" '
             f'style="fill:var(--fg);stroke:var(--panel);stroke-width:2"/>'
-            f'<text x="{r(px)}" y="{r(py - 9.6)}" font-size="9.5" font-weight="700" '
-            f'text-anchor="middle" style="fill:var(--panel)">{m["n"]}</text></g>'
+            f'<text x="{r(px)}" y="{r(py - 6.6)}" font-size="9.5" font-weight="700" '
+            f'text-anchor="middle" style="fill:var(--panel)">{n}</text></g>'
         )
     end = c.step("opacity:0", "opacity:1", draw[1], 0.4)
     ex, ey = points[-1]

@@ -7,8 +7,10 @@ tests/fixtures/generate.py's SessionWriter: five projects with neutral names
 under /home/dev/code, main threads on Opus with subagents of a few types, and the
 habits capcom is built to find: idle gaps past the cache lifetime, a late
 compaction, a subagent fan-out, a workflow's burst of agents, a large tool
-result, a model switch mid-session, a subagent whose cache expires while its
-Bash runs, tools and skills loaded but never used, and a long CLAUDE.md. Every
+result, a model switch mid-session, tools and skills loaded but never used, a
+long CLAUDE.md, and the story the demo tells: `coder` subagents whose cache
+expires while their ten-minute test runs go on, twice in small and then once
+in large (four coders, twelve rewrites), the window's steepest rise. Every
 session ends with a cost-state that matches its requests, a little above them
 (Claude Code's side calls), as real ones do.
 
@@ -84,7 +86,8 @@ MCP_TOOLS = [f"mcp__tracker__{n}" for n in ("search", "create", "update", "comme
 MCP_TOOLS += [f"mcp__browser__{n}" for n in ("open", "click", "type", "screenshot", "scroll")]
 BASE_TOOLS = ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "Agent", "WebSearch", "TodoWrite"]
 SKILLS = ["release-notes", "db-migrate", "slide-deck", "pdf-export", "brand-voice"]
-AGENT_TYPES = {"Explore": HAIKU, "general-purpose": SONNET, "code-reviewer": OPUS}
+AGENT_TYPES = {"Explore": HAIKU, "general-purpose": SONNET, "code-reviewer": OPUS, "coder": OPUS}
+CAP = 100_000  # ordinary sessions stop growing here, so the planted habits stand out
 
 
 def cost(model: str, u: dict[str, int]) -> float:
@@ -321,6 +324,55 @@ class Session:
                 m.pending += report
         return threads
 
+    def coders(self, tables: list[str], waits: int, dump: int) -> None:
+        """One reply starts a `coder` subagent per table; each reads a large fixture
+        dump, then runs the table's backfill tests `waits` times. A run takes about
+        ten minutes, past a subagent's 5-minute cache, so the call after each run
+        rewrites the whole context: `waits` rewrites per table."""
+        m = self.main
+        cwd = PROJECTS[self.project]
+        calls = [
+            (
+                "Agent",
+                {"subagent_type": "coder", "description": f"backfill {t}", "prompt": "synthetic"},
+            )
+            for t in tables
+        ]
+        m.request(new=600, output=300 + 160 * len(tables), tools=calls)
+        ids = list(m.w.last_tool_ids)
+        # When the first test runs come back: 15 minutes on, 20 s past an even minute
+        # (capcom sums a session's spend in 2-minute steps; each round fills one).
+        first = m.t + timedelta(minutes=15)
+        first -= timedelta(seconds=first.timestamp() % 120 - 20)
+        ends = []
+        for i, (table, tid) in enumerate(zip(tables, ids, strict=True)):
+            sw = m.w.subagent("coder", f"backfill {table}", tool_use_id=tid)
+            self.subs.append(sw)
+            th = Thread(self, sw, OPUS, "5m", m.t + timedelta(seconds=2 + i * 0.6))
+            sw.user_prompt(th.t, "synthetic task")
+            th.wait(2)
+            th.request(new=24_000, output=300)
+            th.work(6, self.project, big=True)
+            th.tool("Read", {"file_path": f"{cwd}/fixtures/{table}_q3.csv"}, dump, ran=1)
+            # Each run's failures go straight into the next run's call (and the last
+            # into the report), so every call after the first comes back to a cold
+            # cache. The test runs share one database, so the coders' runs end
+            # within a few seconds of each other, every ten minutes.
+            for k in range(waits):
+                back = first + timedelta(seconds=k * 600 + i * 12 + self.rng.uniform(0, 4))
+                th.tool(
+                    "Bash",
+                    {"command": f"make backfill-test TABLE={table}"},
+                    3_000,
+                    ran=(back - th.t).total_seconds(),
+                )
+            th.request(new=300, output=900)
+            ends.append(th.t)
+        m.t = max(ends) + timedelta(seconds=3)
+        for tid in ids:
+            m.w.tool_result(tid, m.t, chars=6_000)
+            m.pending += 1_500
+
     def close(self) -> float:
         """The cost-state Claude Code writes on exit: every model's usage and cost,
         plus a small share for side calls the transcript never shows."""
@@ -414,7 +466,7 @@ def generate(root: Path, now: datetime) -> dict[str, Any]:
                 memory=42_000 if project == "orbit-api" else 9_000,
                 ttl="5m" if project == "pebble-cli" else "1h",
             )
-            ordinary(s, rng.randint(6, 13), cap=260_000)
+            ordinary(s, rng.randint(6, 13), cap=CAP)
             done(s)
 
         # The planted habits, one or two a day.
@@ -448,7 +500,7 @@ def generate(root: Path, now: datetime) -> dict[str, Any]:
             done(s, "large-result")
         if day == 6:  # context growth, then a late compaction
             s = session("tidepool-web", day, 10.0, title="Upgrade the bundler", skills=True)
-            while s.main.ctx < 640_000:
+            while s.main.ctx < 430_000:
                 ordinary(s, 2, steps=(10, 16))
                 s.main.work(6, s.project, big=True)
             pre = s.main.ctx
@@ -474,7 +526,7 @@ def generate(root: Path, now: datetime) -> dict[str, Any]:
             areas = ("orders", "users", "billing", "search", "webhooks", "admin", "export")
             kinds = [("general-purpose", f"check input validation in {x}") for x in areas]
             kinds += [("code-reviewer", f"review the {x} checks") for x in areas]
-            s.agents(kinds, steps=(1, 3), report=2_500, prefix=36_000, slow=5)
+            s.agents(kinds, steps=(3, 5), report=2_500, prefix=100_000, slow=4, big=True)
             ordinary(s, 3)
             done(s, "fan-out")
         if day == 9:  # a workflow's agents, in parallel, without an Agent call
@@ -515,50 +567,19 @@ def generate(root: Path, now: datetime) -> dict[str, Any]:
             s.main.last = s.main.t - timedelta(hours=2)  # a new model has no cache
             ordinary(s, 5)
             done(s, "model-switch")
-        if day == 11:  # a subagent's cache expires while its Bash runs
+        if day in (3, 7):  # the habit, small: a coder subagent waits on two long test runs
+            s = session("quarry-etl", day, 15.0, title="Parallelize the loader", skills=True)
+            ordinary(s, 2, cap=CAP)
+            s.coders(["loader"], waits=2, dump=90_000)
+            ordinary(s, 1, cap=CAP)
+            done(s)
+        if day == 11:  # the habit, large: four coders wait on ten-minute test runs
             s = session(
                 "quarry-etl", day, 14.0, title="Backfill last quarter's events", skills=True
             )
-            ordinary(s, 2)
-            s.prompt(60)
-            m = s.main
-            m.request(
-                new=600,
-                output=500,
-                tools=[
-                    (
-                        "Agent",
-                        {
-                            "subagent_type": "code-reviewer",
-                            "description": "run the backfill tests",
-                            "prompt": "synthetic",
-                        },
-                    )
-                ],
-            )
-            tid = m.w.last_tool_ids[0]
-            sw = m.w.subagent("code-reviewer", "run the backfill tests", tool_use_id=tid)
-            s.subs.append(sw)
-            th = Thread(s, sw, OPUS, "5m", m.t + timedelta(seconds=2))
-            sw.user_prompt(th.t, "synthetic task")
-            th.wait(2)
-            th.request(new=16_000, output=300)
-            th.work(14, s.project, big=True)
-            th.tool(
-                "Read",
-                {"file_path": f"{PROJECTS['quarry-etl']}/fixtures/q3_events.csv"},
-                190_000,
-                ran=1,
-            )
-            for i in range(5):
-                th.tool(
-                    "Bash", {"command": "pytest tests/backfill -x"}, 2_500, ran=60 * (10 + i * 0.7)
-                )
-            th.request(new=300, output=700)
-            m.t = th.t + timedelta(seconds=3)
-            m.w.tool_result(tid, m.t, chars=6_000)
-            m.pending += 1_500
-            ordinary(s, 2)
+            ordinary(s, 2, cap=CAP)
+            s.coders(["events", "orders", "refunds", "invoices"], waits=3, dump=560_000)
+            ordinary(s, 2, cap=CAP)
             done(s, "tool-wait")
         if day == 12:  # one-command subagents
             s = session(

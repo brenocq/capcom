@@ -6,9 +6,10 @@
 <out-dir>/banner.svg, 880 x 200: the radio-signal mark pulsing like a
 transmission, "capcom" as outlines (wordmark.py, no web font), the subtitle in
 the system font, and the two weeks' cumulative spend by project in the
-website's band style, drawing in from the left while the numbered spike
-markers pop onto the total line as it reaches them; the total is labeled at
-its right end.
+website's band style, drawing in from the left while the three largest
+spikes' numbered markers pop onto the total line as it reaches them, each on
+the steep step it explains; the total is labeled right of its end, inside the
+picture.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from svg import bands, keyframes, mark, r, series_colors, svg, usd
+from svg import bands, eased_at, keyframes, mark, r, series_colors, spike_pins, svg, usd
 from wordmark import GLYPHS, UPM
 
 W, H = 880, 200
@@ -58,21 +59,18 @@ def build(data: dict, out: Path) -> Path:
     members = cum["values"]
     total = cum["total"]
     colors = series_colors([m["label"] for m in cum["members"]])
-    box = (506, 34, 300, 132)
+    box = (506, 34, 272, 132)  # leaves room right of the plot for the total's label
     ymax = max(total) * 1.04
     defs, chart, points = bands(times, members, total, colors, box, ymax, "b")
     x0, y0, w, h = box
 
-    # Spike markers on the total line at each spike's start, as on the website.
-    marks = []
-    for m in data["spend_project"]["spikes"]["marks"]:
-        t = m["t"] / 1000
-        i = min(range(len(times)), key=lambda k: abs(times[k] - t))
-        px, py = points[i]
-        at = DRAW[0] + (px - x0) / w * (DRAW[1] - DRAW[0])
-        if marks and px - marks[-1][1] < 19:  # keep close markers apart, as a pair
-            px = marks[-1][1] + 19
-        marks.append((m["n"], px, py - 15, at))
+    # The three largest spikes, each sitting on the top of the steepest step of its span.
+    marks = [
+        (n, px, py, DRAW[0] + eased_at((px - x0) / w) * (DRAW[1] - DRAW[0]))
+        for n, px, py in spike_pins(
+            data["spend_project"]["spikes"]["marks"], times, total, points, 3, 24
+        )
+    ]
 
     css = [
         ".chart{animation:fade 10s linear infinite}",
@@ -108,7 +106,8 @@ def build(data: dict, out: Path) -> Path:
         keyframes("a1", LOOP, pulse([0.4, 3.0, 5.6, 8.2], 0)),
         keyframes("a2", LOOP, pulse([0.4, 3.0, 5.6, 8.2], 0.22)),
         ".sub{fill:var(--muted);font-size:19px}",
-        ".total{fill:var(--fg);font-size:14px;font-weight:600}",
+        ".total{fill:var(--fg);font-size:14px;font-weight:600;"
+        "paint-order:stroke;stroke:var(--panel);stroke-width:3px;stroke-linejoin:round}",
         ".end{animation:end 10s infinite}",
         keyframes(
             "end",
@@ -138,8 +137,8 @@ def build(data: dict, out: Path) -> Path:
             )
         )
         pins.append(
-            f'<g class="pin p{k}"><circle cx="{r(px)}" cy="{r(py)}" r="8.5"/>'
-            f'<text x="{r(px)}" y="{r(py + 3.7)}">{n}</text></g>'
+            f'<g class="pin p{k}"><circle cx="{r(px)}" cy="{r(py - 11)}" r="8.5"/>'
+            f'<text x="{r(px)}" y="{r(py - 7.3)}">{n}</text></g>'
         )
 
     defs += (

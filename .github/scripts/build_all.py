@@ -7,12 +7,14 @@
 2. banner/build.py and features/build.py draw banner.svg and the six
    feature-*.svg from capcom's numbers.
 3. demo/record.py records the real `capcom serve` on that data in headless
-   Chrome: demo.webp and demo.png.
+   Chrome, once per GitHub theme: demo-light.webp, demo-dark.webp and a still
+   of each, demo-light.png and demo-dark.png.
 
 Everything lands in --out (default .github/assets/, gitignored); then
 .github/scripts/publish-assets.sh puts it on the `assets` branch. With --check,
-contact sheets of every SVG (several moments, light and dark) and screenshots of
-a local README preview go to that folder. Needs google-chrome (or CHROME=) and
+contact sheets of every SVG (several moments, light and dark), the demo's
+stills (each step's last frame, both themes) and screenshots of a local README
+preview go to that folder. Needs google-chrome (or CHROME=) and
 ffmpeg with libwebp for the demo; Chrome runs in a 2 GB memory-capped scope.
 """
 

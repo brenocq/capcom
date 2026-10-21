@@ -9,7 +9,10 @@
 <br>
 
 <p align="center">
-  <img alt="capcom's website in a browser window: two weeks of spend grouped by project, with a tooltip on the chart, then by model; the Spikes page, opening a burst of 14 subagents to its cause and cost; and the Checks page, copying the settings change for two unused MCP servers" src="https://github.com/brenocq/capcom/raw/assets/demo.webp" width="992">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/brenocq/capcom/raw/assets/demo-dark.webp">
+    <img alt="capcom's website in a browser window, in six steps. Spend jumped: two weeks of spend by project, the total climbing, then rising steeply on one day. Who spent it: split by agent type, the coder subagents made the jump. Why: the jump's spike marker opens its cause, a cache that expired 9 times while Bash ran. Where: the session's page, a 10-minute pause and the full cache rewrite after it. Is it a habit: Checks ranks the same cause first for the project, with what it costs a week. Fix it: a settings change is copied." src="https://github.com/brenocq/capcom/raw/assets/demo-light.webp" width="992">
+  </picture>
 </p>
 
 capcom reads the logs Claude Code keeps on your machine and shows where your
