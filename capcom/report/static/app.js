@@ -2,7 +2,7 @@
 // theme toggle) and a router from the URL path to a page.
 
 import { h, s, api, stamp, sessionHref, forget } from './lib.js';
-import { startRouter, render, go } from './router.js';
+import { startRouter, render, go, afterPointer } from './router.js';
 import { swapIn } from './morph.js';
 import { renderOverview } from './overview.js';
 import { renderSpend } from './spend.js';
@@ -90,7 +90,7 @@ function drawSidebar() {
     liveList(),
     footer(),
   );
-  swapIn(nav, fresh, { animate: nav.childElementCount > 0 });
+  afterPointer(() => { const live = document.getElementById('sidebar'); swapIn(live, fresh, { animate: live.childElementCount > 0 }); });
 }
 
 function liveList() {

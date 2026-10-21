@@ -93,8 +93,24 @@ async function draw(v) {
   v.used = p.used;
   v.mark = p.mark;
   if (cfg.decorate) cfg.decorate(next);
-  show(v, next);
-  if (v.dirty) schedule(v);
+  // a redraw waits for a press to end: swapped in between, the release would land
+  // on a new element and the click would be lost
+  afterPointer(() => {
+    if (view !== v) return;
+    show(v, next);
+    if (v.dirty) schedule(v);
+  });
+}
+
+// Run `fn` now, or once the pointer that is down comes up (after its click).
+let pressed = false;
+const queued = [];
+export function afterPointer(fn) { if (pressed) queued.push(fn); else fn(); }
+function release() {
+  setTimeout(() => {
+    pressed = false;
+    for (const fn of queued.splice(0)) fn();
+  }, 0);
 }
 
 // The page is waiting for its first data on a path: the old content dims (same
@@ -289,6 +305,12 @@ function linkOf(e) {
 export function startRouter(options) {
   cfg = options;
   if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+  // a release outside the window never comes: let go after 3 s at most
+  let safety = 0;
+  document.addEventListener('pointerdown', () => { pressed = true; clearTimeout(safety); safety = setTimeout(release, 3000); }, true);
+  window.addEventListener('blur', release);
+  document.addEventListener('pointerup', release, true);
+  document.addEventListener('pointercancel', release, true);
   document.addEventListener('click', (e) => {
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
     const url = linkOf(e);
