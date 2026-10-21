@@ -50,22 +50,12 @@ def _overlapped_by(
     findings: list[Finding], counted: list[bool | None], dirs: set[str]
 ) -> list[int]:
     """For each finding left out of the total, the number (1-based) of the first
-    counted finding it shares dollars with; 0 for the counted ones."""
-    from capcom.report.tally import finding_overlaps
+    counted finding it shares dollars with (the total's own test); 0 for the
+    counted ones."""
+    from capcom.report.tally import overlap_blockers
 
-    out: list[int] = []
-    for i, f in enumerate(findings):
-        hit = 0
-        if counted[i] is False:
-            over = finding_overlaps(f)
-            for j in range(i):
-                g = findings[j]
-                near = g.scope == f.scope or g.scope not in dirs or f.scope not in dirs
-                if counted[j] and g.kind in over and near:
-                    hit = j + 1
-                    break
-        out.append(hit)
-    return out
+    blockers = overlap_blockers(findings, dirs)
+    return [hit[0] + 1 if counted[i] is False and hit else 0 for i, hit in enumerate(blockers)]
 
 
 def format_findings(
