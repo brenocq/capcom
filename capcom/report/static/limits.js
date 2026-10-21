@@ -2,7 +2,7 @@
 // (the reading, the forecast fan) and the Limits page (each window's sawtooth over
 // time, and what spent each window by project). Data from /api/limits.
 
-import { h, s, api, usd, seg, empty, setQuery, hm, monthDay, dayName, showTip, hideTip, SERIES, OTHER_COLOR } from './lib.js';
+import { h, s, api, usd, tokens, seg, empty, setQuery, hm, monthDay, dayName, showTip, hideTip, SERIES, OTHER_COLOR } from './lib.js';
 import { timeTicks, xAxis } from './charts.js';
 
 let uid = 0;
@@ -31,14 +31,31 @@ function ring(percent, warn) {
     }) : null);
 }
 
+// When the forecast runs out, with its range (as `runs_out_text` in capcom/limits/view.py).
+export function runsOut(fc, at) {
+  const mid = fc.runs_out_at, early = fc.runs_out_early, late = fc.runs_out_late;
+  const t = (iso) => new Date(iso).getTime();
+  if (mid && late && early && t(early) < t(late)) return `At this pace it runs out between ${at(early)} and ${at(late)}, most likely ${at(mid)}.`;
+  if (mid && late) return `At this pace it runs out around ${at(mid)}.`;
+  if (mid) return `At this pace it runs out around ${at(mid)}${early && t(early) < t(mid) ? `, as early as ${at(early)}` : ''}; at a slower pace it lasts until the reset.`;
+  if (early) return `It may run out before the reset, as early as ${at(early)} if the pace picks up.`;
+  return null;
+}
+
 // What the cards and the page say about a window, in words.
 function summary(w) {
   const out = [];
   const weekly = isWeekly(w);
   const fc = w.forecast;
   if (fc) {
-    out.push(`About ${pctText(fc.now)} now (${pctText(fc.reading)} at the last reading). At the reset, ${pctText(fc.median)}; 80% range ${pctText(fc.low)} to ${pctText(fc.high)}.`);
-    if (fc.runs_out_at) out.push(`At this pace it runs out around ${when(fc.runs_out_at, weekly)}.`);
+    // usage stops at the limit: past 100 % the paths only say when it gets there
+    const cap = (x) => (x >= 100 ? 'the limit' : pctText(x));
+    const head = `About ${pctText(fc.now)} now (${pctText(fc.reading)} at the last reading).`;
+    out.push(fc.low >= 100 ? `${head} At this pace it reaches the limit before the reset.`
+      : `${head} At the reset, ${fc.median >= 100 ? '100% (the limit)' : pctText(fc.median)}; 80% range ${pctText(fc.low)} to ${cap(fc.high)}.`);
+    if (fc.rough) out.push(`Rough: ${fc.readings} reading${fc.readings === 1 ? '' : 's'} so far, so the range is wide; it narrows as readings come.`);
+    const run = runsOut(fc, (iso) => when(iso, weekly));
+    if (run) out.push(run);
   } else if (w.reading && !w.current) {
     out.push(`The last reading was ${pctText(w.reading.percent)} at ${when(w.reading.time, true)}; that window has reset since.`);
   } else if (w.reason) {
@@ -48,9 +65,7 @@ function summary(w) {
 }
 
 function fitNote(w) {
-  const f = w.fit;
-  if (!f) return null;
-  return `Fit: ${f.percent_per_usd.toFixed(3)}% per API-equivalent dollar, ${f.note}; mean error ${f.mean_abs_error.toFixed(1)} points.`;
+  return w.fit ? w.fit.note : null;
 }
 
 // ------------------------------------------------------------------ chart
@@ -58,14 +73,19 @@ function fitNote(w) {
 // Usage windows over time: each window's readings as a rising line that drops to
 // 0 at its reset, a dashed line at 100%, and the current window's forecast as a
 // fan (the 80% range, filled with a fade, and the median dashed).
-// opts: {segments: [{points, resets_at, reset, hit_limit}], fan, now, x0, x1, height, left, weekly}
+// Each reading is a dot; the stretch from a window's reset (0 %) to its first reading
+// is dashed and labeled, since nothing was read there.
+// opts: {segments: [{points, resets_at, reset, hit_limit, start_known}], fan, now, x0, x1,
+//        height, left, weekly, since (ms: when recording began)}
 export function limitChart(opts) {
   const W = 1000, H = opts.height || 160, left = opts.left || 40;
   const { x0, x1 } = opts;
   const fan = opts.fan || [];
+  // a little headroom above the limit when the fan crosses it (clipped there: usage
+  // stops at 100 %)
   let top = 100;
   for (const p of fan) top = Math.max(top, p[3]);
-  const ymax = top > 100 ? Math.ceil(top / 25) * 25 : 100;
+  const ymax = top > 100 ? 120 : 100;
   const X = (t) => ((t - x0) / (x1 - x0) * W).toFixed(1);
   const Y = (v) => (H - v / ymax * H).toFixed(1);
   const id = 'fan' + (++uid);
@@ -75,19 +95,27 @@ export function limitChart(opts) {
       s('stop', { offset: 1, style: 'stop-color:var(--accent);stop-opacity:0.06' }))));
   const hover = [];
   const stroke = { fill: 'none', 'stroke-width': 2, 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke' };
+  const gaps = [];
   for (const sg of opts.segments) {
     const pts = sg.points;
     const endT = sg.resets_at ? new Date(sg.resets_at).getTime() : pts.length ? pts[pts.length - 1][0] : 0;
     if (!pts.length || endT < x0) continue;
-    let d = pts.map((p, i) => (i ? 'L' : 'M') + X(p[0]) + ' ' + Y(p[1])).join('');
+    // the window's reset at 0 % is not a reading: dashed up to the first one
+    const unseen = sg.start_known && pts.length > 1 ? 1 : 0;
+    if (unseen) {
+      svg.append(s('path', { d: `M${X(pts[0][0])} ${Y(pts[0][1])}L${X(pts[1][0])} ${Y(pts[1][1])}`, ...stroke, 'stroke-dasharray': '4 4', style: 'stroke:var(--muted)' }));
+      gaps.push({ a: pts[0], b: pts[1], label: opts.since && pts[0][0] < opts.since ? 'before recording' : 'not seen' });
+    }
+    const seen = pts.slice(unseen);
+    let d = seen.map((p, i) => (i ? 'L' : 'M') + X(p[0]) + ' ' + Y(p[1])).join('');
     const last = pts[pts.length - 1];
     if (sg.reset && sg.resets_at) {
       const rt = new Date(sg.resets_at).getTime();
       d += 'L' + X(rt) + ' ' + Y(last[1]);
       svg.append(s('path', { d: 'M' + X(rt) + ' ' + Y(last[1]) + 'L' + X(rt) + ' ' + Y(0), ...stroke, 'stroke-width': 1, 'stroke-dasharray': '3 3', style: 'stroke:var(--muted)' }));
     }
-    svg.append(s('path', { d, ...stroke, style: 'stroke:var(--text)' }));
-    for (const p of pts) hover.push({ t: p[0], v: p[1], hit: sg.hit_limit && p[1] >= 100 });
+    if (seen.length > 1 || (sg.reset && sg.resets_at)) svg.append(s('path', { d, ...stroke, style: 'stroke:var(--text)' }));
+    for (const p of seen) hover.push({ t: p[0], v: p[1], hit: sg.hit_limit && p[1] >= 100 });
   }
   if (fan.length > 1) {
     let band = fan.map((p, i) => (i ? 'L' : 'M') + X(p[0]) + ' ' + Y(p[3])).join('');
@@ -102,15 +130,25 @@ export function limitChart(opts) {
     }
   }
   const plot = h('div.chart', { style: `height:${H}px;margin:12px 0 0 ${left}px` });
-  for (const v of ymax > 100 ? [0, 50, 100, ymax] : [0, 50, 100]) {
+  for (const v of [0, 50, 100]) {
     const t = ((1 - v / ymax) * 100).toFixed(2) + '%';
     plot.append(h('div.gridline', { style: `top:${t}` + (v === 100 ? ';border-top:1px dashed var(--accent)' : '') }),
       h('span.ylab', { style: `left:-${left}px;top:${t}`, text: `${v}%` }));
   }
   plot.append(svg);
-  for (const p of hover) {
-    if (!p.hit) continue;
-    plot.append(h('span.enddot', { style: `left:${((p.t - x0) / (x1 - x0) * 100).toFixed(2)}%;top:${((1 - p.v / ymax) * 100).toFixed(2)}%;background:var(--accent-strong)`, title: 'Rate limit hit' }));
+  // each reading as a dot (too many to tell apart: only the limit hits)
+  const xp = (t) => ((t - x0) / (x1 - x0) * 100).toFixed(2) + '%';
+  const yp = (v) => ((1 - v / ymax) * 100).toFixed(2) + '%';
+  const shown = hover.filter((p) => p.t >= x0 && p.t <= x1);
+  for (const p of shown) {
+    if (p.hit) plot.append(h('span.enddot', { style: `left:${xp(p.t)};top:${yp(p.v)};background:var(--accent-strong)`, title: 'Rate limit hit' }));
+    else if (shown.length <= 240) plot.append(h('span.rdot', { style: `left:${xp(p.t)};top:${yp(p.v)}` }));
+  }
+  for (const g of gaps) {
+    if ((g.b[0] - Math.max(g.a[0], x0)) / (x1 - x0) < 0.12) continue; // too narrow to label
+    const mid = (Math.max(g.a[0], x0) + g.b[0]) / 2;
+    const v = g.a[1] + (g.b[1] - g.a[1]) * (mid - g.a[0]) / (g.b[0] - g.a[0]);
+    plot.append(h('span.gaplab', { style: `left:${xp(mid)};top:${yp(v)}`, text: g.label }));
   }
   if (opts.now && opts.now < x1 && opts.now > x0) {
     const f = ((opts.now - x0) / (x1 - x0) * 100).toFixed(2) + '%';
@@ -154,7 +192,8 @@ export function limitCard(label, w, lim) {
   for (const line of summary(w)) card.append(h('span.note', { text: line }));
   if (w.current && w.history.length && resets) {
     const x0 = new Date(w.start).getTime(), x1 = new Date(resets).getTime();
-    card.append(limitChart({ segments: [{ points: w.history, reset: false }], fan: fc ? fc.fan : [], now: fc ? fc.fan[0][0] : null, x0, x1, height: 110, weekly }));
+    const since = lim.recording_since ? new Date(lim.recording_since).getTime() : null;
+    card.append(limitChart({ segments: [{ points: w.history, reset: false, start_known: w.start_known }], fan: fc ? fc.fan : [], now: fc ? fc.fan[0][0] : null, x0, x1, height: 110, weekly, since }));
   }
   const fit = fitNote(w);
   if (fit) card.append(h('span.note', { text: fit }));
@@ -165,12 +204,12 @@ export function limitCard(label, w, lim) {
 
 // ------------------------------------------------------------------ page
 
-function windowSection(w, now, days) {
+function windowSection(w, now, days, since) {
   const weekly = isWeekly(w);
   const card = h('section.card', null, h('div.split', null, h('h2', { text: w.label[0].toUpperCase() + w.label.slice(1) }),
     h('span.note', { text: `${w.samples} sample${w.samples === 1 ? '' : 's'}` })));
   if (!w.reading) { card.append(empty(null, 'No readings of this window yet.')); return card; }
-  for (const line of summary(w)) card.append(h('p.note', { text: line }));
+  card.append(h('p.note', { text: summary(w).join(' ') }));
   const segs = [...w.segments].reverse(); // oldest first
   const fc = w.forecast;
   let first = Infinity;
@@ -179,14 +218,15 @@ function windowSection(w, now, days) {
   const end = fc ? new Date(fc.resets_at).getTime() : now;
   card.append(limitChart({
     segments: segs,
-    fan: fc ? fc.fan : [], now, x0, x1: Math.max(end, now), height: 180, weekly: true,
+    fan: fc ? fc.fan : [], now, x0, x1: Math.max(end, now), height: 180, weekly: true, since,
   }));
   const fit = fitNote(w);
   if (fit) card.append(h('p.note', { text: fit }));
-  if (w.fit && w.fit.method === 'per_type' && w.fit.weights.length) {
+  if (w.fit && w.fit.method === 'per_type' && w.fit.weights.length > 1) {
+    card.append(h('h3', { text: 'What 1% costs, by model and token type' }));
     card.append(h('div.blist', null, w.fit.weights.slice(0, 8).map((x) => h('div.bitem', null, h('div.top', null,
       h('span', { text: `${x.model.replace(/^claude-/, '')} ${x.category.replace('_', ' ')}` }),
-      h('span.mono', { text: `${x.percent_per_mtok.toFixed(3)}% per M tokens` }))))));
+      h('span.mono', { text: `${tokens(1 / x.percent_per_mtok * 1e6)} tokens` }))))));
   }
   // what spent each window, newest first: one stacked bar per window, a color per project
   const spent = w.segments.filter((sg) => sg.by_project && sg.by_project.length).slice(0, weekly ? 3 : 6);
@@ -212,22 +252,36 @@ function windowSection(w, now, days) {
   return card;
 }
 
+// The range tabs, with the ranges that would show nothing more than a shorter one
+// disabled; none at all while the history fits in the shortest range.
+export function dayTabs(days, since, now) {
+  const span = since ? (now - since) / 864e5 : 0;
+  if (span <= DAY_OPTIONS[0][0]) return null;
+  const opts = DAY_OPTIONS.map(([v, text], i) => {
+    const prev = i ? DAY_OPTIONS[i - 1][0] : 0;
+    return [v, text, prev >= span ? `Recording began ${Math.ceil(span)} days ago: ${text} would show nothing more` : null];
+  });
+  return seg('Window', opts, days, (v) => setQuery({ days: v === 14 ? null : v }));
+}
+
 export async function renderLimits(main, r) {
   const days = DAY_OPTIONS.map((o) => o[0]).includes(+r.query.get('days')) ? +r.query.get('days') : 14;
   const d = await api(`limits?days=${days}`);
+  const now = Date.now();
+  const since = d.recording_since ? new Date(d.recording_since) : null;
   main.append(h('header.head', null,
     h('div.titles', null, h('h1', { text: 'Limits' }),
-      h('p.sub', { text: 'The 5-hour and weekly windows of your plan: how full, when they reset, and what filled them.' })),
-    seg('Window', DAY_OPTIONS, days, (v) => setQuery({ days: v === 14 ? null : v }))));
+      h('p.sub', { text: 'The 5-hour and weekly windows of your plan: how full, when they reset, and what filled them.' }),
+      since ? h('p.sub', { text: `Recording since ${monthDay(since)}, ${hm(since)}` }) : null),
+    dayTabs(days, since ? since.getTime() : null, now)));
   if (!d.available) {
     main.append(h('section.card', null, notRecording(d)));
     return;
   }
   if (!d.recording) main.append(h('section.card', null, notRecording(d)));
-  const now = Date.now();
   for (const key of ['five_hour', 'seven_day']) {
     const w = d.windows[key];
-    if (w) main.append(windowSection(w, now, days));
+    if (w) main.append(windowSection(w, now, days, since ? since.getTime() : null));
   }
   main.append(h('p.note', { text: 'Percentages come from Claude Code\'s status line. Usage from other machines or claude.ai counts toward the limits but is not in these logs, so the fit treats it as error.' }));
 }
