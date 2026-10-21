@@ -11,8 +11,12 @@ rate sum R0 to R1 cost
     item_usd = size_tokens x (R1 - R0)
 
 which is the item's size times the price each of those requests paid per prompt
-token. Nothing here holds a whole log or every request in memory: only the threads,
-their open items and per-item totals.
+token. Long contexts are priced instead at the cache-read price of the tokens
+past the useful size (what rereading them cost), so they never count the cache
+write premium a rewrite finding counts on the same request. Subagent rewrites
+that follow a tool call which ran past the cache lifetime are kept apart from idle
+ones (`tool_waits`). Nothing here holds a whole log or every request in memory:
+only the threads, their open items and per-item totals.
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ from capcom.types import (
     Index,
     PriceTable,
     Request,
+    ToolCall,
     Usage,
 )
 
@@ -51,6 +56,9 @@ REWRITE_SHARE = 0.5  # a request writing this share of its prompt rewrote the ca
 MIN_REWRITE_TOKENS = 10_000
 CACHE_TTL_5M = timedelta(minutes=5)
 CACHE_TTL_1H = timedelta(hours=1)
+# A tool result this close before a rewrite ends the pause: the thread was waiting
+# on that tool, not idle (as in explain's rule for tool waits).
+TOOL_WAIT_REACH = timedelta(minutes=1)
 AGENT_TOOLS = frozenset({"Agent", "Task"})
 EVIDENCE_PER_FINDING = 5
 
@@ -96,6 +104,9 @@ class Thread:
     last_model: str | None = None
     items: dict[ItemKey, _Open] = field(default_factory=dict)
     shape_tools: frozenset[str] = frozenset()  # the current shape's loaded tools
+    pending: dict[str, ToolCall] = field(default_factory=dict)  # the last request's calls
+    result_at: datetime | None = None  # when the last of those calls' results came back
+    result_call: ToolCall | None = None
 
 
 @dataclass(slots=True)
@@ -107,6 +118,8 @@ class Rewrite:
     tokens: int = 0
     days: set[str] = field(default_factory=set)
     evidence: list[tuple[float, Evidence]] = field(default_factory=list)
+    causes: dict[str, int] = field(default_factory=dict)  # e.g. the tool waited on -> count
+    longest: timedelta = timedelta(0)
 
 
 @dataclass(slots=True)
@@ -144,6 +157,7 @@ class Facts:
     agents: dict[str, AgentInfo] = field(default_factory=dict)
     spawn_types: dict[str, str] = field(default_factory=dict)  # tool_use_id -> agent type
     idle: dict[str, Rewrite] = field(default_factory=dict)
+    tool_waits: dict[str, Rewrite] = field(default_factory=dict)  # subagents only
     switches: dict[str, Rewrite] = field(default_factory=dict)
     long_context: dict[str, LongContext] = field(default_factory=dict)
     compactions: dict[ThreadKey, list[Compaction]] = field(default_factory=dict)
@@ -191,6 +205,28 @@ def prompt_rate(req: Request, table: PriceTable) -> float:
         return 0.0
     b = price(req, table)
     return (b.input + b.cache_write + b.cache_read) / ctx
+
+
+def read_rate(req: Request, table: PriceTable) -> float:
+    """USD per token of reading `req`'s prompt from the cache, at its model and price."""
+    b = price_usage(
+        req.model,
+        Usage(cache_read=1_000_000),
+        table,
+        speed=req.speed,
+        inference_geo=req.inference_geo,
+        when=req.timestamp,
+    )
+    return b.cache_read / 1_000_000
+
+
+def tool_label(call: ToolCall) -> str:
+    """'Bash (pytest)', 'Read of a/b.py', or the tool's name."""
+    if not call.target:
+        return call.name
+    if call.name in ("Read", "Edit", "Write", "NotebookEdit", "WebFetch", "Grep", "Glob"):
+        return f"{call.name} of {call.target}"
+    return f"{call.name} ({call.target})"
 
 
 def rewrite_excess(req: Request, table: PriceTable) -> float:
@@ -299,6 +335,9 @@ class _Pass:
         elif e.kind is EventKind.TOOL_RESULT:
             size = _int(a.get("size_tokens"))
             tool = a.get("tool") if isinstance(a.get("tool"), str) else None
+            call = t.pending.get(str(a.get("tool_use_id")))
+            if call is not None and (t.result_at is None or e.timestamp >= t.result_at):
+                t.result_at, t.result_call = e.timestamp, call
             if a.get("is_image") is True:
                 self.open(t, ("image", e.key, str(tool or "?")), size)
             elif tool in AGENT_TOOLS and size > LONG_REPORT_TOKENS:
@@ -390,14 +429,28 @@ class _Pass:
                 self.rewrite(f.switches, project, r, label)
             elif gap > ttl:
                 minutes = gap.total_seconds() / 60
-                label = f"{minutes:.0f} min idle, {u.cache_write:,} tokens rewritten"
-                self.rewrite(f.idle, project, r, label)
+                wait = self.tool_wait(t, r, ttl)
+                if wait is not None:
+                    call, ran = wait
+                    what = tool_label(call)
+                    who = f"subagent {f.agent_type(r.agent_id) or '?'}"
+                    label = (
+                        f"{who} waited {ran.total_seconds() / 60:.0f} min on {what}, "
+                        f"{u.cache_write:,} tokens rewritten"
+                    )
+                    rw = self.rewrite(f.tool_waits, project, r, label)
+                    rw.causes[call.name] = rw.causes.get(call.name, 0) + 1
+                    rw.longest = max(rw.longest, ran)
+                else:
+                    label = f"{minutes:.0f} min idle, {u.cache_write:,} tokens rewritten"
+                    self.rewrite(f.idle, project, r, label)
 
         # context past the useful size
-        if ctx > LONG_CONTEXT and rate > 0:
+        reread = read_rate(r, self.table) if ctx > LONG_CONTEXT and not placeholder else 0.0
+        if ctx > LONG_CONTEXT and reread > 0:
             late = self.next_late_compaction(t, r.timestamp)
-            band = (min(ctx, LATE_COMPACTION) - LONG_CONTEXT) * rate
-            above = max(0, ctx - LATE_COMPACTION) * rate
+            band = (min(ctx, LATE_COMPACTION) - LONG_CONTEXT) * reread
+            above = max(0, ctx - LATE_COMPACTION) * reread
             lc = f.long_context.setdefault(project, LongContext())
             if late is not None:
                 late.excess_usd += above
@@ -436,10 +489,23 @@ class _Pass:
         t.max_context = max(t.max_context, ctx)
         t.first = t.first or r.timestamp
         t.last = r.timestamp
+        t.pending = {tc.tool_use_id: tc for tc in r.tool_calls if tc.tool_use_id}
+        t.result_at = t.result_call = None
         if not placeholder:
             t.last_model = model
 
-    def rewrite(self, into: dict[str, Rewrite], project: str, r: Request, label: str) -> None:
+    def tool_wait(self, t: Thread, r: Request, ttl: timedelta) -> tuple[ToolCall, timedelta] | None:
+        """(the call, how long it ran) when subagent thread `t` was waiting on a tool
+        before `r`: its last request's calls came back past the cache lifetime, and
+        `r` followed the last result within TOOL_WAIT_REACH."""
+        if t.agent_id is None or t.last is None or t.result_at is None or t.result_call is None:
+            return None
+        ran = t.result_at - t.last
+        if ran <= ttl or r.timestamp - t.result_at > TOOL_WAIT_REACH:
+            return None
+        return t.result_call, ran
+
+    def rewrite(self, into: dict[str, Rewrite], project: str, r: Request, label: str) -> Rewrite:
         excess = rewrite_excess(r, self.table)
         rw = into.setdefault(project, Rewrite())
         rw.count += 1
@@ -457,6 +523,7 @@ class _Pass:
         if len(rw.evidence) > 4 * EVIDENCE_PER_FINDING:
             rw.evidence.sort(key=lambda p: -p[0])
             del rw.evidence[EVIDENCE_PER_FINDING:]
+        return rw
 
     def next_late_compaction(self, t: Thread, when: datetime) -> Compaction | None:
         comps = self.f.compactions.get((t.session_id, t.agent_id))

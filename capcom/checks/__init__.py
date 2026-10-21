@@ -34,18 +34,27 @@ def run_checks(
     *,
     agent_dirs: Sequence[Path] | None = None,
     claude_root: Path | None = None,
+    openclaw_root: Path | None = None,
 ) -> list[Finding]:
     """Findings over [since, until), ranked by saving_usd_per_week, largest first.
 
     `agent_dirs` are the folders whose `*.md` agent definitions are read (their
     `tools:` line only); None reads each project's .claude/agents and
-    `<claude_root>/agents`.
+    `<claude_root>/agents`. Projects under `openclaw_root` (default from capcom's
+    config) are OpenClaw workspaces, whose tools never go in a pasted `tools:` line.
     """
     facts = collect(index, table, since, until)
+    if claude_root is None or openclaw_root is None:
+        from capcom.config import load_config
+
+        config = load_config()
+        claude_root = claude_root or config.claude_root
+        openclaw_root = openclaw_root or config.openclaw_root
     if agent_dirs is None:
         cwds = sorted({c for p in facts.project_cwd for c in facts.project_cwd[p]})
         agent_dirs = default_agent_dirs(cwds, claude_root)
-    return all_findings(facts, find_definitions(agent_dirs))
+    user_dir = claude_root / "agents"
+    return all_findings(facts, find_definitions(agent_dirs), openclaw_root, user_dir)
 
 
 __all__ = ["run_checks"]

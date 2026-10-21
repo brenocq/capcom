@@ -9,9 +9,13 @@ size in tokens times that request's price per prompt token (facts.py), which is
 "size x requests x the right price" with cache reads and rewrites priced as they
 were billed. Each check's docstring says what it counts.
 
-Some savings overlap (an unused connector tool is also part of a long context); a
-check never counts the same tokens twice within itself, but the findings are not
-meant to be added up.
+The context and cache findings are disjoint within a project: long contexts and
+late compactions price the tokens past their threshold at the cache-read price
+(what rereading them cost, split between the two at LATE_COMPACTION), while the
+rewrite findings (idle, tool waits, model switches; each request in at most one)
+count only a rewrite's premium above that read. Items carried in prompts are
+priced at the full prompt price, so they overlap those findings: `overlaps()` names
+the kinds a finding may share dollars with, and such findings are not to be added up.
 """
 
 from __future__ import annotations
@@ -45,6 +49,9 @@ REPORT_TARGET_TOKENS = 500  # a report of about 25 lines
 IMAGE_SAVING_SHARE = 0.5  # cropped and downscaled images: half the tokens
 SUBAGENT_MAX_CALLS = 2
 MIN_AGENTS = 2  # spawns of a type before judging it
+# spawns before offering a tools: line to an agent that inherits every tool: the
+# tools it called must be a broad sample before a line removes all the others
+MIN_RESTRICT_SPAWNS = 10
 MIN_SAVING_USD_PER_WEEK = 0.01
 BUILT_IN_AGENTS = frozenset(
     {"general-purpose", "Explore", "Plan", "statusline-setup", "claude-code-guide"}
@@ -341,7 +348,9 @@ def skills_unused(facts: Facts) -> list[Finding]:
 
     The change (`disable-model-invocation: true` in SKILL.md) applies wherever the
     skill is listed, so it is offered only for skills no project invoked in the
-    window; a skill invoked elsewhere is advised to move to those projects instead."""
+    window; a skill invoked elsewhere is advised to move to those projects instead.
+    A plugin's skill (`<plugin>:<skill>`) never gets the SKILL.md change, since a
+    plugin update overwrites the file: the advice is to disable the plugin here."""
     listed: dict[str, dict[str, _Sum]] = defaultdict(dict)
     for sid, aid, key, acc in _accounts(facts, lambda k: k[0] == "skill"):
         listed[_group(facts.project_of(sid))].setdefault(key[1], _Sum()).add(sid, aid, acc)
@@ -357,7 +366,8 @@ def skills_unused(facts: Facts) -> list[Finding]:
             n: sorted(p for p, used in invoked.items() if p != project and _skill_used(n, used))
             for n in unused
         }
-        nowhere = sorted(n for n in unused if not elsewhere[n])
+        nowhere = sorted(n for n in unused if not elsewhere[n] and ":" not in n)
+        plugin_skills = sorted(n for n in unused if not elsewhere[n] and ":" in n)
         moved = sorted(n for n in unused if elsewhere[n])
         usd = sum(s.usd for s in unused.values())
         tokens = sum(s.size for s in unused.values())
@@ -376,8 +386,17 @@ def skills_unused(facts: Facts) -> list[Finding]:
             parts.append(
                 f"No project invoked {_list_names(nowhere, 4)}: add the line below to "
                 f"{'its' if len(nowhere) == 1 else 'each'} SKILL.md frontmatter to keep it out "
-                "of the listing everywhere (it stays callable as a slash command), or "
-                "disable the plugin that brings it."
+                "of the listing everywhere (it stays callable as a slash command)."
+            )
+        if plugin_skills:
+            plugins = sorted({n.split(":", 1)[0] for n in plugin_skills})
+            one = len(plugins) == 1
+            parts.append(
+                f"{_list_names(plugin_skills, 4)} come{'s' if len(plugin_skills) == 1 else ''} "
+                f"from the plugin{'' if one else 's'} {_list_names(plugins, 4)}, whose "
+                "SKILL.md files a plugin update overwrites: if this project does not need "
+                f"{'it' if one else 'them'}, disable {'it' if one else 'them'} here "
+                "(`/plugin`, or `enabledPlugins` in the project's .claude/settings.json)."
             )
         f = _finding(
             facts,
@@ -402,6 +421,7 @@ def skills_unused(facts: Facts) -> list[Finding]:
                 "skills_listed": len(skills),
                 "skills_invoked": len(skills) - len(unused),
                 "skills_used_elsewhere": len(moved),
+                "plugin_skills": len(plugin_skills),
                 "tokens_unused": tokens,
             },
         )
@@ -450,46 +470,113 @@ def _entry_used(entry: str, called: set[str]) -> bool | None:
     return any(_entry_matches(entry, c) for c in called)
 
 
-def agent_tools_unused(facts: Facts, definitions: Mapping[str, AgentDefinition]) -> list[Finding]:
+def _encoded(path: Path) -> str:
+    """A folder as Claude Code names its project folder: every other character a dash."""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+
+
+def _is_openclaw(facts: Facts, project: str, root: Path | None) -> bool:
+    """Whether `project` is an OpenClaw workspace (its sessions run under the OpenClaw
+    folder, whose tools are not Claude Code's)."""
+    if root is None:
+        return False
+    enc = _encoded(root)
+    if project == enc or project.startswith(enc + "-"):
+        return True
+    return any(Path(c).is_relative_to(root) for c in facts.project_cwd.get(project, {}))
+
+
+def _definition_projects(
+    facts: Facts, definition: AgentDefinition, user_dir: Path | None
+) -> set[str] | None:
+    """The projects a project-level definition (`<cwd>/.claude/agents/x.md`) applies
+    to; None for a user-level one (in `user_dir` or ~/.claude/agents, which a
+    project whose cwd is the home folder would otherwise claim)."""
+    folder = definition.path.parent
+    if folder.name != "agents" or folder.parent.name != ".claude":
+        return None
+    if folder in {user_dir, Path.home() / ".claude" / "agents"}:
+        return None
+    cwd = folder.parent.parent
+    found = {p for p, cwds in facts.project_cwd.items() if any(Path(c) == cwd for c in cwds)}
+    return found or None
+
+
+def agent_tools_unused(
+    facts: Facts,
+    definitions: Mapping[str, AgentDefinition],
+    openclaw_root: Path | None = None,
+    user_dir: Path | None = None,
+) -> list[Finding]:
     """A custom agent type whose spawns never call some of the tools its definition
     gives it (its `tools:` line, or the tools listed in its requests when the line
     gives it every tool). Saving: the unused tools' listed sizes x the agent's
     requests x each request's prompt price; for tools no listing sized, the median
     tool size seen in request shapes.
 
+    Only the spawns the definition governs in Claude Code projects count: a
+    project-level definition's own project, or (user level) every project but the
+    OpenClaw workspaces under `openclaw_root`, whose tools are OpenClaw's.
+
     An agent type with no definition file (a plugin's agent, or one Claude Code
     makes itself, such as its workflow agent) is skipped: there is no file to change.
-    The pasted line keeps every entry used or not understood, in the file's order."""
+    With a `tools:` line, the pasted line keeps every entry used anywhere or not
+    understood, in the file's order. Without one the agent inherits every tool, and
+    a line would restrict it: the line then holds only tools it called that its own
+    listings name (never a name from elsewhere), is offered only after
+    MIN_RESTRICT_SPAWNS spawns, and says in a comment how many tools it removes."""
     out: list[Finding] = []
-    for kind, threads in _agent_threads(facts).items():
-        if kind in BUILT_IN_AGENTS or kind.startswith("(") or len(threads) < MIN_AGENTS:
+    for kind, all_threads in _agent_threads(facts).items():
+        if kind in BUILT_IN_AGENTS or kind.startswith("(") or len(all_threads) < MIN_AGENTS:
             continue
         definition = definitions.get(kind)
         if definition is None:
             continue
-        infos = [facts.agents.get(t.agent_id or "") for t in threads]
+        infos = [facts.agents.get(t.agent_id or "") for t in all_threads]
         if any(i is not None and i.is_built_in for i in infos):
+            continue
+        scope = _definition_projects(facts, definition, user_dir)
+        threads = [
+            t
+            for t in all_threads
+            if (
+                t.project in scope
+                if scope is not None
+                else not _is_openclaw(facts, t.project, openclaw_root)
+            )
+        ]
+        if len(threads) < MIN_AGENTS:
             continue
         keys = {(t.session_id, t.agent_id) for t in threads}
         called: set[str] = set()
         for k in keys:
             called |= facts.calls_by_thread.get(k, set())
+        called_anywhere: set[str] = set()
+        for t in all_threads:
+            called_anywhere |= facts.calls_by_thread.get((t.session_id, t.agent_id), set())
         if not called:
             continue
         sized: dict[str, _Sum] = {}
         for sid, aid, key, acc in _accounts(facts, lambda k: k[0] == "tool"):
             if (sid, aid) in keys:
                 sized.setdefault(key[2], _Sum()).add(sid, aid, acc)
+        spawns = len(threads)
+        requests = sum(t.requests for t in threads)
+        restricts = not definition.tools
+        dropped: list[str] = []
         if definition.tools:
             given = list(dict.fromkeys(definition.tools))
-            used = {e: _entry_used(e, called) for e in given}
+            used = {e: _entry_used(e, called_anywhere) for e in given}
             unused = [e for e in given if used[e] is False]
             keep = [e for e in given if used[e] is not False]
         else:
             given = sorted(sized)
             unused = [n for n in given if not any(_entry_matches(n, c) for c in called)]
-            keep = sorted(called)
-        if not unused:
+            keep = sorted(n for n in given if any(_entry_matches(n, c) for c in called))
+            dropped = sorted(
+                c for c in called_anywhere if not any(_entry_matches(n, c) for n in keep)
+            )
+        if not unused or not keep:
             continue
         n_used = len(given) - len(unused)
         rate_sum = sum(t.rate_sum for t in threads)
@@ -498,6 +585,33 @@ def agent_tools_unused(facts: Facts, definitions: Mapping[str, AgentDefinition])
         for e in unused:
             priced = [v.usd for n, v in sized.items() if _entry_matches(e, n)]
             usd += sum(priced) if priced else estimate * rate_sum
+        line = f"tools: {', '.join(keep)}"
+        if not restricts:
+            advice = f"In {definition.path}, list only the tools it uses:"
+            change: str | None = line
+        else:
+            advice = (
+                f"{definition.path} has no tools: line, so {kind} inherits every tool "
+                f"({len(given)} in its listings). Adding one restricts it to the {len(keep)} "
+                "it called: a tool a later task needs would then be missing until added "
+                "back."
+            )
+            if dropped:
+                advice += (
+                    f" Left out: {_list_names(dropped, 4)}, called only in OpenClaw or "
+                    "other projects' sessions or missing from its listings."
+                )
+            if spawns >= MIN_RESTRICT_SPAWNS:
+                advice += " The line, if you accept that:"
+                change = (
+                    f"# adds a tools: line: the {kind} agent then has only these "
+                    f"{len(keep)} tools; today it inherits all {len(given)}\n{line}"
+                )
+            else:
+                advice += (
+                    f" With {spawns} spawns that set is a thin sample, so no line is offered yet."
+                )
+                change = None
         f = _finding(
             facts,
             usd,
@@ -505,18 +619,20 @@ def agent_tools_unused(facts: Facts, definitions: Mapping[str, AgentDefinition])
             title=f"The {kind} agent carries tools it never uses",
             scope=kind,
             summary=(
-                f"Across {len(threads)} {kind} spawns it used {n_used} of the "
+                f"Across {spawns} {kind} spawns it used {n_used} of the "
                 f"{len(given)} tools it is given; the other {len(unused)} rode in "
-                f"each of its {sum(t.requests for t in threads):,} requests."
+                f"each of its {requests:,} requests."
             ),
-            advice=f"In {definition.path}, list only the tools it uses:",
-            change=f"tools: {', '.join(keep)}",
+            advice=advice,
+            change=change,
             evidence=tuple(Evidence(f"never called: {n}") for n in unused[:EVIDENCE_PER_FINDING]),
             metrics={
-                "spawns": len(threads),
+                "spawns": spawns,
                 "tools_given": len(given),
                 "tools_called": n_used,
-                "requests": sum(t.requests for t in threads),
+                "requests": requests,
+                "restricts": restricts,
+                "tools_left_out": len(dropped),
             },
         )
         if f:
@@ -771,8 +887,10 @@ def large_memory(facts: Facts) -> list[Finding]:
 
 def long_running_agents(facts: Facts) -> list[Finding]:
     """Threads whose prompts grew past LONG_CONTEXT. Saving: each such turn's
-    (context - LONG_CONTEXT) x its prompt price; the part above LATE_COMPACTION
-    before a late compaction is left to `late_compactions`."""
+    (context - LONG_CONTEXT) x its model's cache-read price, what rereading the
+    tokens past the useful size cost (a rewrite's premium on them is left to the
+    rewrite findings); the part above LATE_COMPACTION before a late compaction is
+    left to `late_compactions`."""
     out: list[Finding] = []
     grouped: dict[str, list[tuple[str, LongContext]]] = defaultdict(list)
     for project, lc in facts.long_context.items():
@@ -818,7 +936,7 @@ def long_running_agents(facts: Facts) -> list[Finding]:
 
 def late_compactions(facts: Facts) -> list[Finding]:
     """Compactions that started above LATE_COMPACTION tokens. Saving: the turns
-    before each one, (context - LATE_COMPACTION) x their prompt price."""
+    before each one, (context - LATE_COMPACTION) x their cache-read price."""
     per_project: dict[str, list[Compaction]] = defaultdict(list)
     for (sid, _aid), comps in facts.compactions.items():
         for c in comps:
@@ -885,6 +1003,52 @@ def idle_cache_rewrites(facts: Facts) -> list[Finding]:
             "turns, and check the 1-hour cache lifetime is in use for long pauses."
         ),
     )
+
+
+def subagent_cache_expiry(facts: Facts) -> list[Finding]:
+    """Subagent requests that rewrote at least half their prompt because a tool call
+    ran past the cache lifetime (5 minutes for subagents): the last result of the
+    previous request's calls came back after the lifetime, and the rewrite followed
+    it within a minute. Saving: each rewrite's cost above reading the same tokens.
+    These rewrites are left out of `idle_cache_rewrites`. No setting is known to
+    change a subagent's lifetime, so there is no change to paste."""
+    out = _rewrites(
+        facts,
+        facts.tool_waits,
+        kind="subagent_cache_expiry",
+        title="Subagent caches expired during long tool calls",
+        what="after a tool call ran past the cache lifetime",
+        advice=(
+            "Run long commands (builds, test suites, wait loops) in the background and "
+            "poll their output in short steps, or split the work so a subagent doesn't "
+            "wait on a long command: a subagent's cache lasts 5 minutes."
+        ),
+    )
+    grouped: dict[str, list[Rewrite]] = defaultdict(list)
+    for project, rw in facts.tool_waits.items():
+        grouped[_group(project)].append(rw)
+    for i, f in enumerate(out):
+        rws = grouped[f.scope]
+        causes: dict[str, int] = defaultdict(int)
+        for rw in rws:
+            for name, n in rw.causes.items():
+                causes[name] += n
+        top = sorted(causes.items(), key=lambda kv: (-kv[1], kv[0]))
+        longest = max(rw.longest for rw in rws).total_seconds() / 60
+        out[i] = replace(
+            f,
+            summary=(
+                f"{f.summary} The calls waited on: "
+                f"{', '.join(f'{n} ({c})' for n, c in top[:4])}; the longest ran "
+                f"{longest:.0f} min."
+            ),
+            metrics={
+                **f.metrics,
+                "tools": tuple(n for n, _ in top),
+                "longest_wait_minutes": round(longest, 1),
+            },
+        )
+    return out
 
 
 def model_switches(facts: Facts) -> list[Finding]:
@@ -983,7 +1147,12 @@ def images_in_tool_results(facts: Facts) -> list[Finding]:
     return out
 
 
-def all_findings(facts: Facts, definitions: Mapping[str, AgentDefinition]) -> list[Finding]:
+def all_findings(
+    facts: Facts,
+    definitions: Mapping[str, AgentDefinition],
+    openclaw_root: Path | None = None,
+    user_dir: Path | None = None,
+) -> list[Finding]:
     found: list[Finding] = []
     for check in (
         claudeai_connectors_unused,
@@ -995,18 +1164,20 @@ def all_findings(facts: Facts, definitions: Mapping[str, AgentDefinition]) -> li
         long_running_agents,
         late_compactions,
         idle_cache_rewrites,
+        subagent_cache_expiry,
         model_switches,
         images_in_tool_results,
     ):
         found.extend(check(facts))
-    found.extend(agent_tools_unused(facts, definitions))
+    found.extend(agent_tools_unused(facts, definitions, openclaw_root, user_dir))
     found.sort(key=lambda f: (-f.saving_usd_per_week, f.kind, f.scope))
     present = {f.kind for f in found}
     return [replace(f, metrics={**f.metrics, "overlaps": overlaps(f.kind, present)}) for f in found]
 
 
 # Items carried in prompts: their cost includes the cache rewrites and the long
-# contexts they are part of, so those findings may count the same dollars.
+# contexts they are part of, so those findings may count the same dollars. The
+# context and rewrite kinds among themselves are disjoint (module docstring).
 _PROMPT_ITEMS = (
     "claudeai_connectors_unused",
     "mcp_servers_unused",
@@ -1016,11 +1187,15 @@ _PROMPT_ITEMS = (
     "long_subagent_reports",
     "images_in_tool_results",
 )
-_CONTEXT = ("long_running_agents", "late_compactions", "idle_cache_rewrites", "model_switches")
+_CONTEXT = (
+    "long_running_agents",
+    "late_compactions",
+    "idle_cache_rewrites",
+    "subagent_cache_expiry",
+    "model_switches",
+)
 _OVERLAP_PAIRS: frozenset[frozenset[str]] = frozenset(
     {frozenset({a, b}) for a in _PROMPT_ITEMS for b in _CONTEXT}
-    | {frozenset({"idle_cache_rewrites", "long_running_agents"})}
-    | {frozenset({"model_switches", "long_running_agents"})}
     | {frozenset({"agent_tools_unused", b}) for b in _PROMPT_ITEMS[:3]}
     | {frozenset({"one_command_subagents", b}) for b in (*_PROMPT_ITEMS, *_CONTEXT)}
 )
