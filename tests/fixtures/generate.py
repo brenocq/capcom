@@ -76,6 +76,8 @@ class Reply:
     speed: str = "standard"
     effort: str | None = "high"
     api_error: bool = False
+    error: str | None = None  # with api_error: the record's `error` label, e.g. "rate_limit"
+    error_status: int | None = None  # with api_error: `apiErrorStatus`, e.g. 429
 
 
 class SessionWriter:
@@ -213,6 +215,10 @@ class SessionWriter:
                 rec["effort"] = reply.effort
             if reply.api_error:
                 rec["isApiErrorMessage"] = True
+                if reply.error is not None:
+                    rec["error"] = reply.error
+                if reply.error_status is not None:
+                    rec["apiErrorStatus"] = reply.error_status
             self.write(rec)
         return mid
 
@@ -303,6 +309,96 @@ class SessionWriter:
                 ],
             },
         )
+
+    def nested_memory(self, t: datetime, path: str, chars: int) -> None:
+        self.attachment(
+            t,
+            {
+                "type": "nested_memory",
+                "path": path,
+                "content": {"path": path, "type": "Project", "content": "m" * chars},
+                "displayPath": path,
+            },
+        )
+
+    def invoked_skills(self, t: datetime, skills: dict[str, int]) -> None:
+        """Skills whose text was loaded: name -> size in chars."""
+        self.attachment(
+            t,
+            {
+                "type": "invoked_skills",
+                "skills": [
+                    {"name": n, "path": f"/skills/{n}/SKILL.md", "content": "s" * c}
+                    for n, c in skills.items()
+                ],
+            },
+        )
+
+    def mcp_instructions_delta(
+        self,
+        t: datetime,
+        added: dict[str, int],
+        removed: list[str] = [],  # noqa: B006
+    ) -> None:
+        """Connector instructions: server name -> size in chars of its block."""
+        self.attachment(
+            t,
+            {
+                "type": "mcp_instructions_delta",
+                "addedNames": list(added),
+                "addedBlocks": ["i" * c for c in added.values()],
+                "removedNames": removed,
+            },
+        )
+
+    def agent_listing_delta(self, t: datetime, added: list[str], removed: list[str] = []) -> None:  # noqa: B006
+        self.attachment(
+            t,
+            {
+                "type": "agent_listing_delta",
+                "addedTypes": added,
+                "addedLines": [f"- {a}: synthetic agent" for a in added],
+                "removedTypes": removed,
+                "isInitial": True,
+            },
+        )
+
+    def deferred_tools_record(self, t: datetime, names: list[str]) -> None:
+        self.attachment(
+            t,
+            {
+                "type": "deferred_tools_record",
+                "entries": [
+                    {
+                        "name": n,
+                        "description": "synthetic tool",
+                        "input_schema": {"type": "object", "properties": {}},
+                    }
+                    for n in names
+                ],
+            },
+        )
+
+    def api_error_system(self, t: datetime, code: str = "ECONNRESET") -> None:
+        """A `system/api_error` record (a failed call Claude Code retries)."""
+        rec = self._common(t)
+        rec.update(
+            {
+                "type": "system",
+                "subtype": "api_error",
+                "level": "error",
+                "error": {
+                    "message": "Connection error.",
+                    "connection": {"code": code, "message": "synthetic", "isSSLError": False},
+                    "isNetworkDown": True,
+                    "rateLimits": None,
+                },
+                "retryInMs": 500,
+                "retryAttempt": 1,
+                "maxRetries": 10,
+            }
+        )
+        self.write(rec)
 
     def compact(self, t: datetime, pre: int, post: int, trigger: str = "auto") -> None:
         rec = self._common(t)
