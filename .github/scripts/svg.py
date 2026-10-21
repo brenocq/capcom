@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from html import escape
+from typing import Any
 
 PRIMER = {
     "light": {
@@ -234,3 +235,55 @@ def mark(cx: float, cy: float, size: float, cls: str = "") -> str:
 
 def usd(v: float, cents: bool = True) -> str:
     return f"${v:,.2f}" if cents else f"${v:,.0f}"
+
+
+def spike_pins(
+    marks: Sequence[dict[str, Any]],
+    times: Sequence[float],
+    total: Sequence[float],
+    points: Sequence[tuple[float, float]],
+    count: int,
+    gap: float,
+) -> list[tuple[int, float, float]]:
+    """Where the numbered spike markers go on a drawn total line: the `count` largest
+    spikes by excess, at least `gap` pixels apart, renumbered in time order, each at
+    the middle of the steepest step of the total inside its span (from the first
+    sample at or after its start to the first at or after its end): the point at the
+    top of that step, where a marker sits on the rise it explains, leaving the rise
+    itself in view. `times` in seconds, `points` from bands()."""
+    n = len(times)
+
+    def after(t: float) -> int:
+        return next((i for i in range(n) if times[i] >= t), n - 1)
+
+    pins: list[tuple[float, float, float]] = []
+    for m in sorted(marks, key=lambda m: -m["excess_usd"]):
+        lo = max(after(m["t"] / 1000), 1)
+        hi = max(after(m.get("end", m["t"]) / 1000), lo)
+        i = max(range(lo, hi + 1), key=lambda k: total[k] - total[k - 1])
+        x, y = points[i]
+        if all(abs(x - p[1]) >= gap for p in pins):
+            pins.append((m["t"], x, y))
+        if len(pins) == count:
+            break
+    pins.sort()
+    return [(k + 1, x, y) for k, (_, x, y) in enumerate(pins)]
+
+
+def eased_at(
+    fraction: float, ease: tuple[float, float, float, float] = (0.45, 0.05, 0.4, 1)
+) -> float:
+    """The share of a draw-in's duration after which a cubic-bezier `ease` has
+    revealed `fraction` of the width: when the line reaches a marker there."""
+
+    def bez(s: float, a: float, b: float) -> float:
+        return 3 * (1 - s) ** 2 * s * a + 3 * (1 - s) * s**2 * b + s**3
+
+    lo, hi = 0.0, 1.0
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        if bez(mid, ease[1], ease[3]) < fraction:
+            lo = mid
+        else:
+            hi = mid
+    return bez(lo, ease[0], ease[2])
