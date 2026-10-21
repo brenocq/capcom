@@ -869,3 +869,22 @@ def test_a_slash_command_is_a_skill_invocation_by_name_only(tmp_path: Path) -> N
         {"names": ("plugin:docx",), "source": "slash_command"},
     ]
     assert "secret" not in repr(found)
+
+
+def test_rate_limit_errors_carry_their_window(tmp_path: Path) -> None:
+    s = SessionWriter(tmp_path, cwd="/w", session_id="s1")
+    base = {"type": "system", "subtype": "api_error", "level": "error", "status": 429}
+    s.write(
+        {
+            **s._common(at(1)),
+            **base,
+            "error": {"type": "rate_limit", "rateLimits": {"kind": "seven_day", "resetsAt": 1.8e9}},
+        }
+    )
+    s.write({**s._common(at(2)), **base, "error": "rate_limit", "rateLimitType": "five_hour"})
+    s.write({**s._common(at(3)), **base, "error": "rate_limit", "resetsAt": -1e20})
+    s.close()
+    errors = events(parse(session_log(s.path)), EventKind.API_ERROR)
+    got = [(e.attrs.get("rate_limit_type"), e.attrs.get("resets_at")) for e in errors]
+    assert got == [("seven_day", 1.8e9), ("five_hour", None), (None, None)]
+    assert all(e.attrs["error"] == "rate_limit" for e in errors)
