@@ -12,7 +12,7 @@ import pytest
 
 from capcom.config import Config
 from capcom.cost.top import run_top
-from capcom.report.server import ApiCache, Site, generation
+from capcom.report.server import ApiCache, DataVersion, Site, generation
 from capcom.store.index import open_index
 from capcom.types import SessionInfo
 from tests.report.conftest import FAKE, NOW, TABLE, _log, _put, req, serve, usd
@@ -145,6 +145,53 @@ def test_cache_answers_repeats_and_a_new_scan_invalidates(tmp_path: Path) -> Non
         assert b["totals"]["usd"] == pytest.approx(usd(first + more), abs=1e-6)
         assert b["totals"]["usd"] > a["totals"]["usd"]
         assert len(site.cache) == 1  # the old generation's entries are gone
+
+
+def test_cache_ignores_unknown_params_and_idle_scans(tmp_path: Path) -> None:
+    path = tmp_path / "index.sqlite"
+    _history(path, [req("h", NOW - timedelta(hours=1), TOY, input=10_000)])
+    site = _site(path)
+    assert site.cache is not None
+    for client in serve(site):
+        client.get("/api/spend?days=7")
+        client.get("/api/spend?days=7&_=12345")  # a cache-buster the endpoint never reads
+        client.get("/api/overview?range=7d")
+        client.get("/api/overview")
+        assert site.cache.misses == 2 and site.cache.hits == 2
+
+
+def test_a_wal_only_write_under_an_open_reader_is_seen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another connection stays open, so the write stays in the WAL; with the files'
+    sizes and times frozen (two commits in one tick), data_version still moves."""
+    import os
+    import sqlite3
+
+    path = tmp_path / "index.sqlite"
+    _history(path, [req("h", NOW - timedelta(hours=1), TOY, input=10_000)])
+    keep = sqlite3.connect(path)  # held open: no checkpoint on the writer's close
+    watch = DataVersion(path)
+    before = generation(path, watch)
+    stat = os.stat
+    frozen = {p: stat(p) for p in (path, path.with_name(path.name + "-wal")) if p.exists()}
+
+    class FrozenOs:  # the server module's `os`, with the index files' stat frozen
+        def __getattr__(self, name: str) -> Any:
+            return getattr(os, name)
+
+        @staticmethod
+        def stat(p: Any) -> Any:
+            return frozen.get(Path(p)) or stat(p)
+
+    monkeypatch.setattr("capcom.report.server.os", FrozenOs())
+    ix = open_index(path)
+    _put(ix, _log(TOY, "w"), [SessionInfo("w", TOY, cwd="/x"), req("w", NOW, TOY, input=5)])
+    ix.close()
+    assert generation(path, watch) != before
+    assert generation(path, watch) == generation(path, watch)  # no write: no change
+    keep.close()
+    watch.close()
 
 
 def test_cache_is_bounded_and_expires() -> None:

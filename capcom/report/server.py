@@ -6,9 +6,10 @@ page cannot reach it through DNS rebinding). Each API request opens the index
 read-only and closes it when done. Pages are static files from `static/`; the API
 is in `api.py` and documented in `API.md`.
 
-API replies are cached per scan generation (`ApiCache`): the key holds the index
-files' sizes and modification times and the scanner's count, so a new scan
-invalidates every entry; entries also expire after a few minutes, since some
+API replies are cached per index generation (`ApiCache`): the key holds the index
+files' sizes and modification times and the index's `PRAGMA data_version` on a held
+read connection, so any write invalidates every entry and a scan that wrote nothing
+none, plus only the query parameters the endpoint reads; entries also expire after a few minutes, since some
 numbers move with the clock alone, and the cache is bounded in bytes.
 
 The index stays fresh through a `Scanner`: an incremental `run_scan` at start and
@@ -92,6 +93,14 @@ class ApiCache:
         self._lock = threading.Lock()
         self.hits = 0
         self.misses = 0
+        self._watch: DataVersion | None = None
+
+    def watch(self, index_path: Path) -> DataVersion:
+        """The held data_version reader of `index_path`, made on first use."""
+        with self._lock:
+            if self._watch is None or self._watch.index_path != index_path:
+                self._watch = DataVersion(index_path)
+            return self._watch
 
     def get(self, key: tuple[Any, ...], now: float) -> bytes | None:
         with self._lock:
@@ -127,11 +136,54 @@ class ApiCache:
         return len(self._entries)
 
 
-def generation(index_path: Path, scanner: Scanner | None = None) -> tuple[int, ...]:
+class DataVersion:
+    """`PRAGMA data_version` of the index, read on one held read-only connection: it
+    changes whenever another connection commits, even two commits within one tick of
+    the file clock that leave the WAL's size alone. The connection reopens when the
+    index file is replaced (a new inode), and `epoch` counts the reopenings, since a
+    new connection's numbers restart. Thread-safe."""
+
+    def __init__(self, index_path: Path) -> None:
+        self.index_path = index_path
+        self.epoch = 0
+        self._conn: sqlite3.Connection | None = None
+        self._inode = -1
+        self._lock = threading.Lock()
+
+    def read(self) -> tuple[int, int]:
+        with self._lock:
+            try:
+                inode = os.stat(self.index_path).st_ino
+            except OSError:
+                self.close()
+                return (self.epoch, -1)
+            try:
+                if self._conn is None or inode != self._inode:
+                    self.close()
+                    uri = self.index_path.resolve().as_uri() + "?mode=ro"
+                    self._conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+                    self._inode = inode
+                    self.epoch += 1
+                row = self._conn.execute("PRAGMA data_version").fetchone()
+                return (self.epoch, int(row[0]))
+            except sqlite3.Error:
+                self.close()
+                return (self.epoch, -1)
+
+    def close(self) -> None:
+        if self._conn is not None:
+            with contextlib.suppress(sqlite3.Error):
+                self._conn.close()
+            self._conn = None
+            self.epoch += 1
+
+
+def generation(index_path: Path, watch: DataVersion | None = None) -> tuple[int, ...]:
     """A key that changes whenever the index does: the size and modification time of
-    index.sqlite and its WAL (writes land there until a checkpoint), and the
-    scanner's count of finished scans."""
-    out: list[int] = [scanner.scans if scanner is not None else -1]
+    index.sqlite and its WAL (writes land there until a checkpoint), and, with
+    `watch`, the index's data_version on a held connection. A scan that writes
+    nothing leaves it alone."""
+    out: list[int] = []
     for p in (index_path, index_path.with_name(index_path.name + "-wal")):
         try:
             st = os.stat(p)
@@ -143,7 +195,20 @@ def generation(index_path: Path, scanner: Scanner | None = None) -> tuple[int, .
             out += [-1, -1]
         else:
             out += [st.st_size, st.st_mtime_ns]
+    if watch is not None:
+        out += watch.read()
     return tuple(out)
+
+
+# the query parameters each endpoint reads: the cache key holds only these
+PARAMS: dict[str, tuple[str, ...]] = {
+    "overview": (),
+    "spend": ("days", "group"),
+    "sessions": ("days", "limit", "sort", "q"),
+    "session": (),
+    "spikes": ("days", "spike"),
+    "checks": ("days",),
+}
 
 
 @dataclass(slots=True)
@@ -361,9 +426,10 @@ class Handler(BaseHTTPRequestHandler):
         key: tuple[Any, ...] | None = None
         now = site.clock()
         if site.cache is not None and name not in UNCACHED:
-            gen = generation(site.index_path, site.scanner)
+            gen = generation(site.index_path, site.cache.watch(site.index_path))
             today = now.astimezone(site.tz).date().isoformat()  # the windows start at midnight
-            key = (gen, today, name, tuple(parts[1:]), tuple(sorted(query.items())))
+            args = tuple((k, query[k]) for k in PARAMS.get(name, ()) if k in query)
+            key = (gen, today, name, tuple(parts[1:]), args)
             hit = site.cache.get(key, now.timestamp())
             if hit is not None:
                 self._send(HTTPStatus.OK, hit, TYPES[".json"])
