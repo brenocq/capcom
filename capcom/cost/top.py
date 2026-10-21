@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import sqlite3
 import sys
 from collections import defaultdict
@@ -15,15 +14,11 @@ from capcom.config import Config
 from capcom.cost.calibrate import TARGET_SPREAD, calibrate
 from capcom.cost.model import price
 from capcom.cost.prices import ZERO_MODEL, is_placeholder, load_prices, normalize
+from capcom.timeline.groups import ProjectNames, temporary_project
 from capcom.types import Calibration, Index, PriceTable, Request
 
 GROUPINGS = ("project", "session", "agent", "model", "day")
 TEMPORARY = "(temporary)"  # project folders under /tmp, grouped as one
-# A folder under /tmp that names the project it was made for: Claude Code's
-# scratchpads, /tmp/claude-<uid>/<project folder>/<session id>/..., hold the
-# project's own folder name (itself starting with "-") before a session id.
-_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-_TEMP_OF_PROJECT = re.compile(rf"^-tmp-.+?-(-[^-].*?)-{_UUID}(?:-|$)")
 MAIN_THREAD = "main"
 
 
@@ -46,6 +41,7 @@ class Row:
     inexact_price: int = 0  # priced at a related model's rates
     unpriced: int = 0  # no price at all: counted at $0
     unpriced_models: set[str] = field(default_factory=set)
+    path: str = ""  # a project's full folder, printed beside its name
 
     @property
     def total(self) -> float:
@@ -65,8 +61,8 @@ def project_label(project_dir: str) -> str:
     "temporary (<project folder>)" when its name holds the project it was made for."""
     if not project_dir.startswith("-tmp-"):
         return project_dir
-    m = _TEMP_OF_PROJECT.match(project_dir)
-    return f"temporary ({m.group(1)})" if m else TEMPORARY
+    inner = temporary_project(project_dir)
+    return f"temporary ({inner})" if inner else TEMPORARY
 
 
 def group_key(
@@ -74,9 +70,14 @@ def group_key(
     by: str,
     titles: Mapping[str, str],
     agent_types: Mapping[str, str],
+    projects: ProjectNames | None = None,
 ) -> tuple[str, str]:
-    """(key, label) of the group `req` belongs to."""
+    """(key, label) of the group `req` belongs to; projects are named by `projects`
+    (capcom.timeline.groups.ProjectNames, as on the website) when given."""
     if by == "project":
+        if projects is not None:
+            key = projects.key(req.project_dir)
+            return key, projects.label(key)
         label = project_label(req.project_dir)
         return label, label
     if by == "session":
@@ -101,6 +102,7 @@ def aggregate(
     table: PriceTable,
     titles: Mapping[str, str] | None = None,
     agent_types: Mapping[str, str] | None = None,
+    projects: ProjectNames | None = None,
 ) -> list[Row]:
     """Rows by `by`, largest total first (days: newest first)."""
     titles = titles or {}
@@ -109,10 +111,12 @@ def aggregate(
     for req in requests:
         if is_placeholder(req.model):
             continue  # not a model call (same rule as calibrate)
-        key, label = group_key(req, by, titles, agent_types)
+        key, label = group_key(req, by, titles, agent_types, projects)
         row = rows.get(key)
         if row is None:
             row = rows[key] = Row(key, label)
+            if projects is not None and by == "project":
+                row.path = projects.path(key)
         cost = price(req, table)
         u = req.usage
         row.requests += 1
@@ -173,6 +177,9 @@ def format_top(rows: list[Row], by: str, limit: int) -> str:
     shown = rows[:limit] if limit > 0 else rows
     header = [by, "req", "input", "read", "write", "output"]
     header += ["$input", "$read", "$write", "$output", "total", ""]
+    folders = by == "project" and any(r.path for r in shown)
+    if folders:
+        header.append("folder")
     body = []
     for r in shown:
         body.append(
@@ -189,6 +196,7 @@ def format_top(rows: list[Row], by: str, limit: int) -> str:
                 usd(r.usd_output),
                 usd(r.total),
                 r.flags,
+                *([r.path] if folders else []),
             ]
         )
     total = Row("", f"all ({len(rows)} {by}s)" if len(rows) != 1 else "all")
@@ -223,9 +231,10 @@ def format_top(rows: list[Row], by: str, limit: int) -> str:
             usd(total.usd_output),
             usd(total.total),
             total.flags,
+            *([""] if folders else []),
         ]
     )
-    text = _table(header, body)
+    text = _table(header, body, last_left=folders)
     notes = ["API-equivalent cost at the list prices; not the bill."]
     if total.estimated_output:
         share = total.estimated_output / total.requests if total.requests else 0.0
@@ -294,7 +303,10 @@ def run_top(
     agent_types: dict[str, str] = {}
     if by == "agent":
         agent_types = {a.agent_id: a.agent_type for a in index.agents() if a.agent_type}
-    rows = aggregate(index.requests(since=since), by, table, titles, agent_types)
+    projects = None
+    if by == "project":  # named as on the website
+        projects = ProjectNames.build(index.sessions(), config.openclaw_root)
+    rows = aggregate(index.requests(since=since), by, table, titles, agent_types, projects)
     window = "all time"
     if since is not None:
         window = f"last {days} days, local time, since {since.astimezone():%Y-%m-%d %H:%M}"

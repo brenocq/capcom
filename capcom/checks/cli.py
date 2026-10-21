@@ -93,7 +93,7 @@ def run_checks_view(
     )
     shown = findings[: max(limit, 0)]
     if any(f.metrics.get("overlaps") for f in shown):
-        note = "some overlap, so do not add them up"
+        note = "some overlap, so add only the total below"
     else:
         note = "they count different dollars"
     print(f"Savings are weekly at this window's pace; {note}.\n", file=out)
@@ -101,4 +101,9 @@ def run_checks_view(
         print("no findings in this window", file=out)
         return 0
     print(format_findings(findings, limit), file=out)
+    from capcom.report.tally import savings_total  # the website's total, worded the same
+
+    total = savings_total(findings, {s.project_dir for s in index.sessions()})
+    if total is not None:
+        print(f"\nTogether: {total['text']}.", file=out)
     return 0

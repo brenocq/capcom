@@ -151,7 +151,7 @@ def test_the_checks_view_says_not_to_add_up_only_when_findings_overlap(tmp_path:
     reqs = run(1, cache_read=200_000) + run(1, start=31, cache_read=0, cache_write_5m=200_000)
     text = view(index(reqs))
     assert "Long-running agents" in text and "Cache rewrites after idling" in text
-    assert "do not add them up" not in text and "different dollars" in text
+    assert "add only the total below" not in text and "different dollars" in text
     # an unused connector rides in those same prompts: its dollars overlap them
     evs = [
         ev(
@@ -163,7 +163,7 @@ def test_the_checks_view_says_not_to_add_up_only_when_findings_overlap(tmp_path:
         )
     ]
     text = view(index(reqs, evs))
-    assert "claude.ai connectors" in text and "do not add them up" in text
+    assert "claude.ai connectors" in text and "add only the total below" in text
 
 
 # --------------------------------------------------------------------------- tool waits
@@ -375,6 +375,8 @@ def test_the_view_prints_ranked_findings_with_their_change(tmp_path: Path) -> No
     assert "claude.ai connectors in sessions that never use them" in text
     assert "ENABLE_CLAUDEAI_MCP_SERVERS" in text
     assert "/week" in text
+    # the total the website shows, worded the same way
+    assert "Together: up to $" in text and "that don't overlap" in text
 
 
 def test_the_view_says_so_when_the_index_is_empty(tmp_path: Path) -> None:
