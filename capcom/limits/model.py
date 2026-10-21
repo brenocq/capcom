@@ -50,6 +50,7 @@ SAME_RESET = timedelta(minutes=10)  # reset times closer than this are one reset
 NOISE_DROP = 5.0  # without reset times, a fall of more than this many points is a reset
 MIN_INTERVALS = 2  # fewer: no fit ("not enough samples")
 MIN_RISE = 2.0  # percent points the intervals must add up to
+FORECAST_MIN_INTERVALS = 6  # fewer: the range would claim more than the fit knows
 PER_TYPE_MIN = 12  # intervals before a per-type fit is tried
 DRAWS = 400
 FAN_POINTS = 24
@@ -172,6 +173,16 @@ class Seed:
     unknown_window: int  # of those, the ones whose record does not say which window
 
 
+def _epoch(v: Any) -> datetime | None:
+    """`v` as a time when it is plausible epoch seconds (0 < v < 1e11), else None."""
+    if not isinstance(v, int | float) or isinstance(v, bool) or not 0 < v < 1e11:
+        return None
+    try:
+        return datetime.fromtimestamp(v, UTC)
+    except (OverflowError, ValueError, OSError):
+        return None
+
+
 def seed_samples(index: Index) -> Seed:
     """A 100 % sample for each rate-limit error in the index whose event names the
     window it hit (`rate_limit_type` or `window`, and `resets_at` in epoch seconds
@@ -188,10 +199,7 @@ def seed_samples(index: Index) -> Seed:
         except ValueError:
             unknown += 1
             continue
-        resets = e.attrs.get("resets_at")
-        reset_t = None
-        if isinstance(resets, int | float) and not isinstance(resets, bool) and resets > 0:
-            reset_t = datetime.fromtimestamp(resets / 1000 if resets > 1e11 else resets, UTC)
+        reset_t = _epoch(e.attrs.get("resets_at"))
         out.append(
             LimitSample(e.timestamp, window, 100.0, reset_t, e.session_id, "rate_limit_error")
         )
@@ -230,9 +238,21 @@ def _new_reset(cur: Segment, s: LimitSample) -> bool:
     """Whether sample `s` belongs to a window after `cur`'s reset."""
     r = cur.resets_at
     if r is not None:
-        moved = s.resets_at is not None and abs(s.resets_at - r) >= SAME_RESET
+        moved = s.resets_at is not None and s.resets_at - r >= SAME_RESET
         return moved or s.time >= r
     return s.used_percentage < cur.last.used_percentage - NOISE_DROP
+
+
+def _stale(cur: Segment | None, s: LimitSample) -> bool:
+    """Whether `s` reports a window that is already over: its reset is at or before
+    its own time, or before the current segment's reset (an idle session still
+    showing the old window)."""
+    if s.resets_at is None:
+        return False
+    if s.resets_at <= s.time:
+        return True
+    r = cur.resets_at if cur is not None else None
+    return r is not None and r - s.resets_at >= SAME_RESET
 
 
 def _floor(done: Sequence[Segment]) -> datetime | None:
@@ -244,6 +264,8 @@ def segments(samples: Iterable[LimitSample], window: LimitWindow) -> list[Segmen
     out: list[Segment] = []
     cur: Segment | None = None
     for s in sorted((s for s in samples if s.window == window), key=lambda s: s.time):
+        if _stale(cur, s):
+            continue
         new = cur is None or _new_reset(cur, s)
         if new:
             start, known = s.time, False
@@ -671,6 +693,11 @@ def analyze(
     fc: Forecast | None = None
     if result is None:
         reason = NOT_ENOUGH
+    elif result.intervals < FORECAST_MIN_INTERVALS:
+        reason = (
+            f"the fit has {result.intervals} intervals; a forecast range needs "
+            f"{FORECAST_MIN_INTERVALS}"
+        )
     elif not current or last is None or last.resets_at is None:
         reason = "no reading in the current window"
     else:
@@ -697,7 +724,7 @@ def analyze(
         forecast=fc,
         reason=reason,
         shown=shown_views,
-        reading=own[-1] if own else None,
+        reading=segs[-1].last if segs else None,
         current=current,
     )
 

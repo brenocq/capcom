@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from itertools import pairwise
 from pathlib import Path
 
@@ -17,8 +18,9 @@ from capcom.limits import record as rec
 from capcom.limits.model import load_samples
 from capcom.types import LimitWindow
 
-RESET_5H = 1_792_600_000
-RESET_7D = 1_793_000_000
+# in the future of whenever the tests run: a past reset is a stale reading
+RESET_5H = int(time.time()) + 3 * 3600
+RESET_7D = int(time.time()) + 5 * 86400
 
 
 def payload(five: float | None = 12, week: float | None = 40, **extra: object) -> bytes:
@@ -193,3 +195,79 @@ def test_command_line_end_to_end(env: dict[str, str]) -> None:
     )
     assert done.returncode == 0 and done.stdout == data and done.stderr == b""
     assert len(lines(env)) == 2
+
+
+def _cli(env: dict[str, str]) -> list[str]:
+    del env
+    return [sys.executable, "-m", "capcom.cli", "record-limits"]
+
+
+def test_reader_that_closes_its_stdin(env: dict[str, str]) -> None:
+    # the next command in the pipe closes its input before the copy is written
+    data = payload(7, 8) * 4000  # larger than a pipe buffer
+    cmd = " ".join(_cli(env)) + " | sh -c 'exec 0<&-; sleep 0.2'"
+    done = subprocess.run(
+        ["sh", "-c", cmd], input=data, capture_output=True, env=os.environ | env, timeout=30
+    )
+    assert done.returncode == 0 and done.stderr == b""
+    small = " ".join(_cli(env)) + " | sh -c 'exec 0<&-'"
+    done = subprocess.run(
+        ["sh", "-c", small],
+        input=payload(7, 8),
+        capture_output=True,
+        env=os.environ | env,
+        timeout=30,
+    )
+    assert done.returncode == 0 and done.stderr == b""
+
+
+def test_stdin_that_never_closes(env: dict[str, str]) -> None:
+    data = payload(7, 8)
+    proc = subprocess.Popen(
+        _cli(env),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=os.environ | env,
+    )
+    assert proc.stdin is not None
+    proc.stdin.write(data)
+    proc.stdin.flush()  # and never closed
+    try:
+        code = proc.wait(timeout=10)  # the recorder gives up on stdin after ~1 s
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        pytest.fail("record-limits hung on a stdin that never closes")
+    finally:
+        proc.stdin.close()
+    assert proc.stdout is not None and proc.stderr is not None
+    assert code == 0 and proc.stdout.read() == data and proc.stderr.read() == b""
+
+
+def test_rejects_implausible_reset_times(env: dict[str, str]) -> None:
+    body = json.loads(payload(41, 86))
+    body["rate_limits"]["five_hour"]["resets_at"] = -1e20
+    body["rate_limits"]["seven_day"]["resets_at"] = 1e20
+    data = json.dumps(body).encode()
+    assert rec.readings(body)[0] == [("five_hour", 41, None), ("seven_day", 86, None)]
+    assert rec.status_text(data) == "Opus 5.5 · 5h 41% · 7d 86%"
+    code, out = run(data, env, "--line")
+    assert code == 0 and out == b"Opus 5.5 \xc2\xb7 5h 41% \xc2\xb7 7d 86%\n"
+
+
+def test_stale_window_is_not_recorded(env: dict[str, str]) -> None:
+    def five(used: float, resets: float) -> bytes:
+        body = json.loads(payload(used, None))
+        body["rate_limits"]["five_hour"]["resets_at"] = resets
+        return json.dumps(body).encode()
+
+    old = RESET_5H
+    new = RESET_5H + 5 * 3600
+    run(five(80, old), env)
+    run(five(3, new), env)  # the window moved on
+    run(five(80, old), env)  # an idle session still showing the old one: skipped
+    run(five(4, new), env)
+    run(five(50, time.time() - 60), env)  # a reset already past: skipped
+    got = [(g["used_percentage"]) for g in lines(env)]
+    assert got == [80, 3, 4]

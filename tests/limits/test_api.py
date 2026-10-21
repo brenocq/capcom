@@ -49,7 +49,11 @@ def samples() -> list[LimitSample]:
     return [
         LimitSample(ago(days=8), D7, 100.0, None, "s9", "rate_limit_error"),  # an old window
         LimitSample(ago(hours=7), D7, 30.0, week_reset, "s1"),
+        LimitSample(ago(hours=6), D7, 33.0, week_reset, "s1"),
+        LimitSample(ago(hours=5, minutes=30), D7, 36.0, week_reset, "s1"),
         LimitSample(ago(hours=5), D7, 40.0, week_reset, "s1"),
+        LimitSample(ago(hours=3), D7, 42.0, week_reset, "s1"),
+        LimitSample(ago(hours=1), D7, 44.0, week_reset, "s1"),
         LimitSample(ago(minutes=1), D7, 45.0, week_reset, "s1"),
         LimitSample(ago(hours=4), H5, 5.0, five_reset, "s1"),
         LimitSample(ago(minutes=2), H5, 9.0, five_reset, "s1"),

@@ -4,6 +4,7 @@ rate-limit errors, and the status line change that starts recording."""
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sqlite3
 import sys
@@ -24,6 +25,32 @@ from capcom.limits.view import NOT_RECORDING, format_views
 from capcom.types import Index
 
 PREFIX = "capcom record-limits"
+# the recorder at the head of a command, by name or full path, and what follows it
+INSTALLED = re.compile(r"\s*(?:\S*/)?capcom\s+record-limits(?![\w-])(.*)", re.DOTALL)
+# the wrapper `wrap` puts around the user's command
+WRAPPED = re.compile(r"\|\s*\{ (.*)\n\}\s*", re.DOTALL)
+
+
+def wrap(cmd: str) -> str:
+    """The recorder piped into `cmd` as a brace group, so a compound command
+    (`a; b`, `x=$(cat); echo "$x" | ...`, a trailing `# comment`) all reads the copy.
+    The newline before `}` ends a trailing comment."""
+    return f"{PREFIX} | {{ {cmd}\n}}"
+
+
+def unwrap(cmd: str) -> tuple[bool, str | None]:
+    """Whether `cmd` already runs the recorder first, and the user's own command
+    behind it (None when the recorder runs alone)."""
+    m = INSTALLED.fullmatch(cmd)
+    if m is None:
+        return False, None
+    rest = m.group(1).strip()
+    inner = WRAPPED.fullmatch(rest)
+    if inner is not None:
+        return True, inner.group(1).strip() or None
+    if rest.startswith("|"):
+        return True, rest[1:].strip() or None
+    return True, None
 
 
 def _open(config: Config) -> Index | None:
@@ -73,9 +100,8 @@ def install_text(settings: Path, on_path: bool, found: str | None = None) -> str
     q = json.dumps
     lines = [f"File: {settings} (capcom does not change it; make the change yourself)", ""]
     cmd = sl.get("command") if sl is not None else None
-    if isinstance(cmd, str) and cmd.strip().startswith(PREFIX):
-        rest = cmd.strip()[len(PREFIX) :].lstrip()
-        old = rest.removeprefix("|").strip() if rest.startswith("|") else None
+    installed, old = unwrap(cmd) if isinstance(cmd, str) else (False, None)
+    if isinstance(cmd, str) and installed:
         lines += ["The recorder is already installed:", f'    "command": {q(cmd)}', ""]
         if old:
             lines += ["To undo, set it back to:", f'    "command": {q(old)}']
@@ -83,7 +109,7 @@ def install_text(settings: Path, on_path: bool, found: str | None = None) -> str
             lines += ['To undo, remove the "statusLine" entry.']
         return "\n".join(lines)
     if isinstance(cmd, str) and cmd.strip():
-        new = f"{PREFIX} | {cmd}"
+        new = wrap(cmd)
         lines += [
             'Change "statusLine" → "command":',
             f'  - "command": {q(cmd)}',

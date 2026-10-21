@@ -234,3 +234,45 @@ def test_seed_from_rate_limit_errors(tmp_path: Path) -> None:
     assert len(added) == 2
     assert append_samples(tmp_path, found.samples) == []  # a second seed adds nothing
     assert load_samples(samples_path(tmp_path)) == found.samples
+
+
+def test_stale_window_readings_make_no_segment() -> None:
+    r1 = T0 + timedelta(hours=2)
+    r2 = r1 + timedelta(hours=5)
+    ss = [
+        sample(T0, 70, resets=r1),
+        sample(r1 + minutes(10), 5, resets=r2),
+        sample(r1 + minutes(20), 80, resets=r1),  # an idle session showing the old window
+        sample(r1 + minutes(30), 9, resets=r2),
+        sample(r1 + minutes(40), 90, resets=r1 - minutes(30)),  # resets before its time
+        sample(r1 + minutes(50), 12, resets=r2),
+    ]
+    segs = segments(ss, H5)
+    assert len(segs) == 2
+    assert [s.used_percentage for s in segs[1].samples] == [5, 9, 12]
+
+
+def test_card_reading_is_the_current_windows_last() -> None:
+    index, ss = synthetic(2)
+    stale = sample(ss[-1].time + minutes(5), 3, resets=ss[-1].resets_at)  # lower: dropped
+    view = analyze(index, TABLE, [*ss, stale], H5, now=stale.time + minutes(1))
+    assert view.reading is not None and view.reading == ss[-1]
+
+
+def test_seed_ignores_implausible_reset_times() -> None:
+    def ev(i: int, resets: object) -> Event:
+        attrs = {"error": "rate_limit", "rate_limit_type": "five_hour", "resets_at": resets}
+        return Event(EventKind.API_ERROR, "s1", None, T0 + minutes(i), f"k{i}", attrs)  # type: ignore[arg-type]
+
+    found = seed_samples(FakeIndex(events=[ev(1, -1e20), ev(2, 1e20), ev(3, 1e10 * 9)]))
+    assert len(found.samples) == 3
+    assert [s.resets_at for s in found.samples[:2]] == [None, None]
+
+
+def test_few_intervals_give_no_forecast_range() -> None:
+    index, ss = synthetic(1)
+    few = ss[:4]
+    view = analyze(index, TABLE, few, H5, now=few[-1].time + minutes(1))
+    assert view.fit is not None and view.fit.intervals < 6
+    assert view.forecast is None
+    assert view.reason is not None and "needs 6" in view.reason

@@ -35,6 +35,7 @@ STATE_FILE = "limits.state.json"
 LOCK_FILE = "limits.lock"
 MAX_INPUT = 1 << 20  # larger stdin is passed through but not parsed
 RESET_SLACK_S = 60  # reset times closer than this are the same reset (they jitter)
+READ_DEADLINE_S = 1.0  # stdin still open after this: pass through what arrived
 LOCK_TRIES = 25  # times 2 ms: give up on the lock after about 50 ms
 
 Reading = tuple[str, float, float | None]  # window, used_percentage, resets_at (epoch s)
@@ -65,14 +66,25 @@ def readings(payload: Any) -> tuple[list[Reading], str | None]:
             if used is None or not 0 <= used <= 1000:
                 continue
             resets = _number(win.get("resets_at"))
-            if resets is not None and resets > 1e11:  # milliseconds, by mistake
-                resets /= 1000
+            if resets is not None and not 0 < resets < 1e11:  # not epoch seconds
+                resets = None
             out.append((w, used, resets))
     return out, session
 
 
 def _iso(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, UTC).isoformat()
+
+
+def _stale(prev: Any, resets: float | None, now: float) -> bool:
+    """Whether a reading reports a window already over: its reset is not after `now`,
+    or is before the last sample's reset (an idle session showing the old window)."""
+    if resets is None:
+        return False
+    if resets <= now:
+        return True
+    p_resets = _number(prev[1]) if isinstance(prev, list) and len(prev) == 2 else None
+    return p_resets is not None and p_resets - resets >= RESET_SLACK_S
 
 
 def _changed(prev: Any, used: float, resets: float | None) -> bool:
@@ -150,7 +162,8 @@ def record(data: bytes, directory: str, now: float | None = None) -> int:
             pass
         lines: list[bytes] = []
         for window, used, resets in found:
-            if not _changed(state.get(window), used, resets):
+            prev = state.get(window)
+            if _stale(prev, resets, now) or not _changed(prev, used, resets):
                 continue
             sample = {
                 "time": _iso(now),
@@ -196,9 +209,35 @@ def status_text(data: bytes) -> str:
     for window, used, resets in found:
         text = f"{labels[window]} {used:.0f}%"
         if resets is not None and window == "five_hour":
-            text += f" (resets {datetime.fromtimestamp(resets).strftime('%H:%M')})"
+            with contextlib.suppress(OverflowError, ValueError, OSError):
+                text += f" (resets {datetime.fromtimestamp(resets).strftime('%H:%M')})"
         parts.append(text)
     return " · ".join(parts) or "capcom"
+
+
+def read_input(stream: BinaryIO, deadline_s: float = READ_DEADLINE_S) -> bytes:
+    """What `stream` holds until it closes or `deadline_s` passes, whichever comes
+    first (a writer that never closes its end cannot hang the status line)."""
+    import select
+
+    try:
+        fd = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        return stream.read()  # not a real file (tests): read it whole
+    chunks: list[bytes] = []
+    end = time.monotonic() + deadline_s
+    while True:
+        left = end - time.monotonic()
+        if left <= 0:
+            break
+        ready, _, _ = select.select([fd], [], [], left)
+        if not ready:
+            break
+        chunk = os.read(fd, 1 << 16)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def run(
@@ -212,19 +251,24 @@ def run(
     real_stdout = stdout is None
     data = b""
     with contextlib.suppress(BaseException):
-        data = (stdin or sys.stdin.buffer).read()
-    with contextlib.suppress(BaseException):
-        out = stdout or sys.stdout.buffer
-        if "--line" in argv:
-            out.write(status_text(data).encode("utf-8", "replace") + b"\n")
-        else:
-            out.write(data)
-        out.flush()
+        data = read_input(stdin or sys.stdin.buffer)
+    try:
+        with contextlib.suppress(BaseException):
+            out = stdout or sys.stdout.buffer
+            if "--line" in argv:
+                out.write(status_text(data).encode("utf-8", "replace") + b"\n")
+            else:
+                out.write(data)
+            out.flush()
+    finally:
         if real_stdout:
-            # let the next command in the pipe see the end of its input now
-            devnull = os.open(os.devnull, os.O_WRONLY)
-            os.dup2(devnull, sys.stdout.fileno())
-            os.close(devnull)
+            # let the next command in the pipe see the end of its input now, and give
+            # the exit-time flush nowhere to fail (a reader that closed its end would
+            # make it print BrokenPipeError and exit 120)
+            with contextlib.suppress(BaseException):
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull, sys.stdout.fileno())
+                os.close(devnull)
     with contextlib.suppress(BaseException):
         directory = cache_dir(os.environ if env is None else env)
         if directory is not None:
