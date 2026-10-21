@@ -983,6 +983,7 @@ class _Parser:
                 total_cost_usd=_float(rec.get("totalCostUSD")),
                 models=models,
                 start_time_ms=_opt_int(rec.get("startTime")),
+                total_duration_ms=_opt_int(rec.get("totalDuration")),
                 has_unknown_model_cost=_bool(rec.get("hasUnknownModelCost")),
                 # The last timestamped record decoded before it in this parse call.
                 timestamp=self.last_ts,

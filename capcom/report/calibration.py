@@ -1,12 +1,15 @@
 """capcom's totals against Claude Code's cost-state, per session, for the session page
-and `capcom calibrate`: which part of the session a cost-state compares (its process's
-window: start to end, and "process n of m" when the session was resumed), and the one
-line that explains why the session's own total differs when it does.
+and `capcom calibrate`: which part of the session the cost-states compare (the steps
+of the processes that wrote one, "n of m processes" when some wrote none), and the
+note that explains the difference: spend in a process that wrote no cost-state, the
+output above capcom's estimate (a range: "≥ $X, up to $Y"), the calls Claude Code
+counted that the log does not record, and the unexplained rest.
 
-Claude Code's cost-state counts one process only (capcom.cost.calibrate): a resumed
-session's earlier processes are in capcom's session total but not in the comparison.
-Both pages show the same two numbers, the compared part and the whole session, so
-one session never shows two unexplained totals.
+Claude Code's cost-state counts only the processes that wrote one
+(capcom.cost.calibrate): a process that was killed or is still running is in
+capcom's session total but not in the comparison. Both pages show the same two
+numbers, the compared part and the whole session, so one session never shows two
+unexplained totals.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from datetime import UTC, datetime, tzinfo
 from typing import Any, TextIO
 
 from capcom.config import Config
-from capcom.cost.calibrate import TARGET_SPREAD, check_session, window
+from capcom.cost.calibrate import TARGET_SPREAD, check_session, session_steps
 from capcom.cost.model import price
 from capcom.cost.prices import is_placeholder, load_prices
 from capcom.cost.top import _by_reason, _shorten, _spread, _table, usd
@@ -40,60 +43,79 @@ REASON_LABELS = {
     "estimated output": "estimated output tokens",
 }
 SAME_USD = 0.005  # totals closer than this are the same total
+CATEGORY_WORDS = {
+    "cache_read": "cache reads",
+    "input": "uncached input",
+    "output": "output",
+    "cache_write": "cache writes",
+}
+
+
+def model_label(model: str) -> str:
+    """'claude-opus-5-5' -> 'Opus 5.5'; another name as it is."""
+    parts = model.removeprefix("claude-").split("-")
+    if len(parts) < 2 or not all(p.isdigit() for p in parts[1:]):
+        return model
+    return f"{parts[0].capitalize()} {'.'.join(parts[1:])}"
 
 
 @dataclass(frozen=True, slots=True)
 class Part:
-    """The part of a session a cost-state compares."""
+    """The part of a session the cost-states compare: the steps of the processes
+    that wrote one."""
 
-    since: datetime | None  # the process start (None: unknown, the whole log)
-    until: datetime | None  # the first record after the cost-state (None: open)
-    first: datetime | None  # the first and last request inside the window
+    since: datetime | None  # the first step's start (None: unknown, the whole log)
+    until: datetime | None  # the last step's end (None: open)
+    first: datetime | None  # the first and last request inside a step
     last: datetime | None
-    process: int | None  # n of `processes`, None when the start is not known
-    processes: int  # processes that wrote a cost-state (at least 1)
-    earlier: bool  # requests before the window: a resumed session
+    process: int | None  # the processes compared (steps), None without any
+    processes: int  # those and the stretches of requests outside every step
+    earlier: bool  # requests before the first step
     session_usd: float  # every request of the session
-    later: bool = False  # requests after the window: a process with no cost-state yet
+    later: bool = False  # requests after the last step: a process with no cost-state yet
+    gaps: bool = False  # requests between steps: a process that wrote no cost-state
 
     @property
     def whole(self) -> bool:
-        return not self.earlier and not self.later
+        return not self.earlier and not self.later and not self.gaps
 
 
 def part_of(index: Index, cs: CostState, table: PriceTable) -> Part:
-    """Where `cs`'s window sits in its session (one pass over its requests).
+    """Where `cs`'s steps sit in its session (one pass over its requests).
 
-    Processes are counted from the starts the cost-states record, plus the ones that
-    wrote none: one more when the session has requests before the first recorded
-    start, and one more when it has requests after this (the last) cost-state's
-    window. Processes with no cost-state between two recorded starts leave no trace
-    in the logs, so `processes` is a lower bound."""
-    since, until = window(cs)
-    starts_fn = getattr(index, "process_starts", None)
-    starts = (starts_fn(cs.session_id) if starts_fn else {}).get(cs.session_id, [])
-    if cs.start_time_ms is not None and cs.start_time_ms not in starts:
-        starts = sorted([*starts, cs.start_time_ms])
-    first_start = datetime.fromtimestamp(starts[0] / 1000, UTC) if starts else None
-    total, earlier, later, before_first = 0.0, False, False, False
+    Processes are the steps plus one per gap between them (and before the first,
+    after the last) that holds requests: each such stretch is counted as one process
+    that wrote no cost-state."""
+    st = session_steps(index, cs)
+    since = st[0].since if st else None
+    until = st[-1].until if st else None
+    # The steps' union as sorted, disjoint spans; a request outside them lies in gap
+    # k, the number of spans that end at or before it (0: before the first).
+    lo, hi = datetime.min.replace(tzinfo=UTC), datetime.max.replace(tzinfo=UTC)
+    spans: list[list[datetime]] = []
+    for a, b in sorted((s.since or lo, s.until or hi) for s in st):
+        if spans and a <= spans[-1][1]:
+            spans[-1][1] = max(spans[-1][1], b)
+        else:
+            spans.append([a, b])
+    total = 0.0
+    held: set[int] = set()
     first = last = None
     for r in index.requests(session_id=cs.session_id):
         if is_placeholder(r.model):
             continue
         total += price(r, table).total
-        if first_start is not None and r.timestamp < first_start:
-            before_first = True
-        if since is not None and r.timestamp < since:
-            earlier = True
-        elif until is None or r.timestamp < until:
+        if any(s.holds(r.timestamp) for s in st):
             first = first or r.timestamp
             last = r.timestamp
-        else:
-            later = True
-    ahead = 1 if before_first else 0
-    process = starts.index(cs.start_time_ms) + 1 + ahead if cs.start_time_ms is not None else None
-    processes = max(len(starts), 1) + ahead + (1 if later else 0)
-    return Part(since, until, first, last, process, processes, earlier, total, later)
+            continue
+        held.add(sum(1 for _, end in spans if end <= r.timestamp))
+    earlier = 0 in held
+    later = bool(spans) and len(spans) in held
+    gaps = any(0 < k < len(spans) for k in held)
+    process = len(st) or None
+    processes = len(st) + len(held)
+    return Part(since, until, first, last, process, processes, earlier, total, later, gaps)
 
 
 def _when(t: datetime | None, tz: tzinfo | None) -> str:
@@ -103,36 +125,91 @@ def _when(t: datetime | None, tz: tzinfo | None) -> str:
     return f"{local:%b} {local.day} {local:%H:%M}"
 
 
+def _which(p: Part) -> str:
+    n = p.process or 0
+    if p.processes <= 1:
+        return "one process"
+    return f"{n} of {p.processes} processes"
+
+
 def part_text(p: Part, tz: tzinfo | None = None) -> str:
-    """'Oct 16 10:02 to Oct 21 14:10, process 2 of 3', or 'whole session'; with
-    ', later requests not in it' when the session ran on after the cost-state."""
+    """'Oct 16 10:02 to Oct 21 14:10, 2 of 3 processes', or 'whole session'; with
+    ', later requests not in it' when the session ran on after the last cost-state."""
     if p.whole:
         return "whole session"
     span = f"{_when(p.since or p.first, tz)} to {_when(p.last, tz)}"
     tail = ", later requests not in it" if p.later else ""
-    if p.process is not None and p.processes > 1:
-        return f"{span}, process {p.process} of {p.processes}{tail}"
-    return f"{span}, one process{tail}"
+    return f"{span}, {_which(p)}{tail}"
+
+
+def _signed(x: float) -> str:
+    return ("-" if x < 0 else "+") + usd(abs(x))
+
+
+def output_range(c: Calibration) -> str | None:
+    """'≥ $X, up to $Y' when cost-state counted more output than capcom estimated."""
+    if c.output_above_usd < SAME_USD:
+        return None
+    return f"≥ {usd(c.capcom_usd)}, up to {usd(c.capcom_usd + c.output_above_usd)}"
+
+
+def _mostly(parts: Mapping[str, Mapping[str, float]]) -> str:
+    _, model, cat = max((v, m, k) for m, by in parts.items() for k, v in by.items())
+    return f"mostly {CATEGORY_WORDS.get(cat, cat)} on {model_label(model)}"
+
+
+def unlogged_text(c: Calibration) -> str | None:
+    """'by token counts, Claude Code saw about $N in calls the log doesn't record
+    (mostly cache reads on Opus 5.5)'."""
+    if c.unlogged_usd < SAME_USD:
+        return None
+    return (
+        f"by token counts, Claude Code saw about {usd(c.unlogged_usd)} in calls the log "
+        f"doesn't record ({_mostly(c.unlogged)})"
+    )
+
+
+def logged_more_text(c: Calibration) -> str | None:
+    """'the log counts about $N more than Claude Code's estimate (mostly ...)'."""
+    if c.logged_more_usd < SAME_USD:
+        return None
+    return (
+        f"the log counts about {usd(c.logged_more_usd)} more than Claude Code's estimate "
+        f"({_mostly(c.logged_more)})"
+    )
 
 
 def difference_note(c: Calibration, p: Part, tz: tzinfo | None = None) -> str | None:
-    """One line on why the session's total is not the compared total; None when
-    they agree."""
-    if abs(p.session_usd - c.capcom_usd) < SAME_USD:
-        return None
-    which = (
-        f"process {p.process} of {p.processes}"
-        if p.process is not None and p.processes > 1
-        else "one process"
-    )
-    span = f"from {_when(p.since or p.first, tz)}"
-    if p.later:
-        span += f" to {_when(p.last, tz)}, later requests not in it"
-    return (
-        f"Claude Code's cost-state counts only {which} ({span}): "
-        f"capcom counts {usd(c.capcom_usd)} for that part, {usd(p.session_usd)} for the "
-        "whole session."
-    )
+    """Why the totals differ, in a few short sentences: the spend in processes that
+    wrote no cost-state, the output range, the calls the log does not record, and
+    the unexplained rest. None when there is nothing to say."""
+    out = []
+    outside = p.session_usd - c.capcom_usd
+    if outside >= SAME_USD:
+        span = f"from {_when(p.since or p.first, tz)}"
+        if p.later:
+            span += f" to {_when(p.last, tz)}, later requests not in it"
+        out.append(
+            f"Claude Code's cost-state counts only {_which(p)} ({span}): capcom counts "
+            f"{usd(c.capcom_usd)} for that part, {usd(p.session_usd)} for the whole "
+            f"session; the other {usd(outside)} is spend in a Claude Code process that "
+            "wrote no cost-state."
+        )
+    rng = output_range(c)
+    if rng:
+        out.append(
+            f"capcom's total for it is {rng}: by token counts, Claude Code saw about "
+            f"{usd(c.output_above_usd)} more output than capcom's estimate, and the log "
+            "has no true count."
+        )
+    calls = unlogged_text(c)
+    more = logged_more_text(c)
+    for text in (calls, more):
+        if text:
+            out.append(text[0].upper() + text[1:] + ".")
+    if (rng or calls or more) and abs(c.rest_usd) >= SAME_USD:
+        out.append(f"The rest, {_signed(c.rest_usd)}, is unexplained.")
+    return " ".join(out) or None
 
 
 def calibration_json(
@@ -159,6 +236,14 @@ def calibration_json(
             "text": part_text(p, tz),
         },
         "session_usd": round(p.session_usd, 6),
+        "outside_usd": round(c.outside_usd, 6),
+        "output_above_usd": round(c.output_above_usd, 6),
+        "output_range": output_range(c),
+        "unlogged_usd": round(c.unlogged_usd, 6),
+        "unlogged_text": unlogged_text(c),
+        "logged_more_usd": round(c.logged_more_usd, 6),
+        "logged_more_text": logged_more_text(c),
+        "rest_usd": round(c.rest_usd, 6),
         "note": difference_note(c, p, tz),
     }
 
@@ -213,6 +298,25 @@ def _summary(name: str, group: list[Calibration]) -> str:
     )
 
 
+def rest_summary(checks: list[Calibration]) -> str:
+    """Where the difference of the sessions that are not comparable goes."""
+    rest = [c for c in checks if not c.comparable]
+    a = sum(c.outside_usd for c in rest)
+    b = sum(c.output_above_usd for c in rest)
+    cc = sum(c.unlogged_usd for c in rest)
+    e = sum(c.logged_more_usd for c in rest)
+    d = sum(c.rest_usd for c in rest)
+    line = (
+        f"on the rest: {usd(a)} in processes with no cost-state; by token counts, about "
+        f"{usd(b)} of output above capcom's estimate, {usd(cc)} in calls the log doesn't "
+        f"show and {usd(e)} the log counts more; {_signed(d)} unexplained"
+    )
+    more = sum(c.outside_usd for c in checks if c.comparable)
+    if more >= SAME_USD:
+        line += f"\n(comparable sessions: {usd(more)} more in processes with no cost-state)"
+    return line
+
+
 def run_calibrate(
     config: Config,
     limit: int,
@@ -256,15 +360,15 @@ def run_calibrate(
     parts = [format_rows(rows, names, tz)]
     if len(pairs) > len(shown):
         parts.append(f"{len(pairs) - len(shown)} more sessions (--limit)")
-    notes = [n for c, p, _ in rows if (n := difference_note(c, p, tz))]
+    notes = [f"{c.session_id[:8]}  {n}" for c, p, _ in rows if (n := difference_note(c, p, tz))]
     if notes:
         parts.append(
-            f"{len(notes)} of these were resumed: cost-state covers only the part in "
-            "`compares`, and capcom's column is that part too; the session page shows "
-            "both it and the whole session."
+            "Notes (cost-state covers only the part in `compares`, and capcom's column is "
+            "that part too):\n" + "\n".join(notes)
         )
     parts.append(_summary("comparable", [c for c in checks if c.comparable]))
     parts.append(_summary("all", checks))
+    parts.append(rest_summary(checks))
     parts.append(_by_reason([c for c in checks if not c.comparable]))
     print("\n\n".join(parts), file=out)
     return 0

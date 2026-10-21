@@ -195,6 +195,7 @@ def test_sample_main_log(sample: tuple[Path, dict[str, Any]]) -> None:
     opus = cost.models["claude-opus-5-5"]
     assert (opus.input, opus.output, opus.cache_read, opus.cache_write) == (6, 330, 20_000, 30_000)
     assert opus.thinking == 120 and opus.cost_usd == 1.2 and cost.has_unknown_model_cost is False
+    assert cost.total_duration_ms == 5000
 
     (info,) = of(batches, SessionInfo)
     assert info.title == "Synthetic session" and info.cwd == "/home/user/proj"
@@ -444,6 +445,7 @@ def test_bad_lines_and_unknown_types(tmp_path: Path) -> None:
     assert sum(b.skipped for b in batches) == 6
     (cost,) = [r for b in batches for r in b.records]
     assert isinstance(cost, CostState) and cost.total_cost_usd == 0.0 and cost.models == {}
+    assert cost.total_duration_ms is None
     assert source.unknown_types == {"future-record-type": 1}
 
 

@@ -11,13 +11,19 @@ the index's requests spent in that interval. With enough intervals (at least
 in percent per million tokens, by non-negative least squares; with fewer, a single
 percent per dollar of capcom's API-equivalent prices (total rise over total spend),
 and says so. Usage from other machines or claude.ai counts toward the limits but is
-not in the logs, so it shows up as fit error.
+not in the logs, so it shows up as fit error. The fit's own uncertainty is a factor
+on its rate (`rate_factor`): a t-interval on the residuals, pooled with a wide prior
+(times or divided by 2.5 from a single rise) so that a few agreeing rises do not
+claim more than they know; it narrows as rises come.
 
-The forecast: the current segment's spend in fixed buckets (15 minutes for the 5-hour
-window, an hour for the weekly one), turned into percent by the fit, resampled in
-blocks for the time left until the reset: the median and an 80 % range (10th to 90th
-percentile) of the value at reset, a fan of the same at points along the way, and
-when the median path reaches 100 %.
+The forecast, from the second reading on: the current segment's spend in fixed
+buckets (15 minutes for the 5-hour window, an hour for the weekly one), turned into
+percent by the fit, resampled in blocks for the time left until the reset, each draw
+with its own rate drawn from the fit's uncertainty: the median and an 80 % range
+(10th to 90th percentile) of the value at reset, a fan of the same at points along
+the way, and when the paths reach 100 % (median, earliest and latest). With few
+rises the range also covers the plain straight line of percent against time through
+the current window's readings (its slope times or divided by the same factor).
 """
 
 from __future__ import annotations
@@ -49,16 +55,27 @@ CATEGORIES = ("input", "cache_write", "cache_read", "output")
 SAME_RESET = timedelta(minutes=10)  # reset times closer than this are one reset
 BURST = timedelta(seconds=30)  # rises closer than this are one refresh burst
 NOISE_DROP = 5.0  # without reset times, a fall of more than this many points is a reset
-MIN_INTERVALS = 2  # fewer: no fit ("not enough samples")
-MIN_RISE = 2.0  # percent points the intervals must add up to
-FORECAST_MIN_INTERVALS = 6  # fewer: the range would claim more than the fit knows
+MIN_INTERVALS = 1  # fewer: no fit
+MIN_READINGS = 2  # recorded readings (after dropping stale ones) before a fit
+MIN_RISE = 1.0  # percent points the intervals must add up to
+FEW_RISES = 6  # fewer: the forecast is rough and also checked against a straight line
+PRIOR_FACTOR = 2.5  # the rate's 80 % factor from a single rise
+PRIOR_DF = 3  # the prior's weight, in rises, when pooled with the residuals
+MAX_FACTOR = 6.0
+Z80 = 1.2815515655446004  # the normal's 90th percentile
+# the t distribution's 90th percentile by degrees of freedom (1 to 30)
+T80 = (
+    3.078, 1.886, 1.638, 1.533, 1.476, 1.440, 1.415, 1.397, 1.383, 1.372,
+    1.363, 1.356, 1.350, 1.345, 1.341, 1.337, 1.333, 1.330, 1.328, 1.325,
+    1.323, 1.321, 1.319, 1.318, 1.316, 1.315, 1.314, 1.313, 1.311, 1.310,
+)  # fmt: skip
 PER_TYPE_MIN = 12  # intervals before a per-type fit is tried
 DRAWS = 400
 FAN_POINTS = 24
 SOURCES = ("statusline", "rate_limit_error")
 
 Key = tuple[str, str]  # (model, category)
-NOT_ENOUGH = "not enough samples"
+NOT_ENOUGH = "it needs two readings with a rise and some spend between them"
 
 
 # --------------------------------------------------------------------------- samples
@@ -478,6 +495,8 @@ class Fit:
     weights: dict[Key, float] = field(default_factory=dict)  # percent per million tokens
     mean_abs_error: float = 0.0  # percent points per interval
     r2: float | None = None
+    rate_factor: float = PRIOR_FACTOR  # the rate's 80 % range: divided to multiplied by it
+    readings: int = 0  # recorded readings the intervals come from
 
     def percent(self, spend: Spend) -> float:
         if self.method == "per_type":
@@ -485,18 +504,64 @@ class Fit:
         return self.per_usd * spend.usd
 
     @property
+    def rough(self) -> bool:
+        return self.intervals < FEW_RISES
+
+    @property
+    def usd_per_percent(self) -> float | None:
+        return 1 / self.per_usd if self.per_usd > 0 else None
+
+    @property
     def note(self) -> str:
-        if self.method == "per_type":
-            return f"weights per model and token type, from {self.intervals} intervals"
-        return (
-            f"one rate per dollar of API prices, from {self.intervals} intervals: "
-            "too few samples for weights per token type"
-        )
+        """The fit in plain words, for the cards and `capcom limits`."""
+        per = self.usd_per_percent
+        dollars = "?" if per is None else f"${per:,.0f}" if per >= 10 else f"${per:,.2f}"
+        rises = f"{self.intervals} rise{'' if self.intervals == 1 else 's'}"
+        out = f"About {dollars} of API-equivalent spend per 1% of your {LABEL[self.window]}"
+        if self.method == "per_type" and sum(1 for w in self.weights.values() if w > 0) > 1:
+            out += f", from {rises}, with a separate weight for each model and token type"
+        else:
+            out += f", from {rises}"
+        if self.rough:
+            return out + " (rough)."
+        return out + f"; readings stray from it by {self.mean_abs_error:.1f} points on average."
 
 
-def fit(window: LimitWindow, items: Sequence[tuple[Interval, Spend]], samples: int) -> Fit | None:
-    """The fit of `items` (each interval's rise with the spend in it); None with too
-    few intervals or no rise and spend to learn from."""
+def _t80(df: int) -> float:
+    return T80[df - 1] if 1 <= df <= len(T80) else Z80
+
+
+def rate_factor(ys: Sequence[float], preds: Sequence[float], segments: int = 1) -> float:
+    """The fit's 80 % range as a factor on its rate: from the residuals of the rises
+    (`ys`, percent points) against the fit's `preds`, pooled with a wide prior worth
+    `PRIOR_DF` rises (a single rise gives `PRIOR_FACTOR`), plus the whole-point
+    rounding of each segment's last reading; a t quantile on the pooled degrees of
+    freedom."""
+    n, rise = len(ys), sum(ys)
+    if n == 0 or rise <= 0:
+        return PRIOR_FACTOR
+    s0 = math.log(PRIOR_FACTOR) / _t80(PRIOR_DF)  # per rise, relative
+    if n >= 2:
+        mean = rise / n
+        data = sum((p - y) ** 2 for p, y in zip(preds, ys, strict=True)) / (n - 1) / mean**2
+        pooled = (PRIOR_DF * s0**2 + (n - 1) * data) / (PRIOR_DF + n - 1)
+    else:
+        pooled = s0**2
+    rounding = 0.5 * math.sqrt(max(segments, 1)) / rise
+    half = _t80(PRIOR_DF + n - 1) * math.sqrt(pooled / n + rounding**2)
+    return min(math.exp(half), MAX_FACTOR)
+
+
+def fit(
+    window: LimitWindow,
+    items: Sequence[tuple[Interval, Spend]],
+    samples: int,
+    segments: int = 1,
+    readings: int = 0,
+) -> Fit | None:
+    """The fit of `items` (each interval's rise with the spend in it, from `segments`
+    windows and `readings` readings); None with too few intervals or no rise and
+    spend to learn from."""
     items = [(iv, sp) for iv, sp in items if sp.requests or iv.rise > 0]
     rise = sum(iv.rise for iv, _ in items)
     usd = sum(sp.usd for _, sp in items)
@@ -505,16 +570,17 @@ def fit(window: LimitWindow, items: Sequence[tuple[Interval, Spend]], samples: i
     keys = sorted({k for _, sp in items for k in sp.tokens})
     ys = [iv.rise for iv, _ in items]
     per_usd = rise / usd
-    result = Fit(window, "per_usd", len(items), samples, per_usd)
+    result = Fit(window, "per_usd", len(items), samples, per_usd, readings=readings)
     if len(items) >= max(PER_TYPE_MIN, 3 * len(keys)):
         rows = [[sp.tokens.get(k, 0.0) / 1e6 for k in keys] for _, sp in items]
         w = nnls(rows, ys)
         weights = {k: v for k, v in zip(keys, w, strict=True)}
-        typed = Fit(window, "per_type", len(items), samples, per_usd, weights)
+        typed = Fit(window, "per_type", len(items), samples, per_usd, weights, readings=readings)
         typed.per_usd = sum(typed.percent(sp) for _, sp in items) / usd
         result = typed
     pred = [result.percent(sp) for _, sp in items]
     result.mean_abs_error = sum(abs(p - y) for p, y in zip(pred, ys, strict=True)) / len(ys)
+    result.rate_factor = rate_factor(ys, pred, segments)
     mean = sum(ys) / len(ys)
     tot = sum((y - mean) ** 2 for y in ys)
     if tot > 0:
@@ -523,6 +589,27 @@ def fit(window: LimitWindow, items: Sequence[tuple[Interval, Spend]], samples: i
 
 
 # --------------------------------------------------------------------------- forecast
+
+
+@dataclass(slots=True)
+class Line:
+    """The plain straight line of percent against time through the current window's
+    readings: `percent` at `time`, rising `per_hour`."""
+
+    time: datetime
+    percent: float
+    per_hour: float
+
+    def at(self, t: datetime, factor: float = 1.0) -> float:
+        return self.percent + self.per_hour * factor * (t - self.time) / timedelta(hours=1)
+
+    def reaches_full(self, factor: float = 1.0) -> datetime | None:
+        rate = self.per_hour * factor
+        if self.percent >= 100:
+            return self.time
+        if rate <= 0:
+            return None
+        return self.time + timedelta(hours=(100 - self.percent) / rate)
 
 
 @dataclass(slots=True)
@@ -537,6 +624,12 @@ class Forecast:
     fan: list[tuple[datetime, float, float, float]]  # (time, median, low, high)
     buckets: int  # buckets of history the velocity comes from
     bucket: timedelta
+    runs_out_early: datetime | None = None  # the earliest of the range, before the reset
+    runs_out_late: datetime | None = None  # the latest; None: it may last to the reset
+    factor: float = 1.0  # the fit's rate factor the draws spread over
+    readings: int = 0  # readings behind the fit
+    rough: bool = False  # few rises: a wide range
+    line: bool = False  # the straight-line check widened the range
 
 
 def _quantile(sorted_values: Sequence[float], q: float) -> float:
@@ -548,6 +641,15 @@ def _quantile(sorted_values: Sequence[float], q: float) -> float:
     return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * (pos - lo)
 
 
+def _rank(sorted_values: Sequence[float], q: float) -> float:
+    """The nearest-rank quantile (safe with infinite values)."""
+    return sorted_values[min(int(q * len(sorted_values)), len(sorted_values) - 1)]
+
+
+def _earliest(*ts: datetime | None) -> datetime | None:
+    return min((t for t in ts if t is not None), default=None)
+
+
 def forecast(
     window: LimitWindow,
     now_value: float,
@@ -556,29 +658,40 @@ def forecast(
     now: datetime,
     resets_at: datetime,
     seed: int = 7,
+    factor: float = 1.0,
+    line: Line | None = None,
 ) -> Forecast:
     """Resample `rates` (percent per bucket, recent history, oldest first) in blocks
-    over the time left until `resets_at`, starting from `now_value`."""
+    over the time left until `resets_at`, starting from `now_value`. Each draw scales
+    the fitted percent (what was spent since the `reading`, and the rates) by its own
+    rate, lognormal with an 80 % range of divided to multiplied by `factor`. A `line`
+    widens the range to its own (slope divided to multiplied by `factor`)."""
     bucket = BUCKET[window]
     left = max((resets_at - now) / bucket, 0.0)
     steps = math.ceil(left)
     block = BLOCK[window]
     rng = random.Random(seed)
+    sigma = math.log(factor) / Z80 if factor > 1 else 0.0
+    since = now_value - reading
     marks = sorted({max(1, round(steps * i / FAN_POINTS)) for i in range(1, FAN_POINTS + 1)})
     marks = [m for m in marks if m <= steps]
     at_mark: dict[int, list[float]] = {m: [] for m in marks}
+    starts: list[float] = []
     finals: list[float] = []
     crossings: list[float] = []
     n = len(rates)
-    for _ in range(DRAWS if n and steps else 1):
-        total, cross = now_value, math.inf
+    for _ in range(DRAWS if (n and steps) or sigma else 1):
+        scale = math.exp(rng.gauss(0.0, sigma)) if sigma else 1.0
+        total = reading + since * scale
+        starts.append(total)
+        cross = 0.0 if total >= 100 else math.inf
         i = 0
         while i < steps:
             start = rng.randrange(n) if n else 0
             for j in range(block):
                 if i >= steps:
                     break
-                v = rates[(start + j) % n] if n else 0.0
+                v = rates[(start + j) % n] * scale if n else 0.0
                 part = min(1.0, left - i)  # the last step may be partial
                 before = total
                 total += v * part
@@ -588,27 +701,61 @@ def forecast(
                 if i in at_mark:
                     at_mark[i].append(total)
         finals.append(total)
-        crossings.append(cross if now_value < 100 else 0.0)
+        crossings.append(cross)
     finals.sort()
     crossings.sort()
-    fan = [(now, now_value, now_value, now_value)]
+    starts.sort()
+
+    def when(steps_from_now: float) -> datetime | None:
+        return (
+            None
+            if math.isinf(steps_from_now) or steps_from_now > left
+            else now + bucket * steps_from_now
+        )
+
+    fan = [(now, now_value, _quantile(starts, 0.1), _quantile(starts, 0.9))]
     for m in marks:
         vals = sorted(at_mark[m])
         t = min(now + bucket * m, resets_at)
         fan.append((t, _quantile(vals, 0.5), _quantile(vals, 0.1), _quantile(vals, 0.9)))
+    low, high = _quantile(finals, 0.1), _quantile(finals, 0.9)
+    early = when(_rank(crossings, 0.1))
+    late = when(_rank(crossings, 0.9))
+    widened = False
+    if line is not None and line.per_hour > 0:
+        k = max(factor, 1.0)
+        fan2 = []
+        for t, med, lo, hi in fan:
+            a, b = line.at(t, 1 / k), line.at(t, k)
+            fan2.append((t, med, min(lo, a), max(hi, b)))
+        fan = fan2
+        a, b = line.at(resets_at, 1 / k), line.at(resets_at, k)
+        widened = a < low or b > high
+        low, high = min(low, a), max(high, b)
+        fast = line.reaches_full(k)
+        if fast is not None and fast <= resets_at:
+            early = _earliest(early, max(fast, now))
+        slow = line.reaches_full(1 / k)
+        late = None if late is None or slow is None or slow > resets_at else max(late, slow)
     mid = crossings[len(crossings) // 2]  # infinite when a path never reaches 100 %
-    runs_out = None if math.isinf(mid) or mid > left else now + bucket * mid
+    runs_out = when(mid)
+    if runs_out is not None:
+        early = _earliest(early, runs_out)
     return Forecast(
         reading=reading,
         now=now_value,
         median=_quantile(finals, 0.5),
-        low=_quantile(finals, 0.1),
-        high=_quantile(finals, 0.9),
+        low=low,
+        high=high,
         resets_at=resets_at,
         runs_out_at=runs_out,
         fan=fan,
         buckets=n,
         bucket=bucket,
+        runs_out_early=early,
+        runs_out_late=late if runs_out is not None or early is not None else None,
+        factor=factor,
+        line=widened,
     )
 
 
@@ -637,6 +784,18 @@ class WindowView:
     @property
     def label(self) -> str:
         return LABEL[self.window]
+
+
+def _line(seg: Segment) -> Line | None:
+    """The straight line through a segment's first and last points."""
+    pts = seg.points()
+    if len(pts) < 2:
+        return None
+    (t0, p0), (t1, p1) = pts[0], pts[-1]
+    hours = (t1 - t0) / timedelta(hours=1)
+    if hours <= 0:
+        return None
+    return Line(t1, p1, (p1 - p0) / hours)
 
 
 def analyze(
@@ -696,22 +855,30 @@ def analyze(
     )
     scan_spend(index, table, bins)
 
-    result = fit(window, iv_spend, len(own))
+    readings = sum(len(seg.samples) for seg in segs)
+    result = fit(window, iv_spend, len(own), sum(1 for seg in segs if seg.samples), readings)
+    if readings < MIN_READINGS:
+        result = None
     reason: str | None = None
     fc: Forecast | None = None
     if result is None:
         reason = NOT_ENOUGH
-    elif result.intervals < FORECAST_MIN_INTERVALS:
-        reason = (
-            f"the fit has {result.intervals} intervals; a forecast range needs "
-            f"{FORECAST_MIN_INTERVALS}"
-        )
     elif not current or last is None or last.resets_at is None:
         reason = "no reading in the current window"
     else:
         now_value = last.last.used_percentage + result.percent(since_last)
         rates = [result.percent(s) for s in rates_spend]
-        fc = forecast(window, now_value, last.last.used_percentage, rates, now, last.resets_at)
+        fc = forecast(
+            window,
+            now_value,
+            last.last.used_percentage,
+            rates,
+            now,
+            last.resets_at,
+            factor=result.rate_factor,
+            line=_line(last) if result.rough else None,
+        )
+        fc.readings, fc.rough = result.readings, result.rough
 
     shown_views: list[SegmentView] = []
     for seg, d in zip(views, per_project, strict=True):

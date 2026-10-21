@@ -239,7 +239,8 @@ counts every matching session, temporary folders included (`temporary` of them).
  totals, active_seconds,
  calibration: {claude_code_usd, capcom_usd, spread, comparable, reasons, reason_labels,
                part: {since, until, first, last, process, processes, whole_session, text},
-               session_usd, note} | null,
+               session_usd, outside_usd, output_above_usd, output_range, unlogged_usd,
+               unlogged_text, logged_more_usd, logged_more_text, rest_usd, note} | null,
  requests: {t, agent, context, usd, output, cache_write, estimated},   # columns, time order
  thinned: {requests, kept, spikes} | null,
  main: {first, last, requests, usd, tool_calls, peak_context} | null,
@@ -266,19 +267,24 @@ that fit, a thread with at least a run's worth of requests in runs of its own (t
 main thread keeps its line) and the smaller threads' requests together. The
 session's first and last request stay. Totals, `main`, `agents` and
 `pauses` count every request. `reason_labels` are the `reasons` in words (the ids
-come from `capcom.cost.calibrate`). Claude Code's cost-state counts one process: `part`
-is the stretch of the session it compares, from the process start (`since`) to the
-first record after the cost-state (`until`, null while open), with its first and
-last request; `process` of `processes` numbers it among the session's processes
-(null without a start time): the starts the cost-states record, plus one process
-for requests before the first recorded start and one for requests after this
-cost-state's window (a process that has written none yet), so `processes` is a
-lower bound. `whole_session` is false when the session has requests outside the
-part (resumed before, or running on after). `capcom_usd` is that part;
-`session_usd` is every request, as `totals.usd`; `note` says so in one line when
-they differ ("Claude Code's cost-state counts only process 2 of 3 (from ...)", with
-"later requests not in it" when the session ran on after it), else null.
-`capcom calibrate` prints the same part per session (`--days`, `--project`). A session whose replies are all placeholders has
+come from `capcom.cost.calibrate`). Claude Code's cost-state counts the processes
+that wrote one, step by step (a resumed process carries the totals on, and the growth
+of `totalDuration` dates its step): `part` is the stretch of the session they compare,
+from the first step's start (`since`) to the last step's end (`until`, null while
+open), with its first and last request; `process` is the number of steps compared
+and `processes` adds one per gap between steps (or before the first, after the last)
+that holds requests, each counted as one process that wrote no cost-state (or has
+not yet). `whole_session` is false
+when the session has requests outside the steps. `capcom_usd` is the compared part;
+`session_usd` is every request, as `totals.usd`; `outside_usd` the spend in no step
+(capcom right, never a mismatch). `output_above_usd` is cost-state's output above
+capcom's estimate, priced, where capcom estimated output, and `output_range` says
+"≥ $X, up to $Y" (null when there is none); `unlogged_usd` prices cost-state's other
+tokens above the log's (calls the log does not record), `unlogged_text` names them,
+`logged_more_usd` / `logged_more_text` the log's tokens above cost-state's, priced
+the same way (all three inferred from token counts), and `rest_usd` is what is left
+unexplained. `note` says all of it in a few short
+sentences, else null. `capcom calibrate` prints the same part per session (`--days`, `--project`). A session whose replies are all placeholders has
 0 active seconds. A session is
 `running` when it wrote within the last 10 minutes.
 
@@ -343,17 +349,19 @@ The reply's cache key also holds the size and modification time of `limits.jsonl
 since the recorder writes it without a scan.
 
 ```
-Limits = {available, recording, message, install, samples, last_sample, days,
+Limits = {available, recording, message, install, samples, last_sample, recording_since, days,
           windows: {five_hour: Window | null, seven_day: Window | null}}
 Window = {window, label, samples, current,
           reading: {percent, time, resets_at, source} | null,
-          fit: {method, note, percent_per_usd, intervals, mean_abs_error, r2,
+          fit: {method, note, percent_per_usd, usd_per_percent, intervals, readings, rough,
+                rate_factor, mean_abs_error, r2,
                 weights: [{model, category, percent_per_mtok}]} | null,
           forecast: {reading, now, median, low, high, resets_at, runs_out_at,
+                     runs_out_early, runs_out_late, rough, readings, rate_factor, line,
                      bucket_minutes, buckets, fan: [[ms, median, low, high]]} | null,
-          reason,                       # why there is no forecast ("not enough samples", ...)
+          reason,                       # why there is no forecast (it needs two readings, ...)
           history: [[ms, percent]],     # the current window's line, from its start at 0 %
-          start,
+          start, start_known,           # start_known: history's first point is the reset, not a reading
           segments: [{start, start_known, resets_at, peak, hit_limit, reset,
                       points: [[ms, percent]], usd,
                       by_project: [{project, usd, percent}] | null}]}   # newest first
@@ -365,10 +373,19 @@ text until then ("Not recording yet: run `capcom limits --install` to set it
 up."). A segment is one window between resets; within it the percentage only
 rises. `fit.method` is `per_type` (weights per model and token category, in percent
 per million tokens, by non-negative least squares) once there are enough intervals,
-else `per_usd` (one percent per API-equivalent dollar) and `note` says so; null with
-fewer than 2 intervals. `forecast` (current window only) is the median and the 10th
-to 90th percentile of the value at the reset, from the window's spend in buckets
-resampled over the time left; `runs_out_at` is when the median path reaches 100 %.
+else `per_usd` (one percent per API-equivalent dollar); `note` says it in plain words
+("About $17 of API-equivalent spend per 1% of your weekly limit, from 4 rises
+(rough)."); null before two readings with a rise between them. `rate_factor` is the
+fit's 80 % range on its rate (divided to multiplied by it): a t-interval on the rises'
+residuals pooled with a wide prior (2.5 from a single rise), narrowing as rises come;
+`rough` is fewer than 6 rises. `forecast` (current window only, from the second
+reading on) is the median and the 10th to 90th percentile of the value at the reset,
+from the window's spend in buckets resampled over the time left, each draw with its
+own rate from `rate_factor`; when `rough`, the range also covers the straight line of
+percent against time through the window's readings (`line` says it widened it).
+`runs_out_at` is when the median path reaches 100 %, `runs_out_early` and
+`runs_out_late` the range's ends (null: never before the reset).
+`recording_since` is the first status line sample's time.
 `by_project` (the last 8 segments; up to 6 projects plus `(other)`) is what the
 index's requests spent in the segment, and their fitted percent (null without a fit).
 Usage from other machines or claude.ai counts toward the limits but is not in the

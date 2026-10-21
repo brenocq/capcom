@@ -101,16 +101,18 @@ function calibration(c, t) {
   const reasons = c.reason_labels || c.reasons;
   const why = c.comparable ? '' : ` The two cannot be compared exactly because of ${reasons.length ? joinAnd(reasons) : 'calls the logs lack'}.`;
   const est = estimateNote(t);
+  // Where Claude Code counted more output than capcom estimated: "≥ $X, up to $Y".
+  const mine = c.output_range || usd(c.capcom_usd);
   return h('section.card.banner', null, mark,
-    h('span.msg', null, h('strong', { text: lead }), ` Claude Code's own estimate ${c.part && !c.part.whole_session ? `for ${partWords(c.part)}` : 'for this session'} is ${usd(c.claude_code_usd)}; capcom's, over the same window of the logs, is ${usd(c.capcom_usd)}${apart}.${why}${est ? ' ' + est + '.' : ''}`,
+    h('span.msg', null, h('strong', { text: lead }), ` Claude Code's own estimate ${c.part && !c.part.whole_session ? `for ${partWords(c.part)}` : 'for this session'} is ${usd(c.claude_code_usd)}; capcom's, over the same window of the logs, is ${mine}${apart}.${why}${est ? ' ' + est + '.' : ''}`,
       c.note ? h('span.note.block', { text: c.note }) : null),
-    h('div.vals', null, h('span', null, 'Claude Code', h('b', { text: usd(c.claude_code_usd) })), h('span', null, 'capcom', h('b', { text: usd(c.capcom_usd) }))));
+    h('div.vals', null, h('span', null, 'Claude Code', h('b', { text: usd(c.claude_code_usd) })), h('span', null, 'capcom', h('b', { text: mine }))));
 }
 
-// "process 2 of 3 (Oct 16 10:02 to Oct 21 14:10)", or "one process (...)"
+// "2 of 3 processes (Oct 16 10:02 to Oct 21 14:10)", or "one process (...)"
 function partWords(p) {
   const span = p.text.split(', ')[0];
-  return p.process && p.processes > 1 ? `process ${p.process} of ${p.processes} (${span})` : `one process (${span})`;
+  return p.processes > 1 ? `${p.process || 0} of ${p.processes} processes (${span})` : `one process (${span})`;
 }
 
 function unfolded(d) {

@@ -101,7 +101,7 @@ export function outputUsd(totals) {
 export function estimateNote(totals) {
   const est = totals.estimated_output;
   if (!est.requests) return null;
-  return `Output and the totals that include it are lower bounds (≥): ${pct(est.share, est.share < 0.1 ? 1 : 0)} of output tokens estimated from content length (${est.requests} request${est.requests === 1 ? "" : "s"})`;
+  return `Output and the totals that include it are lower bounds (≥): ${pct(est.share, est.share < 0.1 ? 1 : 0)} of output tokens estimated from content length (${est.requests} request${est.requests === 1 ? "" : "s"}); the true output can be higher than this estimate`;
 }
 
 export const SERIES = ['var(--s1)', 'var(--s2)', 'var(--s3)', 'var(--s4)', 'var(--s5)', 'var(--s6)'];
@@ -189,10 +189,12 @@ export function errorBox(err) {
 }
 
 // A segmented control: options [[value, label]], onPick(value).
+// options: [value, text, why it is off (optional: the button is shown disabled with it as tooltip)]
 export function seg(label, options, current, onPick) {
   return h('div.seg', { role: 'group', 'aria-label': label },
-    options.map(([v, text]) => h('button', {
-      type: 'button', 'aria-pressed': String(String(v) === String(current)), onclick: () => onPick(v),
+    options.map(([v, text, off]) => h('button', {
+      type: 'button', 'aria-pressed': String(String(v) === String(current)), onclick: off ? null : () => onPick(v),
+      'aria-disabled': off ? 'true' : null, title: off || null,
     }, text)));
 }
 

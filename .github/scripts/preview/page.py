@@ -40,6 +40,11 @@ th { font-weight: 600; }
 tr:nth-child(2n) td { background: var(--code); }
 img { max-width: 100%; }
 p, details { margin: 0 0 16px; }
+.alert { margin: 0 0 16px; padding: 8px 16px; border-left: .25em solid var(--alert); }
+.alert > p { margin: 0; }
+.alert > p.t { color: var(--alert); font-weight: 500; margin-bottom: 4px; }
+.alert.note { --alert: #0969da; } .alert.tip { --alert: #1a7f37; } .alert.warning { --alert: #9a6700; }
+@media (prefers-color-scheme: dark) { .alert.note { --alert: #4493f8; } .alert.tip { --alert: #3fb950; } .alert.warning { --alert: #d29922; } }
 """
 
 
@@ -76,6 +81,23 @@ def render(md: str) -> str:
                 j += 1
             out.append(f"<pre><code>{escape(chr(10).join(lines[i + 1 : j]))}</code></pre>")
             i = j + 1
+            continue
+        if line.startswith(">"):
+            # a GitHub alert (> [!TIP]) or a plain quote, to its last "> " line
+            flush()
+            quote = []
+            while i < len(lines) and lines[i].startswith(">"):
+                quote.append(lines[i][1:].strip())
+                i += 1
+            kind = re.fullmatch(r"\[!(\w+)\]", quote[0])
+            body = inline(" ".join(quote[1:] if kind else quote))
+            if kind:
+                name = kind[1].lower()
+                out.append(
+                    f'<div class="alert {name}"><p class="t">{name.title()}</p><p>{body}</p></div>'
+                )
+            else:
+                out.append(f"<blockquote><p>{body}</p></blockquote>")
             continue
         if line.startswith("## "):
             flush()
