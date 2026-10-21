@@ -171,6 +171,37 @@ def _bool(value: object) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
+def _rate_limit(rec: dict[str, Any]) -> dict[str, Any]:
+    """`rate_limit_type` (the window, as logged: `five_hour`, `seven_day`, ...) and
+    `resets_at` (epoch seconds) of an API error record, when it carries them: in
+    `quotaLimits` or `apiErrorParams.rate_limit_info` (assistant error replies), else
+    on the record, its `error` object, or a `rateLimits` object in either."""
+    err = _dict(rec.get("error"))
+    places = [
+        _dict(rec.get("quotaLimits")),  # assistant error replies
+        _dict(_dict(rec.get("apiErrorParams")).get("rate_limit_info")),
+        rec,
+        err,
+        _dict(rec.get("rateLimits")),
+        _dict(err.get("rateLimits")),
+    ]
+    out: dict[str, Any] = {}
+    for d in places:
+        kind = d.get("rateLimitType") or d.get("rate_limit_type") or d.get("kind")
+        if "rate_limit_type" not in out and (name := _str(kind, 32)) is not None:
+            out["rate_limit_type"] = name
+        when = d.get("resetsAt", d.get("resets_at"))
+        if "resets_at" not in out and when is not None:
+            epoch: float | None = None
+            if isinstance(when, int | float) and not isinstance(when, bool):
+                epoch = when / 1000 if 1e11 <= when < 1e14 else float(when)  # ms, by mistake
+            elif (t := _ts(when)) is not None:
+                epoch = t.timestamp()
+            if epoch is not None and 0 < epoch < 1e11:
+                out["resets_at"] = epoch
+    return out
+
+
 def _dict(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -570,6 +601,7 @@ class _Parser:
                     "status": status,
                     "error": label if isinstance(label, str) and len(label) <= 64 else None,
                     "source": "assistant",
+                    **_rate_limit(rec),
                 },
             )
         t = _ts(rec.get("timestamp")) or self.last_ts
@@ -775,6 +807,7 @@ class _Parser:
                     "error": label or "api_error",
                     "retry_attempt": _opt_int(rec.get("retryAttempt")),
                     "source": "system",
+                    **_rate_limit(rec),
                 },
             )
 
