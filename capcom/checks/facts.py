@@ -60,7 +60,6 @@ ThreadKey = tuple[str, str | None]  # (session_id, agent_id)
 # Item families. ("tool", family, name): a tool in a listing; ("mcp", server):
 # an MCP server's instructions; ("skill", name); ("memory", source, paths);
 # ("image", event_key, tool); ("report", event_key, tool_use_id).
-_SET_FAMILIES = {"api-request-shape": "shape", "deferred_tools_record": "record"}
 # Items in the system prompt or tool list survive a compaction; the rest ride in the
 # message history and are summarized away (attachments are sent again after it).
 _SURVIVES_COMPACTION = {("tool", "shape"), ("tool", "record")}
@@ -96,6 +95,7 @@ class Thread:
     last: datetime | None = None
     last_model: str | None = None
     items: dict[ItemKey, _Open] = field(default_factory=dict)
+    shape_tools: frozenset[str] = frozenset()  # the current shape's loaded tools
 
 
 @dataclass(slots=True)
@@ -318,18 +318,27 @@ class _Pass:
         names = _names(attrs.get("names"))
         added = _names(attrs.get("added"))
         removed = _names(attrs.get("removed"))
-        if source in _SET_FAMILIES:
-            family = _SET_FAMILIES[str(source)]
+        if source == "api-request-shape":
+            # Deferred tools ride by name only (deferred_tools_delta prices them);
+            # the loaded tools share tools_size_tokens, the size of their schemas.
+            deferred = set(_names(attrs.get("deferred_names")))
+            loaded = [n for n in names if n not in deferred]
             per = 0
-            if names:
-                if family == "shape":
-                    tools_size = _int(attrs.get("tools_size_tokens"))
-                    total = tools_size or size * SHAPE_TOOLS_SHARE
-                    per = round(total / len(names))
-                    self.f.shape_tool_tokens.append(total / len(names))
-                else:
-                    per = round(size / len(names))
-            self.replace_family(t, ("tool", family), {("tool", family, n): per for n in names})
+            if loaded:
+                tools_size = _int(attrs.get("tools_size_tokens"))
+                total = tools_size or size * SHAPE_TOOLS_SHARE
+                per = round(total / len(loaded))
+                self.f.shape_tool_tokens.append(total / len(loaded))
+            t.shape_tools = frozenset(loaded)
+            for n in loaded:  # a tool now in the shape is no longer counted as a record
+                self.close(t, ("tool", "record", n))
+            self.replace_family(t, ("tool", "shape"), {("tool", "shape", n): per for n in loaded})
+        elif source == "deferred_tools_record":
+            per = round(size / len(names)) if names else 0
+            fresh: dict[ItemKey, int] = {
+                ("tool", "record", n): per for n in names if n not in t.shape_tools
+            }
+            self.replace_family(t, ("tool", "record"), fresh)
         elif source == "deferred_tools_delta":
             per = round(size / len(added)) if added else 0
             for n in removed:

@@ -237,6 +237,25 @@ def test_read_tools_takes_inline_and_block_lists(tmp_path: Path) -> None:
     assert sorted(defs) == ["a", "b", "c", "d"]
 
 
+def test_definitions_are_keyed_by_their_frontmatter_name(tmp_path: Path) -> None:
+    (tmp_path / "file-stem.md").write_text("---\nname: 'reviewer'\ntools: Read\n---\n")
+    (tmp_path / "plain.md").write_text("---\ntools: Bash\n---\n")
+    defs = find_definitions([tmp_path])
+    assert sorted(defs) == ["plain", "reviewer"]
+    assert defs["reviewer"].path == tmp_path / "file-stem.md"
+    assert defs["reviewer"].tools == ("Read",)
+
+
+def test_a_long_line_is_cut_and_its_rest_not_read_as_a_line(tmp_path: Path) -> None:
+    long = tmp_path / "long.md"
+    # the rest of the long line would read as a `tools:` line if it were not skipped
+    long.write_text("---\ndescription: " + "x" * 5000 + "tools: Write\ntools: Read\n---\n")
+    assert read_tools(long) == ("Read",)
+    runaway = tmp_path / "runaway.md"
+    runaway.write_text("---\ntools: Read\nnote: " + "y" * (3 << 20) + "\ntools: Bash\n---\n")
+    assert read_tools(runaway) == ("Read",)
+
+
 # --------------------------------------------------------------------------- the terminal view
 
 

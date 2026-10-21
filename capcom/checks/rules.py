@@ -17,9 +17,11 @@ meant to be added up.
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 from capcom.checks.agents import AgentDefinition
 from capcom.checks.facts import (
@@ -194,8 +196,25 @@ def claudeai_connectors_unused(facts: Facts) -> list[Finding]:
             f"session{'s' if len(unused) != 1 else ''} that never called them, "
             f"about {_k(tokens)} tokens in each prompt."
         )
+        local = _where(facts, project, ".claude/settings.local.json")
+        change: str | None = None
         if using:
             summary += f" {len(using)} other session(s) in this project did call them."
+            shown = ", ".join(sorted(sid[:8] for sid in using)[:EVIDENCE_PER_FINDING])
+            more = ", ..." if len(using) > EVIDENCE_PER_FINDING else ""
+            advice = (
+                f"Sessions {shown}{more} of this project call the claude.ai connectors, "
+                "so turning them off here would break that work. Start the sessions that "
+                "do not need them with ENABLE_CLAUDEAI_MCP_SERVERS=false in the "
+                "environment, or move the connector work to its own project."
+            )
+        else:
+            advice = (
+                "Turn the claude.ai connectors off for this project; they stay "
+                "available in claude.ai and in the projects that use them. "
+                f"In {local} (yours only, not shared with the repo):"
+            )
+            change = _settings_change({"env": {"ENABLE_CLAUDEAI_MCP_SERVERS": "false"}})
         f = _finding(
             facts,
             usd,
@@ -203,12 +222,8 @@ def claudeai_connectors_unused(facts: Facts) -> list[Finding]:
             title="claude.ai connectors in sessions that never use them",
             scope=project,
             summary=summary,
-            advice=(
-                "Turn the claude.ai connectors off for this project; they stay "
-                "available in claude.ai and in the projects that use them. "
-                f"In {_where(facts, project, '.claude/settings.json')}:"
-            ),
-            change=_settings_change({"env": {"ENABLE_CLAUDEAI_MCP_SERVERS": "false"}}),
+            advice=advice,
+            change=change,
             evidence=tuple(
                 Evidence(
                     f"session {sid[:8]}: {s.requests} requests carried them, {_usd(s.usd)}",
@@ -322,7 +337,11 @@ def _skill_used(name: str, invoked: set[str]) -> bool:
 def skills_unused(facts: Facts) -> list[Finding]:
     """Skills in a project's skill listing that were never invoked there (neither by
     the Skill tool nor by a slash command). Saving: each unused skill's share of the
-    listing x the requests that carried it x each request's prompt price."""
+    listing x the requests that carried it x each request's prompt price.
+
+    The change (`disable-model-invocation: true` in SKILL.md) applies wherever the
+    skill is listed, so it is offered only for skills no project invoked in the
+    window; a skill invoked elsewhere is advised to move to those projects instead."""
     listed: dict[str, dict[str, _Sum]] = defaultdict(dict)
     for sid, aid, key, acc in _accounts(facts, lambda k: k[0] == "skill"):
         listed[_group(facts.project_of(sid))].setdefault(key[1], _Sum()).add(sid, aid, acc)
@@ -334,10 +353,32 @@ def skills_unused(facts: Facts) -> list[Finding]:
         unused = {n: s for n, s in skills.items() if not _skill_used(n, invoked[project])}
         if not unused:
             continue
+        elsewhere = {
+            n: sorted(p for p, used in invoked.items() if p != project and _skill_used(n, used))
+            for n in unused
+        }
+        nowhere = sorted(n for n in unused if not elsewhere[n])
+        moved = sorted(n for n in unused if elsewhere[n])
         usd = sum(s.usd for s in unused.values())
         tokens = sum(s.size for s in unused.values())
         names = sorted(unused, key=lambda n: -unused[n].usd)
         shown = ", ".join(names[:8]) + (", ..." if len(names) > 8 else "")
+        parts: list[str] = []
+        if moved:
+            where = sorted({p for n in moved for p in elsewhere[n]})
+            parts.append(
+                f"{_list_names(moved, 4)} {'is' if len(moved) == 1 else 'are'} used in other "
+                f"projects ({_list_names(where, 3)}): move {'it' if len(moved) == 1 else 'them'} "
+                "from ~/.claude/skills into those projects' .claude/skills (for a plugin's "
+                "skill, enable the plugin only there) instead of disabling it."
+            )
+        if nowhere:
+            parts.append(
+                f"No project invoked {_list_names(nowhere, 4)}: add the line below to "
+                f"{'its' if len(nowhere) == 1 else 'each'} SKILL.md frontmatter to keep it out "
+                "of the listing everywhere (it stays callable as a slash command), or "
+                "disable the plugin that brings it."
+            )
         f = _finding(
             facts,
             usd,
@@ -348,26 +389,29 @@ def skills_unused(facts: Facts) -> list[Finding]:
                 f"{len(unused)} of {len(skills)} listed skills were never invoked here "
                 f"({shown}); their listing is about {_k(tokens)} tokens in every request."
             ),
-            advice=(
-                "Keep a skill out of the listing where it is not used: add the line below "
-                "to its SKILL.md frontmatter (it stays callable as a slash command), move "
-                "it from ~/.claude/skills into the projects that use it, or disable the "
-                "plugin that brings it."
-            ),
-            change="disable-model-invocation: true",
+            advice=" ".join(parts),
+            change="disable-model-invocation: true" if nowhere else None,
             evidence=tuple(
-                Evidence(f"skill {n}: {_k(unused[n].size)} tokens, {_usd(unused[n].usd)}")
+                Evidence(
+                    f"skill {n}: {_k(unused[n].size)} tokens, {_usd(unused[n].usd)}"
+                    + (f"; used in {_list_names(elsewhere[n], 2)}" if elsewhere[n] else "")
+                )
                 for n in names[:EVIDENCE_PER_FINDING]
             ),
             metrics={
                 "skills_listed": len(skills),
                 "skills_invoked": len(skills) - len(unused),
+                "skills_used_elsewhere": len(moved),
                 "tokens_unused": tokens,
             },
         )
         if f:
             out.append(f)
     return out
+
+
+def _list_names(names: list[str], limit: int = 6) -> str:
+    return ", ".join(names[:limit]) + (", ..." if len(names) > limit else "")
 
 
 # --------------------------------------------------------------------------- agents
@@ -381,15 +425,47 @@ def _agent_threads(facts: Facts) -> dict[str, list[Thread]]:
     return out
 
 
+_PLAIN_TOOL = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _canon(tool: str) -> str:
+    """Task is the Agent tool's older name."""
+    return "Agent" if tool == "Task" else tool
+
+
+def _entry_matches(entry: str, tool: str) -> bool:
+    """Whether a `tools:` entry covers a tool name: the same tool (Task and Agent
+    alike), or a whole MCP server (`mcp__<server>`) covering its tools."""
+    e, t = _canon(entry), _canon(tool)
+    if e == t:
+        return True
+    return e.startswith("mcp__") and len(e.split("__")) == 2 and t.startswith(e + "__")
+
+
+def _entry_used(entry: str, called: set[str]) -> bool | None:
+    """True or False for a plain entry; None for one this check cannot read (a
+    permission pattern such as `Bash(git *)`, a wildcard), which is always kept."""
+    if not _PLAIN_TOOL.match(entry):
+        return None
+    return any(_entry_matches(entry, c) for c in called)
+
+
 def agent_tools_unused(facts: Facts, definitions: Mapping[str, AgentDefinition]) -> list[Finding]:
-    """A custom agent type whose spawns never call some of the tools it is given
-    (its definition's `tools:` line, or the tools listed in its requests when the
-    definition gives it every tool). Saving: the unused tools' listed sizes x the
-    agent's requests x each request's prompt price; for tools no listing sized, the
-    median tool size seen in request shapes."""
+    """A custom agent type whose spawns never call some of the tools its definition
+    gives it (its `tools:` line, or the tools listed in its requests when the line
+    gives it every tool). Saving: the unused tools' listed sizes x the agent's
+    requests x each request's prompt price; for tools no listing sized, the median
+    tool size seen in request shapes.
+
+    An agent type with no definition file (a plugin's agent, or one Claude Code
+    makes itself, such as its workflow agent) is skipped: there is no file to change.
+    The pasted line keeps every entry used or not understood, in the file's order."""
     out: list[Finding] = []
     for kind, threads in _agent_threads(facts).items():
         if kind in BUILT_IN_AGENTS or kind.startswith("(") or len(threads) < MIN_AGENTS:
+            continue
+        definition = definitions.get(kind)
+        if definition is None:
             continue
         infos = [facts.agents.get(t.agent_id or "") for t in threads]
         if any(i is not None and i.is_built_in for i in infos):
@@ -398,20 +474,30 @@ def agent_tools_unused(facts: Facts, definitions: Mapping[str, AgentDefinition])
         called: set[str] = set()
         for k in keys:
             called |= facts.calls_by_thread.get(k, set())
+        if not called:
+            continue
         sized: dict[str, _Sum] = {}
         for sid, aid, key, acc in _accounts(facts, lambda k: k[0] == "tool"):
             if (sid, aid) in keys:
                 sized.setdefault(key[2], _Sum()).add(sid, aid, acc)
-        definition = definitions.get(kind)
-        given = set(definition.tools) if definition and definition.tools else set(sized)
-        unused = sorted(given - called)
-        if not unused or not called:
+        if definition.tools:
+            given = list(dict.fromkeys(definition.tools))
+            used = {e: _entry_used(e, called) for e in given}
+            unused = [e for e in given if used[e] is False]
+            keep = [e for e in given if used[e] is not False]
+        else:
+            given = sorted(sized)
+            unused = [n for n in given if not any(_entry_matches(n, c) for c in called)]
+            keep = sorted(called)
+        if not unused:
             continue
+        n_used = len(given) - len(unused)
         rate_sum = sum(t.rate_sum for t in threads)
         estimate = facts.tool_token_estimate()
-        usd = sum(sized[n].usd if n in sized else estimate * rate_sum for n in unused)
-        keep = sorted(called & given) if definition and definition.tools else sorted(called)
-        path = str(definition.path) if definition else f".claude/agents/{kind}.md"
+        usd = 0.0
+        for e in unused:
+            priced = [v.usd for n, v in sized.items() if _entry_matches(e, n)]
+            usd += sum(priced) if priced else estimate * rate_sum
         f = _finding(
             facts,
             usd,
@@ -419,17 +505,17 @@ def agent_tools_unused(facts: Facts, definitions: Mapping[str, AgentDefinition])
             title=f"The {kind} agent carries tools it never uses",
             scope=kind,
             summary=(
-                f"Across {len(threads)} {kind} spawns it called {len(called & given)} of "
+                f"Across {len(threads)} {kind} spawns it used {n_used} of the "
                 f"{len(given)} tools it is given; the other {len(unused)} rode in "
                 f"each of its {sum(t.requests for t in threads):,} requests."
             ),
-            advice=f"In {path}, list only the tools it uses:",
+            advice=f"In {definition.path}, list only the tools it uses:",
             change=f"tools: {', '.join(keep)}",
             evidence=tuple(Evidence(f"never called: {n}") for n in unused[:EVIDENCE_PER_FINDING]),
             metrics={
                 "spawns": len(threads),
                 "tools_given": len(given),
-                "tools_called": len(called & given),
+                "tools_called": n_used,
                 "requests": sum(t.requests for t in threads),
             },
         )
@@ -549,10 +635,74 @@ def long_subagent_reports(facts: Facts) -> list[Finding]:
 # --------------------------------------------------------------------------- memory
 
 
+_WORKTREES = "/.worktrees/"
+# Branch name prefixes that hold a slash (`feat/x` lands in .worktrees/feat/x/).
+_BRANCH_PREFIXES = frozenset(
+    {
+        "feat",
+        "fix",
+        "chore",
+        "docs",
+        "doc",
+        "refactor",
+        "test",
+        "tests",
+        "perf",
+        "build",
+        "ci",
+        "style",
+        "release",
+        "hotfix",
+        "bugfix",
+        "feature",
+        "exp",
+        "wip",
+        "dev",
+    }
+)
+
+
+def _strip_worktree(path: str) -> str:
+    """`<repo>/.worktrees/<branch>/<rel>` as `<repo>/<rel>`: a worktree's copy of a
+    file is the same file. The branch ends at the first folder holding a `.git`
+    entry, or else after one folder (two after a prefix such as `feat/`)."""
+    i = path.find(_WORKTREES)
+    if i < 0:
+        return path
+    root, rest = path[:i], path[i + len(_WORKTREES) :]
+    parts = rest.split("/")
+    if len(parts) < 2:
+        return path
+    cut = 0
+    for n in range(1, len(parts)):
+        try:
+            if (Path(root, ".worktrees", *parts[:n]) / ".git").exists():
+                cut = n
+                break
+        except OSError:
+            break
+    if not cut:
+        cut = 2 if parts[0] in _BRANCH_PREFIXES and len(parts) > 2 else 1
+    return "/".join([root, *parts[cut:]])
+
+
+def _repo_path(path: str, root: str | None) -> str:
+    """A memory file's path, relative to the repo root when it is inside it, with
+    worktree copies folded into the main checkout's path."""
+    full = _strip_worktree(path)
+    if root and full.startswith(root + "/"):
+        return full[len(root) + 1 :]
+    return full
+
+
 def large_memory(facts: Facts) -> list[Finding]:
     """Always-loaded instructions and memory files (CLAUDE.md and the files it
     imports, nested memory) above MEMORY_BUDGET_TOKENS per file. Saving: the part
-    above the budget x the requests that carried it x each request's prompt price."""
+    above the budget x the requests that carried it x each request's prompt price.
+
+    Paths are shown relative to the repo root, and a worktree's copy of a file counts
+    as the file itself; one instructions attachment counts once, however many files
+    it holds."""
     per_project: dict[str, dict[str, _Sum]] = defaultdict(dict)
     carried: dict[str, _Sum] = defaultdict(_Sum)  # every memory item, per project
     token_requests: dict[str, int] = defaultdict(int)
@@ -573,7 +723,14 @@ def large_memory(facts: Facts) -> list[Finding]:
         usd = sum(s.usd * (s.size - b) / s.size for _, s, b in over)
         reqs = carried[project].requests
         total = round(token_requests[project] / reqs) if reqs else 0
-        paths = sorted({p for label, _, _ in over for p in label.split("|")})
+        cwd = facts.cwd_of(project)
+        root = _strip_worktree(cwd) if cwd else None
+        shown: dict[str, list[tuple[_Sum, float]]] = defaultdict(list)
+        for label, s, b in over:
+            paths = dict.fromkeys(_repo_path(p, root) for p in label.split("|"))
+            shown[", ".join(paths)].append((s, s.usd * (s.size - b) / s.size))
+        ranked = sorted(shown.items(), key=lambda kv: -sum(u for _, u in kv[1]))
+        n = len(shown)
         f = _finding(
             facts,
             usd,
@@ -582,8 +739,9 @@ def large_memory(facts: Facts) -> list[Finding]:
             scope=project,
             summary=(
                 f"Instructions and memory average about {_k(total)} tokens in each of "
-                f"{_k(reqs)} requests here; {len(paths)} file(s) are above the "
-                f"{_k(MEMORY_BUDGET_TOKENS)}-token (about 150-line) budget."
+                f"{_k(reqs)} requests here; {n} always-loaded attachment{'s' if n != 1 else ''} "
+                f"{'are' if n != 1 else 'is'} above the {_k(MEMORY_BUDGET_TOKENS)}-token "
+                "(about 150-line) budget per file."
             ),
             advice=(
                 "Move detail into docs/ files that are read when needed, and keep the "
@@ -591,15 +749,16 @@ def large_memory(facts: Facts) -> list[Finding]:
             ),
             evidence=tuple(
                 Evidence(
-                    f"{label.replace('|', ', ')}: {_k(s.size)} tokens, "
-                    f"{_k(s.requests)} requests, {_usd(s.usd)}"
+                    f"{label}: {_k(max(s.size for s, _ in items))} tokens, "
+                    f"{_k(sum(s.requests for s, _ in items))} requests, "
+                    f"{_usd(sum(s.usd for s, _ in items))}"
                 )
-                for label, s, _ in sorted(over, key=lambda o: -o[1].usd)[:EVIDENCE_PER_FINDING]
+                for label, items in ranked[:EVIDENCE_PER_FINDING]
             ),
             metrics={
                 "tokens": total,
                 "budget_tokens": MEMORY_BUDGET_TOKENS,
-                "files_over": len(paths),
+                "files_over": n,
             },
         )
         if f:
@@ -842,4 +1001,36 @@ def all_findings(facts: Facts, definitions: Mapping[str, AgentDefinition]) -> li
         found.extend(check(facts))
     found.extend(agent_tools_unused(facts, definitions))
     found.sort(key=lambda f: (-f.saving_usd_per_week, f.kind, f.scope))
-    return found
+    present = {f.kind for f in found}
+    return [replace(f, metrics={**f.metrics, "overlaps": overlaps(f.kind, present)}) for f in found]
+
+
+# Items carried in prompts: their cost includes the cache rewrites and the long
+# contexts they are part of, so those findings may count the same dollars.
+_PROMPT_ITEMS = (
+    "claudeai_connectors_unused",
+    "mcp_servers_unused",
+    "skills_unused",
+    "large_memory",
+    "agent_tools_unused",
+    "long_subagent_reports",
+    "images_in_tool_results",
+)
+_CONTEXT = ("long_running_agents", "late_compactions", "idle_cache_rewrites", "model_switches")
+_OVERLAP_PAIRS: frozenset[frozenset[str]] = frozenset(
+    {frozenset({a, b}) for a in _PROMPT_ITEMS for b in _CONTEXT}
+    | {frozenset({"idle_cache_rewrites", "long_running_agents"})}
+    | {frozenset({"model_switches", "long_running_agents"})}
+    | {frozenset({"agent_tools_unused", b}) for b in _PROMPT_ITEMS[:3]}
+    | {frozenset({"one_command_subagents", b}) for b in (*_PROMPT_ITEMS, *_CONTEXT)}
+)
+
+
+def overlaps(kind: str, present: Iterable[str] | None = None) -> tuple[str, ...]:
+    """The finding kinds whose savings may count some of the same dollars as
+    `kind`'s (limited to `present` when given): such savings are each an "up to"
+    and are not to be added up."""
+    others = {k for pair in _OVERLAP_PAIRS if kind in pair for k in pair if k != kind}
+    if present is not None:
+        others &= set(present)
+    return tuple(sorted(others))
