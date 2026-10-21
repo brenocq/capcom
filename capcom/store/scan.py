@@ -10,7 +10,15 @@ called at the current offset so it emits the agent's facts again. Each batch is
 stored with the file's new offset in one transaction, so an interrupted scan resumes
 where it stopped. Files Claude Code deleted keep their rows: the index is the history.
 
-The logs are only opened for reading: by the source, and here to hash a file's head.
+OpenClaw's database (`LogKind.OPENCLAW_DB`) changes in place, and in WAL mode its
+size and mtime say nothing about new rows: it is read on every scan from the stored
+rowid, with no head hash and no size checks. When its highest rowid is below the
+cursor (the table was rebuilt) or its inode changed, it is read again from 0 without
+dropping its rows: each reply's id is unique, so rows upsert, and replies OpenClaw
+pruned stay.
+
+`run_scan` scans the Claude Code projects folder, then the OpenClaw state dir.
+The logs are only opened for reading: by the sources, and here to hash a file's head.
 """
 
 from __future__ import annotations
@@ -19,12 +27,13 @@ import hashlib
 import importlib
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import TextIO
+from typing import Protocol, TextIO, runtime_checkable
 
 from capcom.config import Config
 from capcom.store.index import FileExtra, SqliteIndex, check_index_path, open_index
-from capcom.types import Batch, FileState, LogFile, ScanStats, Source
+from capcom.types import Batch, FileState, LogFile, LogKind, ScanStats, Source
 
 HEAD_BYTES = 4096  # the head hashed to catch in-place rewrites
 _PROGRESS_EVERY_S = 0.25
@@ -66,11 +75,26 @@ class _Progress:
             self.out.write(f"{lead}capcom scan: failed on {log.path}: {what}\n")
 
 
+@runtime_checkable
+class RowSource(Protocol):
+    """A source of databases read by rowid (LogKind.OPENCLAW_DB)."""
+
+    def last_row(self, log: LogFile) -> int | None:
+        """The highest rowid now, or None when the database cannot be read."""
+        ...
+
+
 def _default_source() -> Source:
-    # The Claude Code adapter lives in capcom.sources; it is loaded by name when a scan
-    # starts, so the store neither imports nor type-checks against it at load time.
+    # The adapters live in capcom.sources; they are loaded by name when a scan starts,
+    # so the store neither imports nor type-checks against them at load time.
     module = importlib.import_module("capcom.sources.claude_code")
     source: Source = module.ClaudeCodeSource()
+    return source
+
+
+def _openclaw_source() -> Source:
+    module = importlib.import_module("capcom.sources.openclaw")
+    source: Source = module.OpenClawSource()
     return source
 
 
@@ -92,8 +116,44 @@ def _head_hash(path: Path, length: int) -> str | None:
     return hashlib.blake2b(data, digest_size=16).hexdigest()
 
 
+def scan_database(index: SqliteIndex, source: Source, log: LogFile, stats: ScanStats) -> None:
+    """Bring a database read by rowid up to date (FileState.offset is the last rowid
+    read). Updates `stats` in place."""
+    try:
+        st = log.path.stat()
+    except FileNotFoundError:
+        return
+    stats.files_seen += 1
+    state = index.file_state(log.path)
+    start = 0 if state is None else state.offset
+    if start > 0 and state is not None:
+        last = source.last_row(log) if isinstance(source, RowSource) else None
+        if st.st_ino != state.inode or (last is not None and last < start):
+            start = 0  # replaced or rebuilt: read it all again; rows upsert by id
+            stats.files_reset += 1
+    cursor = start
+    for batch in source.parse(log, start):
+        cursor = batch.end_offset
+        index.apply(log, batch, FileState(log.path, st.st_ino, st.st_size, st.st_mtime_ns, cursor))
+        stats.lines += batch.lines
+        stats.records += len(batch.records)
+        stats.skipped += batch.skipped
+    if state is None or cursor == start:
+        # Nothing new: remember the stat (and a reset cursor) all the same.
+        index.apply(
+            log,
+            Batch([], cursor),
+            FileState(log.path, st.st_ino, st.st_size, st.st_mtime_ns, cursor),
+        )
+    if cursor > start:
+        stats.files_read += 1
+
+
 def scan_file(index: SqliteIndex, source: Source, log: LogFile, stats: ScanStats) -> None:
     """Bring one file's rows up to date. Updates `stats` in place."""
+    if log.kind == LogKind.OPENCLAW_DB:
+        scan_database(index, source, log, stats)
+        return
     try:
         st = log.path.stat()
     except FileNotFoundError:
@@ -154,31 +214,51 @@ def scan_file(index: SqliteIndex, source: Source, log: LogFile, stats: ScanStats
 
 
 def scan_all(
-    index: SqliteIndex, source: Source, config: Config, progress: TextIO | None = None
+    index: SqliteIndex,
+    source: Source,
+    config: Config,
+    progress: TextIO | None = None,
+    extra: Sequence[tuple[Source, Path]] = (),
 ) -> ScanStats:
-    """Scan every log the source finds under `config.projects_dir` into `index`. A file
-    that fails is reported on `progress` and skipped; the scan goes on."""
+    """Scan every log the source finds under `config.projects_dir`, then every log each
+    `extra` source finds under its root, into `index`. A file that fails is reported
+    on `progress` and skipped; the scan goes on."""
     t0 = time.monotonic()
     stats = ScanStats()
-    logs = list(source.discover(config.projects_dir))
+    logs = [(source, log) for log in source.discover(config.projects_dir)]
+    for other, root in extra:
+        logs += [(other, log) for log in other.discover(root)]
     shown = _Progress(progress, len(logs))
-    for log in logs:
+    for src, log in logs:
         try:
-            scan_file(index, source, log, stats)
+            scan_file(index, src, log, stats)
         except Exception as exc:  # one bad file must not stop the scan: retried next time
             shown.error(log, exc)
             stats.files_failed += 1
         shown.update(stats)
     stats.seconds = time.monotonic() - t0
     shown.update(stats, force=True)
+    for other, _ in extra:
+        unread = getattr(other, "compressed_unread", 0)
+        if unread and progress is not None:
+            progress.write(
+                f"capcom scan: {unread} compressed OpenClaw rows left unread "
+                "(reading them needs Python 3.14's compression.zstd)\n"
+            )
     return stats
 
 
 def run_scan(config: Config, quiet: bool = False, source: Source | None = None) -> ScanStats:
-    """Scan the logs into the index at `config.index_path`. `source` defaults to the
-    Claude Code adapter; tests pass their own. An index path inside the log folders
-    raises ValueError."""
+    """Scan the logs into the index at `config.index_path`: Claude Code's projects
+    folder, then OpenClaw's databases under `config.openclaw_root`. A `source` (tests
+    pass their own) replaces both. An index path inside the log folders raises
+    ValueError."""
     check_index_path(config.index_path, (config.claude_root, config.openclaw_root))
-    src = _default_source() if source is None else source
+    extra: list[tuple[Source, Path]] = []
+    if source is None:
+        src = _default_source()
+        extra.append((_openclaw_source(), config.openclaw_root))
+    else:
+        src = source
     with open_index(config.index_path) as index:
-        return scan_all(index, src, config, None if quiet else sys.stderr)
+        return scan_all(index, src, config, None if quiet else sys.stderr, extra)
