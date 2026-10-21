@@ -282,3 +282,15 @@ button.copy { font: inherit; font-size: 12px; padding: 5px 12px; border-radius: 
 .minor .block { display: block; margin-top: 2px; }
 .minor details[open] .cbody { margin-top: 14px; }
 .save.small { font-size: 15px; }
+/* spike projects: a chip naming the project, the bars by project as filter buttons */
+.tag.proj { background: var(--sel); color: var(--text); font-weight: 500; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; font-family: inherit; line-height: inherit; }
+button.tag.proj { cursor: pointer; }
+.tag.proj.filter:hover { background: var(--l15); }
+.spikelist .meta, .spikerow .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
+.spikelist .meta .tag.proj, .spikerow .meta .tag.proj { padding: 1px 7px; font-size: 11px; }
+.causes.one { grid-template-columns: minmax(0, 1fr); }
+button.cause.pick { width: 100%; border: 0; background: transparent; font: inherit; color: var(--text); text-align: left; padding: 4px 6px; border-radius: 8px; cursor: pointer; box-sizing: border-box; }
+button.cause.pick:hover { background: var(--l07); }
+button.cause.pick[aria-pressed="true"] { background: var(--sel); }
+.cause .plabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 560px) { .cause { grid-template-columns: 110px minmax(0, 1fr) 64px; } }

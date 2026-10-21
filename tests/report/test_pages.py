@@ -455,3 +455,76 @@ def test_session_wide_spike_does_not_break_the_cap(
     assert data["thinned"]["kept"] <= 500 + 10
     assert data["spikes"]["items"][0]["scope"] == "session"
     assert marks[0]["scope"] == "session" and marks[0]["agent_id"] is None
+
+
+@pytest.fixture(scope="module")
+def two_projects(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """One session in alpha and one in beta, each with a few cheap turns."""
+    path = tmp_path_factory.mktemp("projects") / "index.sqlite"
+    start = NOW - timedelta(hours=2)
+    ix = open_index(path)
+    for sid, project, cwd in (("pa", ALPHA, "/home/user/alpha"), ("pb", BETA, "/home/user/beta")):
+        reqs = [req(sid, start + timedelta(minutes=i), project, output=100) for i in range(6)]
+        _put(ix, _log(project, sid), [SessionInfo(sid, project, cwd=cwd, title=sid), *reqs])
+    ix.close()
+    return path
+
+
+def _project_spikes(index: Index, table: PriceTable, *rest: Any) -> list[Spike]:
+    reqs = list(index.requests())
+    out = []
+    for sid, extra in (("pa", 3.0), ("pa", 1.0), ("pb", 2.0)):
+        r = next(
+            r
+            for r in reqs
+            if r.session_id == sid and not any(r.message_id in s.message_ids for s in out)
+        )
+        out.append(
+            Spike(
+                SpikeKind.SINGLE_REQUEST, r.timestamp, r.timestamp, cost_usd=extra + 0.5,
+                baseline_usd=0.5, session_id=sid, message_ids=(r.message_id,),
+            )
+        )  # fmt: skip
+    return out
+
+
+def test_spikes_by_project_and_filter(two_projects: Path) -> None:
+    """Every spike names its project; `by_project` adds their excess per project,
+    largest first; `?project=` keeps one project's spikes, causes and totals."""
+    analysis = Analysis(
+        capcom.timeline.cumulative, capcom.timeline.per_step, _project_spikes, explain_all,
+        fake_checks,
+    )  # fmt: skip
+    for client in _client(two_projects, analysis):
+        _, full, _ = client.get("/api/spikes?days=7")
+        _, alpha, _ = client.get("/api/spikes?days=7&project=alpha")
+        _, by_path, _ = client.get("/api/spikes?days=7&project=/home/user/beta")
+        bad, err, _ = client.get("/api/spikes?days=7&project=gamma")
+    assert {(it["session_id"], it["project"], it["project_path"]) for it in full["spikes"]} == {
+        ("pa", "alpha", "/home/user/alpha"),
+        ("pb", "beta", "/home/user/beta"),
+    }
+    rows = full["by_project"]
+    assert [(r["project"], r["spikes"]) for r in rows] == [("alpha", 2), ("beta", 1)]
+    assert rows[0]["project_path"] == "/home/user/alpha"
+    assert rows[0]["excess_usd"] == pytest.approx(4.0)
+    assert sum(r["excess_usd"] for r in rows) == pytest.approx(full["excess_usd"])
+    assert full["project"] is None and full["count"] == 3
+
+    assert alpha["project"] == "alpha" and alpha["project_path"] == "/home/user/alpha"
+    assert alpha["count"] == 2 and alpha["excess_usd"] == pytest.approx(4.0)
+    assert {it["project"] for it in alpha["spikes"]} == {"alpha"}
+    idle = {c["cause"]: c["excess_usd"] for c in alpha["causes"]}["idle_rewrite"]
+    assert idle == pytest.approx(0.8 * 4.0)
+    assert alpha["by_project"] == full["by_project"]  # the bars to switch project stay
+
+    assert by_path["project"] == "beta" and by_path["count"] == 1
+    assert by_path["excess_usd"] == pytest.approx(2.0)
+    assert bad == 400 and err["error"] == "bad_query"
+
+
+def test_spike_markers_name_their_project(spiky: Path) -> None:
+    for client in _client(spiky, _analysis()):
+        _, data, _ = client.get("/api/spend?days=7")
+    (mark,) = data["spikes"]["marks"]
+    assert mark["project"] == ALPHA and mark["title"] == "Spiky"
