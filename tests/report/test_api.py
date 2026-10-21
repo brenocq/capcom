@@ -57,7 +57,7 @@ def test_overview_totals(client: Client) -> None:
     assert close(data["spending_now"]["usd_last_hour"], usd(S1_MAIN[-1:]))
     assert data["running_sessions"] == 1
     assert data["limits"]["available"] is False
-    assert "milestone 5" in data["limits"]["message"]
+    assert "capcom limits --install" in data["limits"]["message"]
     assert data["unavailable"] == []
 
 

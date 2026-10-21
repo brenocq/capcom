@@ -51,7 +51,7 @@ Errors are JSON: `{"error": code, "message": text, ...}`.
 Anything else is a plain-text `500 internal error` that says nothing more; the
 traceback goes to the terminal only. A static name that cannot be a file (a NUL byte,
 a name too long) or that resolves outside `static/` is a 404.
-Page paths (`/`, `/spend`, `/sessions`, `/session/<id>`, `/spikes`, `/checks`) serve
+Page paths (`/`, `/spend`, `/sessions`, `/session/<id>`, `/spikes`, `/checks`, `/limits`) serve
 `static/index.html`, or a 503 page saying to run `capcom scan` when the index is
 missing or old. Static files are under `/static/`.
 
@@ -124,7 +124,7 @@ true while serve's first scan has not finished: totals may be partial until then
                    same_hour_average_usd, same_hour},
  spending_now: {usd_last_hour, spark: {step_s, times, values} | null},
  cumulative_today: Cumulative (by category, 5-minute steps) | null,
- limits: {available: false, message},           # no limit data until milestone 5
+ limits: Limits without segments,                # see /api/limits
  unavailable}
 Block = {since, totals, sessions, by_project: [Group], by_agent: [Group],
          by_model: [Group], subagents: {count, usd, two_tool_calls_or_fewer}}
@@ -244,6 +244,46 @@ largest by excess, numbered in time order. `scope` is `thread` (one agent thread
 spend of its scope: `usual` is what the requests cost at the baseline pace (the
 spike's baseline shared among its requests, plus every other request), `extra` what
 the spike's requests cost above it, adding up to its excess.
+
+### `GET /api/limits?days=14`
+
+The subscription's 5-hour and weekly windows from `capcom.limits`: the samples
+`capcom record-limits` appends to `limits.jsonl` next to the index (and the seed from
+the index's rate-limit errors). `days` is one of 7, 14, 30, 90 and bounds `segments`.
+The reply's cache key also holds the size and modification time of `limits.jsonl`,
+since the recorder writes it without a scan.
+
+```
+Limits = {available, recording, message, install, samples, last_sample, days,
+          windows: {five_hour: Window | null, seven_day: Window | null}}
+Window = {window, label, samples, current,
+          reading: {percent, time, resets_at, source} | null,
+          fit: {method, note, percent_per_usd, intervals, mean_abs_error, r2,
+                weights: [{model, category, percent_per_mtok}]} | null,
+          forecast: {reading, now, median, low, high, resets_at, runs_out_at,
+                     bucket_minutes, buckets, fan: [[ms, median, low, high]]} | null,
+          reason,                       # why there is no forecast ("not enough samples", ...)
+          history: [[ms, percent]],     # the current window's line, from its start at 0 %
+          start,
+          segments: [{start, start_known, resets_at, peak, hit_limit, reset,
+                      points: [[ms, percent]], usd,
+                      by_project: [{project, usd, percent}] | null}]}   # newest first
+```
+
+`available` is false without any sample (`windows` both null); `recording` is true
+once the status line recorder wrote a sample, and `message` is the empty state's
+text until then ("Not recording yet: run `capcom limits --install` to see the
+change."). A segment is one window between resets; within it the percentage only
+rises. `fit.method` is `per_type` (weights per model and token category, in percent
+per million tokens, by non-negative least squares) once there are enough intervals,
+else `per_usd` (one percent per API-equivalent dollar) and `note` says so; null with
+fewer than 2 intervals. `forecast` (current window only) is the median and the 10th
+to 90th percentile of the value at the reset, from the window's spend in buckets
+resampled over the time left; `runs_out_at` is when the median path reaches 100 %.
+`by_project` (the last 8 segments; up to 6 projects plus `(other)`) is what the
+index's requests spent in the segment, and their fitted percent (null without a fit).
+Usage from other machines or claude.ai counts toward the limits but is not in the
+logs.
 
 ### `GET /api/checks?days=14`
 

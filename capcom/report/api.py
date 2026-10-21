@@ -88,10 +88,7 @@ REASON_LABELS = {
 _STEPS = {1: timedelta(minutes=5), 7: timedelta(minutes=30), 14: timedelta(hours=1)}
 _STEPS |= {30: timedelta(hours=2), 90: timedelta(hours=6)}
 
-LIMITS_NOTE = (
-    "No limit data yet. The 5-hour and weekly percentages are recorded from milestone 5 on; "
-    "capcom shows no estimate until then."
-)
+LIMITS_DAYS = (7, 14, 30, 90)
 
 
 class ApiError(Exception):
@@ -423,7 +420,7 @@ def overview(ctx: Context) -> dict[str, Any]:
         "spending_now": {"usd_last_hour": round(last_hour.usd, 6), "spark": spark_json},
         "cumulative_today": None if cum is None else _cumulative_json(cum, step, ctx.now),
         "spikes_today": marks,
-        "limits": {"available": False, "message": LIMITS_NOTE},
+        "limits": _limits(ctx, None, full=False),
         "unavailable": unavailable,
     }
 
@@ -1181,6 +1178,32 @@ ONE_COMMAND_CALLS = 2  # capcom.checks: a subagent with this many tool calls or 
 _CALL_BUCKETS = ((0, 0), (1, 1), (2, 2), (3, 3), (4, 5), (6, 10), (11, 20), (21, None))
 MAX_SQUARES = 120  # past this many tools or skills, a bar instead of squares
 MAX_DOTS = 200
+
+
+def _limits(ctx: Context, days: int | None, full: bool) -> dict[str, Any]:
+    """The usage windows from capcom.limits: the samples next to the index, projects
+    named as everywhere else."""
+    from capcom.limits.view import limits_json
+
+    cache = ctx.index_path.parent if ctx.index_path is not None else load_config().cache_dir
+    names = ctx.names()
+    return limits_json(
+        ctx.index,
+        ctx.table,
+        cache,
+        ctx.now,
+        ctx.tz,
+        days=days,
+        full=full,
+        label=lambda d: project_display(d, names),
+    )
+
+
+def limits(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
+    days = _int(query, "days", 14, 1, 366)
+    if days not in LIMITS_DAYS:
+        raise ApiError(400, "bad_query", f"days must be one of {', '.join(map(str, LIMITS_DAYS))}")
+    return {"days": days} | _limits(ctx, days, full=True)
 
 
 def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
