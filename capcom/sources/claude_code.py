@@ -119,6 +119,8 @@ _PATH_TOOLS = {
     "NotebookEdit": "notebook_path",
 }
 _ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# The name of a slash command in the user record Claude Code writes for it.
+_COMMAND_NAME = re.compile(r"<command-name>/?([A-Za-z0-9_][A-Za-z0-9_:.-]{0,99})</command-name>")
 
 
 # --------------------------------------------------------------------------- helpers
@@ -683,6 +685,9 @@ class _Parser:
 
     def _user(self, rec: dict[str, Any], offset: int) -> None:
         content = _dict(rec.get("message")).get("content")
+        if isinstance(content, str):
+            self._slash_command(rec, offset, content)
+            return
         if not isinstance(content, list):
             return
         for block in content:
@@ -708,6 +713,22 @@ class _Parser:
                 },
                 suffix=tid or str(offset),
             )
+
+    def _slash_command(self, rec: dict[str, Any], offset: int, content: str) -> None:
+        """A prompt typed as a slash command (`<command-name>/x</command-name>` at the
+        start of the message): a SKILLS_INVOKED event with the command's name only.
+        Built-in commands are named too; nothing else of the text is kept."""
+        if rec.get("isMeta") is True or not content.lstrip().startswith("<command-"):
+            return
+        m = _COMMAND_NAME.search(content, 0, 4096)
+        if m is None:
+            return
+        self._event(
+            EventKind.SKILLS_INVOKED,
+            rec,
+            offset,
+            {"names": (m.group(1),), "source": "slash_command"},
+        )
 
     # -- system
 
@@ -869,6 +890,14 @@ class _Parser:
         shape = _dict(rec.get("shape"))
         tools = _list(shape.get("tools"))
         names = tuple(n for t in tools if isinstance(n := _dict(t).get("name"), str))
+        # A tool with `defer_loading: true` is sent by name only until a tool search
+        # loads it: its schema is not in the prompt.
+        deferred = tuple(
+            n
+            for t in tools
+            if _dict(t).get("defer_loading") is True and isinstance(n := _dict(t).get("name"), str)
+        )
+        loaded = [t for t in tools if _dict(t).get("defer_loading") is not True]
         size = _json_len({"system": shape.get("system"), "tools": tools})
         self._event(
             EventKind.TOOL_SET,
@@ -879,6 +908,8 @@ class _Parser:
                 "shape_hash": _str(rec.get("shapeHash")),
                 "names": names,
                 "size_tokens": estimate_tokens(size),
+                "deferred_names": deferred,
+                "tools_size_tokens": estimate_tokens(_json_len(loaded)) if loaded else 0,
             },
         )
 

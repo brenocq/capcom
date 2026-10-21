@@ -151,11 +151,14 @@ class EventKind(StrEnum):
       is_image, is_error (bool)
     - TOOL_SET: source (str: the record or attachment type), shape_hash (str),
       names (tuple: the full list when the record gives one), added, removed (tuple),
-      size_tokens (int, estimate of the listing's size)
+      size_tokens (int, estimate of the listing's size); an api-request-shape also
+      has deferred_names (tuple: its tools marked defer_loading, sent without their
+      schema) and tools_size_tokens (int: the schemas of the other tools)
     - MODEL: model (str): a `model` attachment (the session's model was set or changed)
     - MEMORY: source ("instructions" | "nested_memory"), paths (tuple),
       size_tokens (int, estimate)
-    - SKILLS_INVOKED: names (tuple)
+    - SKILLS_INVOKED: names (tuple), size_tokens (int); source "slash_command" when
+      the user typed `/<name>` (built-in commands are named too)
     - API_REQUEST: request_id, query_source, shape_hash, model, cache_ttl (str)
     - API_ERROR: status (int), error (str)
     - TURN: duration_ms (int)
