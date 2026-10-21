@@ -18,6 +18,9 @@ Tables (schema version in `schema_version`):
 - cost_states: one row per (file, pos), flagged when it comes from its session's
   main log; the last per session is the main log's highest pos
 
+Version 2 lacked cost_states.ts: a writable open migrates it in place (the index keeps
+history the logs may have lost) and queues the files with cost-states for a reread.
+
 Times are stored as integer microseconds since the Unix epoch, UTC.
 """
 
@@ -51,7 +54,7 @@ from capcom.types import (
     Usage,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _US = timedelta(microseconds=1)
@@ -161,6 +164,7 @@ CREATE TABLE IF NOT EXISTS cost_states (
     models TEXT,
     start_time_ms INTEGER,
     has_unknown_model_cost INTEGER,
+    ts INTEGER,
     PRIMARY KEY (file, pos)
 );
 CREATE INDEX IF NOT EXISTS cost_states_session ON cost_states (session_id, main, pos);
@@ -216,7 +220,7 @@ _UPSERT_AGENT = _upsert_part("agent_parts", "agent_id", _AGENT_FIELDS)
 
 _INSERT_COST = (
     "INSERT OR REPLACE INTO cost_states (file, pos, session_id, main, total_cost_usd, models, "
-    "start_time_ms, has_unknown_model_cost) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    "start_time_ms, has_unknown_model_cost, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
 _UPSERT_FILE = (
@@ -489,6 +493,7 @@ class SqliteIndex:
                         models,
                         r.start_time_ms,
                         _int_opt(r.has_unknown_model_cost),
+                        None if r.timestamp is None else _aware("timestamp", r.timestamp),
                     )
                 )
             else:
@@ -637,9 +642,9 @@ class SqliteIndex:
     def last_cost_states(self) -> Iterator[CostState]:
         """The last cost-state of each session: the highest offset in the session's
         main log, or in its other files when the main log has none."""
-        for session, pos, total, models, start_ms, unknown in self._con.execute(
+        for session, pos, total, models, start_ms, unknown, ts in self._con.execute(
             "SELECT session_id, pos, total_cost_usd, models, start_time_ms, "
-            "has_unknown_model_cost FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY "
+            "has_unknown_model_cost, ts FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY "
             "session_id ORDER BY main DESC, pos DESC, file) AS rank FROM cost_states) "
             "WHERE rank = 1 ORDER BY session_id"
         ):
@@ -651,7 +656,7 @@ class SqliteIndex:
                 if models
                 else {}
             )
-            yield CostState(session, pos, total, loaded, start_ms, _bool_opt(unknown))
+            yield CostState(session, pos, total, loaded, start_ms, _bool_opt(unknown), _dt_opt(ts))
 
 
 def _session_row(file: str, s: SessionInfo, seq: int) -> tuple[Any, ...]:
@@ -672,6 +677,23 @@ def _agent_row(file: str, a: AgentInfo, seq: int) -> tuple[Any, ...]:
     )
     pairs = [x for v in vals for x in (v, None if v is None else seq)]
     return (file, a.agent_id, *pairs)
+
+
+def _migrate_2_to_3(con: sqlite3.Connection) -> None:
+    """Add cost_states.ts and set the offset of every file with cost-states to 0, so
+    the next scan reads them again (idempotent: rows upsert by their keys) and fills
+    the time in. One transaction."""
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        if con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 2:
+            con.execute("ALTER TABLE cost_states ADD COLUMN ts INTEGER")
+            con.execute("UPDATE files SET pos = 0 WHERE path IN (SELECT file FROM cost_states)")
+            con.execute("DELETE FROM schema_version")
+            con.execute("INSERT INTO schema_version (version) VALUES (3)")
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
+    con.execute("COMMIT")
 
 
 def open_index(path: Path, readonly: bool = False) -> SqliteIndex:
@@ -700,12 +722,14 @@ def open_index(path: Path, readonly: bool = False) -> SqliteIndex:
             if row[0] is None:
                 con.executescript(_SCHEMA)
                 con.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+            elif row[0] == 2:
+                _migrate_2_to_3(con)
         row = con.execute("SELECT MAX(version) FROM schema_version").fetchone()
         version = row[0] if row else None
         if version != SCHEMA_VERSION:
             raise RuntimeError(
                 f"capcom index {path} has schema version {version}, this capcom reads "
-                f"{SCHEMA_VERSION}"
+                f"{SCHEMA_VERSION}: run `capcom scan` to update it"
             )
     except BaseException:
         con.close()

@@ -207,6 +207,16 @@ def test_last_cost_states(ix: SqliteIndex) -> None:
     assert {c.session_id: c.total_cost_usd for c in ix.last_cost_states()}["s1"] == 3.0
 
 
+def test_cost_state_timestamp_roundtrip(ix: SqliteIndex) -> None:
+    put(ix, A, CostState("s1", 10, 1.0, timestamp=at(7.25)))
+    put(ix, C, CostState("s2", 10, 1.0))
+    got = {c.session_id: c.timestamp for c in ix.last_cost_states()}
+    assert got == {"s1": at(7.25), "s2": None}
+    assert got["s1"] is not None and got["s1"].utcoffset() is not None
+    with pytest.raises(ValueError, match="timezone-aware"):
+        put(ix, A, CostState("s1", 20, 1.0, timestamp=at(1).replace(tzinfo=None)))
+
+
 def test_forget_file(ix: SqliteIndex) -> None:
     put(ix, A, req("m1", 1), ev("k1", 1), SessionInfo("s1", "p"), CostState("s1", 5, 1.0), offset=9)
     put(ix, B, req("m2", 2), ev("k1", 2), AgentInfo("a1", "s1"), offset=9)

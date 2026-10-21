@@ -4,7 +4,8 @@ For each log the source discovers: stat it (and its meta.json); skip it unopened
 its inode, size, mtime and meta mtime match what the index remembers. Read it again
 from 0, after dropping its rows, when its inode changed, it shrank below the stored
 offset, or its first bytes changed (an in-place rewrite that kept the inode).
-Otherwise read from the stored offset; when only the meta.json changed, the source is
+Otherwise read from the stored offset (a file whose offset was set back to 0 is read
+again even with an unchanged stat); when only the meta.json changed, the source is
 called at the current offset so it emits the agent's facts again. Each batch is
 stored with the file's new offset in one transaction, so an interrupted scan resumes
 where it stopped. Files Claude Code deleted keep their rows: the index is the history.
@@ -104,7 +105,11 @@ def scan_file(index: SqliteIndex, source: Source, log: LogFile, stats: ScanStats
     start = 0
     if state is not None and extra is not None:
         reset = st.st_ino != state.inode or st.st_size < state.offset
-        if not reset and st.st_size == state.size and st.st_mtime_ns == state.mtime_ns:
+        # An offset of 0 on a non-empty file means "read it again" (a schema migration
+        # queues files that way), even when its stat is unchanged.
+        queued = state.offset == 0 and st.st_size > 0
+        unchanged = st.st_size == state.size and st.st_mtime_ns == state.mtime_ns
+        if not reset and not queued and unchanged:
             if meta_mtime == extra.meta_mtime_ns:
                 return  # nothing changed
         elif not reset and extra.head_len:
