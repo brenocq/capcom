@@ -173,10 +173,18 @@ def _bool(value: object) -> bool | None:
 
 def _rate_limit(rec: dict[str, Any]) -> dict[str, Any]:
     """`rate_limit_type` (the window, as logged: `five_hour`, `seven_day`, ...) and
-    `resets_at` (epoch seconds) of an API error record, when it carries them: on the
-    record, its `error` object, or a `rateLimits` object in either."""
+    `resets_at` (epoch seconds) of an API error record, when it carries them: in
+    `quotaLimits` or `apiErrorParams.rate_limit_info` (assistant error replies), else
+    on the record, its `error` object, or a `rateLimits` object in either."""
     err = _dict(rec.get("error"))
-    places = [rec, err, _dict(rec.get("rateLimits")), _dict(err.get("rateLimits"))]
+    places = [
+        _dict(rec.get("quotaLimits")),  # assistant error replies
+        _dict(_dict(rec.get("apiErrorParams")).get("rate_limit_info")),
+        rec,
+        err,
+        _dict(rec.get("rateLimits")),
+        _dict(err.get("rateLimits")),
+    ]
     out: dict[str, Any] = {}
     for d in places:
         kind = d.get("rateLimitType") or d.get("rate_limit_type") or d.get("kind")

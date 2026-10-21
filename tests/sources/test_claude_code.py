@@ -888,3 +888,50 @@ def test_rate_limit_errors_carry_their_window(tmp_path: Path) -> None:
     got = [(e.attrs.get("rate_limit_type"), e.attrs.get("resets_at")) for e in errors]
     assert got == [("seven_day", 1.8e9), ("five_hour", None), (None, None)]
     assert all(e.attrs["error"] == "rate_limit" for e in errors)
+
+
+def test_assistant_rate_limit_replies_carry_their_window(tmp_path: Path) -> None:
+    s = SessionWriter(tmp_path, cwd="/w", session_id="s1")
+    extras = [
+        {
+            "quotaLimits": {
+                "rateLimitType": "five_hour",
+                "resetsAt": 1_800_000_000,
+                "status": "rejected",
+            }
+        },
+        {
+            "apiErrorParams": {
+                "rate_limit_info": {
+                    "rateLimitType": "seven_day",
+                    "resetsAt": 1_800_500_000,
+                    "status": "rejected",
+                }
+            }
+        },
+    ]
+    for i in range(len(extras)):
+        s.assistant(
+            Reply(
+                at(i + 1),
+                model="<synthetic>",
+                input=0,
+                output=0,
+                api_error=True,
+                error="rate_limit",
+                error_status=429,
+            )
+        )
+    s.close()
+    recs = [json.loads(x) for x in s.path.read_text().splitlines()]
+    k = 0
+    for r in recs:
+        if r.get("isApiErrorMessage"):
+            r.update(extras[k])
+            k += 1
+    s.path.write_text("".join(json.dumps(r) + "\n" for r in recs))
+    batches = parse(session_log(s.path))
+    errors = events(batches, EventKind.API_ERROR)
+    got = [(e.attrs.get("rate_limit_type"), e.attrs.get("resets_at")) for e in errors]
+    assert got == [("five_hour", 1_800_000_000), ("seven_day", 1_800_500_000)]
+    assert len(of(batches, Request)) == 2  # one request per reply, no double count
