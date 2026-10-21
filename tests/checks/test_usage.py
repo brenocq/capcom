@@ -22,6 +22,7 @@ from tests.checks.helpers import (
     UNTIL,
     SortedIndex,
     agent,
+    began,
     ev,
     index,
     kinds,
@@ -29,6 +30,8 @@ from tests.checks.helpers import (
     run,
 )
 from tests.cost.fakes import at
+
+HANDOFF = 40_000 * 5 / 1e6  # a 40k-token handoff written at claude-opus-5-5's 5-minute price
 
 
 def _checks(idx) -> list[Finding]:  # type: ignore[no-untyped-def]
@@ -38,32 +41,77 @@ def _checks(idx) -> list[Finding]:  # type: ignore[no-untyped-def]
 # --------------------------------------------------------------------------- context
 
 
-def test_turns_past_150k_count_their_excess_context() -> None:
+WRITE_RATE = 5 / 1e6  # claude-opus-5-5 5-minute cache write, USD per token
+
+
+def _simulated(contexts: list[int], start: int) -> float:
+    """The handoff simulation of long_running_agents, written out for a test."""
+    saving, sim, prev = 0.0, None, None
+    for c in contexts:
+        step = c - prev if prev is not None else 0
+        prev = c
+        sim = c if sim is None else max(sim + step, min(c, start))
+        cost = sim * READ_RATE
+        if sim > 150_000:
+            sim = start
+            cost = start * WRITE_RATE
+        saving += c * READ_RATE - cost
+    return saving
+
+
+LONG_SAVING = 100 * 200_000 * READ_RATE - 100_000 * WRITE_RATE - 99 * 100_000 * READ_RATE
+
+
+def test_a_long_thread_saves_what_a_handed_off_agent_would_not_read() -> None:
+    # 200k on every turn: a fresh agent restarts at 100k (its files and state back),
+    # the handoff writes that once, the next turns read it
+    f = only(_checks(began(index(run(100, cache_read=200_000)))), "long_running_agents")
+    assert f.saving_usd_per_week == pytest.approx(LONG_SAVING)
+    assert f.metrics["turns"] == 100 and f.metrics["handoffs"] == 1
+    assert "restarts at about 100.0k tokens" in f.summary
+    # never more than the rereads past the line could save once the restart is paid
+    assert f.saving_usd_per_week <= 100 * 100_000 * READ_RATE
+
+
+def test_a_short_stay_past_the_line_does_not_pay_for_the_restart() -> None:
+    idx = began(index(run(10, cache_read=200_000)))
+    assert "long_running_agents" not in kinds(_checks(idx))
+
+
+def test_a_thread_older_than_the_window_is_taken_halfway_through_a_cycle() -> None:
+    # no handoff to pay at the window's start: its agent reads 125k, not 200k
     f = only(_checks(index(run(10, cache_read=200_000))), "long_running_agents")
-    assert f.saving_usd_per_week == pytest.approx(10 * 50_000 * READ_RATE)
-    assert f.metrics["turns"] == 10 and f.metrics["max_context"] == 200_000
+    assert f.saving_usd_per_week == pytest.approx(10 * 75_000 * READ_RATE)
+    assert f.metrics["handoffs"] == 0
+
+
+def test_a_growing_thread_restarts_at_100k_and_grows_the_same_way() -> None:
+    # from 20k, 1k more per turn up to 319k: back to 100k at each crossing
+    contexts = [20_000 + 1_000 * i for i in range(300)]
+    reqs = [r for i, c in enumerate(contexts) for r in run(1, start=1 + i, cache_read=c)]
+    f = only(_checks(index(reqs)), "long_running_agents")
+    assert f.saving_usd_per_week == pytest.approx(_simulated(contexts, 100_000))
+    assert f.metrics["handoffs"] == 4
 
 
 def test_contexts_under_150k_are_not_long_running() -> None:
     assert "long_running_agents" not in kinds(_checks(index(run(50, cache_read=100_000))))
 
 
-def test_a_late_compaction_takes_the_part_above_400k_from_long_running() -> None:
-    reqs = run(10, cache_read=500_000) + run(10, start=20, cache_read=100_000)
-    evs = [ev(EventKind.COMPACTION, 15, pre_tokens=520_000, trigger="auto")]
+def test_a_late_compaction_saves_what_compacting_at_400k_would_not_read() -> None:
+    reqs = run(10, cache_read=500_000) + run(10, start=20, cache_read=50_000)
+    evs = [ev(EventKind.COMPACTION, 15, pre_tokens=520_000, post_tokens=50_000, trigger="auto")]
     found = _checks(index(reqs, evs))
     late = only(found, "late_compactions")
-    assert late.saving_usd_per_week == pytest.approx(10 * 100_000 * READ_RATE)
+    # compacted at the line, the thread restarts at 100k (more than the logged 50k),
+    # written once
+    assert late.saving_usd_per_week == pytest.approx(
+        10 * 500_000 * READ_RATE - 100_000 * WRITE_RATE - 9 * 100_000 * READ_RATE
+    )
     assert late.metrics["max_pre_tokens"] == 520_000
+    # the handoff is the other way to the same rereads
     long = only(found, "long_running_agents")
-    assert long.saving_usd_per_week == pytest.approx(10 * 250_000 * READ_RATE)
-
-
-def test_without_a_compaction_long_running_keeps_the_whole_excess() -> None:
-    found = _checks(index(run(10, cache_read=500_000)))
-    assert "late_compactions" not in kinds(found)
-    long = only(found, "long_running_agents")
-    assert long.saving_usd_per_week == pytest.approx(10 * 350_000 * READ_RATE)
+    assert "late_compactions" in long.metrics["overlaps"]
 
 
 def test_an_early_compaction_is_not_late() -> None:
@@ -117,41 +165,17 @@ def test_same_model_and_no_rewrite_gives_no_switch() -> None:
     assert "model_switches" not in kinds(_checks(index(_rewrite_after(1, cache_write_5m=100_000))))
 
 
-def test_long_contexts_are_priced_at_the_read_price_apart_from_rewrites() -> None:
-    # a 200k thread that idled and rewrote its whole prompt: the rewrite finding
-    # counts the write premium, long-running only the read of the tokens past 150k
-    reqs = run(1, cache_read=200_000) + run(1, start=31, cache_read=0, cache_write_5m=200_000)
-    found = _checks(index(reqs))
-    idle = only(found, "idle_cache_rewrites")
-    long = only(found, "long_running_agents")
-    assert idle.saving_usd_per_week == pytest.approx(200_000 * (5 - 0.2) / 1e6)
-    assert long.saving_usd_per_week == pytest.approx(2 * 50_000 * READ_RATE)
-    # together no more than what the tokens past 150k and the rewrite premium cost
-    assert idle.metrics["overlaps"] == () and long.metrics["overlaps"] == ()
-
-
-def test_a_late_compaction_and_long_running_split_the_same_turns() -> None:
-    reqs = run(10, cache_read=500_000, cache_write_5m=20_000)
-    evs = [ev(EventKind.COMPACTION, 15, pre_tokens=520_000)]
-    found = _checks(index(reqs, evs))
-    late, long = only(found, "late_compactions"), only(found, "long_running_agents")
-    # 520k each: 250k in the band, 120k above it, all at the read price
-    assert long.saving_usd_per_week == pytest.approx(10 * 250_000 * READ_RATE)
-    assert late.saving_usd_per_week == pytest.approx(10 * 120_000 * READ_RATE)
-    assert "late_compactions" not in long.metrics["overlaps"]
-
-
-def test_the_checks_view_says_not_to_add_up_only_when_findings_overlap(tmp_path: Path) -> None:
+def test_the_checks_view_marks_overlapping_findings_and_totals_the_rest(tmp_path: Path) -> None:
     def view(idx) -> str:  # type: ignore[no-untyped-def]
         out = io.StringIO()
         config = Config(tmp_path / "claude", tmp_path / "openclaw", tmp_path / "cache")
         run_checks_view(config, 7, 10, index=idx, out=out, now=at(60 * 24))
         return out.getvalue()
 
-    reqs = run(1, cache_read=200_000) + run(1, start=31, cache_read=0, cache_write_5m=200_000)
+    reqs = run(40, cache_read=200_000) + run(1, start=71, cache_read=0, cache_write_5m=200_000)
     text = view(index(reqs))
     assert "Long-running agents" in text and "Cache rewrites after idling" in text
-    assert "add only the total below" not in text and "different dollars" in text
+    assert "* overlaps" not in text and "Overlapping" not in text
     # an unused connector rides in those same prompts: its dollars overlap them
     evs = [
         ev(
@@ -163,7 +187,9 @@ def test_the_checks_view_says_not_to_add_up_only_when_findings_overlap(tmp_path:
         )
     ]
     text = view(index(reqs, evs))
-    assert "claude.ai connectors" in text and "add only the total below" in text
+    assert "claude.ai connectors" in text
+    assert "* overlaps #1: not added to the total" in text
+    assert "the total covers only findings that don't overlap" in text
 
 
 # --------------------------------------------------------------------------- tool waits
@@ -200,18 +226,84 @@ def test_a_subagent_cache_expiring_during_a_tool_call_is_its_own_finding() -> No
 
 
 @pytest.mark.parametrize(
-    ("ran", "then", "agent_id"),
+    ("ran", "then", "agent_id", "kind"),
     [
-        (3, 20, "a1"),  # the tool came back in time; the subagent then sat idle
-        (12, 5, "a1"),  # the result came long before the rewrite
-        (12, 0.5, None),  # the main thread: an idle rewrite, as before
+        # the tool came back in time, then nothing ran: idle (explain's IDLE_EXPIRY)
+        (3, 20, "a1", "idle_cache_rewrites"),
+        (12, 5, "a1", "subagent_cache_expiry"),  # the result came back past the lifetime
+        (3, 20, None, "idle_cache_rewrites"),  # the main thread: the user was away
+        (12, 0.5, None, "subagent_cache_expiry"),  # a main thread's long call is a tool wait
     ],
 )
-def test_other_pauses_stay_idle_rewrites(ran: float, then: float, agent_id: str | None) -> None:
+def test_each_pause_has_one_of_three_causes(
+    ran: float, then: float, agent_id: str | None, kind: str
+) -> None:
     reqs, evs, agents = _tool_wait(ran, then, agent_id)
     found = _checks(index(reqs, evs, agents))
-    assert "subagent_cache_expiry" not in kinds(found)
-    assert "idle_cache_rewrites" in kinds(found)
+    causes = {"subagent_cache_expiry", "subagent_resumed_late", "idle_cache_rewrites"}
+    assert [k for k in kinds(found) if k in causes] == [kind]
+    f = only(found, kind)
+    assert f.metrics["cause"] in ("tool_wait_expiry", "late_resume_expiry", "idle_expiry")
+    assert f.saving_usd_per_week == pytest.approx(100_000 * (5 - 0.2) / 1e6)
+
+
+def _resume(message_at: float):  # type: ignore[no-untyped-def]
+    """Subagent a1 ends its turn at minute 1; the lead sends it a message at
+    `message_at`; a1's next request, at minute 30, rewrites 100k."""
+    reqs = run(1, agent="a1") + run(1, start=30, agent="a1", cache_read=0, cache_write_5m=100_000)
+    lead = run(1, start=message_at)[0]
+    reqs.append(replace(lead, tool_calls=(ToolCall("tu_m", "SendMessage", None),)))
+    return index(reqs, agents=[agent("a1", "coder")])
+
+
+@pytest.mark.parametrize("message_at", [28, 30.3])  # up to 3 min before, or 30 s after
+def test_a_finished_subagent_resumed_by_its_lead_is_a_late_resume(message_at: float) -> None:
+    f = only(_checks(_resume(message_at)), "subagent_resumed_late")
+    assert f.metrics["cause"] == "late_resume_expiry"
+    assert "fresh agent" in f.advice and "29 min" in f.summary
+
+
+@pytest.mark.parametrize("message_at", [20, 31])
+def test_a_message_far_from_the_request_is_no_resume(message_at: float) -> None:
+    found = _checks(_resume(message_at))
+    assert "subagent_resumed_late" not in kinds(found)
+    assert only(found, "idle_cache_rewrites").metrics["cause"] == "idle_expiry"
+
+
+def test_a_main_thread_waiting_on_its_subagents_is_a_tool_wait() -> None:
+    reqs = (
+        run(1)
+        + run(12, start=1.5, agent="a1")
+        + run(1, start=13, cache_read=0, cache_write_5m=100_000)
+    )
+    found = _checks(index(reqs, agents=[agent("a1", "coder")]))
+    f = only(found, "subagent_cache_expiry")
+    assert "background agents" in f.summary
+    assert "idle_cache_rewrites" not in kinds(found)
+
+
+def test_a_question_to_the_user_is_not_a_tool_wait() -> None:
+    reqs, evs, agents = _tool_wait(12, agent_id=None, tool="AskUserQuestion")
+    found = _checks(index(reqs, evs, agents))
+    assert "subagent_cache_expiry" not in kinds(found) and "idle_cache_rewrites" in kinds(found)
+
+
+def test_an_away_summary_confirms_the_user_was_away() -> None:
+    reqs = _rewrite_after(30, cache_write_5m=100_000)
+    f = only(_checks(index(reqs, [ev(EventKind.AWAY, 20)])), "idle_cache_rewrites")
+    assert f.metrics["after_away_summary"] == 1 and f.metrics["cause"] == "idle_expiry"
+    assert "away_summary" in f.evidence[0].label
+
+
+@pytest.mark.parametrize("agent_id", [None, "a1"])
+def test_a_pause_under_5_minutes_is_never_an_expiry(agent_id: str | None) -> None:
+    reqs = run(1, agent=agent_id) + run(
+        1, start=5.5, agent=agent_id, cache_read=0, cache_write_5m=100_000
+    )
+    found = _checks(index(reqs, agents=[agent("a1", "coder")]))
+    assert not {"subagent_cache_expiry", "subagent_resumed_late", "idle_cache_rewrites"} & set(
+        kinds(found)
+    )
 
 
 # --------------------------------------------------------------------------- subagents
@@ -291,7 +383,7 @@ def test_events_before_the_window_still_set_what_its_requests_carry() -> None:
 
 
 def test_findings_are_ranked_by_weekly_saving() -> None:
-    reqs = run(10, cache_read=500_000) + _rewrite_after(30, cache_write_5m=100_000)
+    reqs = run(30, session="s9", cache_read=500_000) + _rewrite_after(30, cache_write_5m=100_000)
     found = _checks(index(reqs))
     assert len(found) >= 2
     savings = [f.saving_usd_per_week for f in found]
@@ -299,15 +391,13 @@ def test_findings_are_ranked_by_weekly_saving() -> None:
 
 
 def test_logs_that_begin_inside_the_window_set_its_pace() -> None:
-    reqs = run(10, start=60 * 24 * 5.5, cache_read=200_000)  # logs begin 1.5 days before the end
+    reqs = run(100, start=60 * 24 * 5.5, cache_read=200_000)  # logs begin 1.5 days before the end
     f = only(
-        run_checks(SortedIndex(reqs=reqs), TABLE, SINCE, UNTIL, agent_dirs=[]),
+        run_checks(began(SortedIndex(reqs=reqs)), TABLE, SINCE, UNTIL, agent_dirs=[]),
         "long_running_agents",
     )
     span = UNTIL - reqs[0].timestamp
-    assert f.saving_usd_per_week == pytest.approx(
-        10 * 50_000 * READ_RATE * timedelta(days=7) / span
-    )
+    assert f.saving_usd_per_week == pytest.approx(LONG_SAVING * timedelta(days=7) / span)
 
 
 def test_no_requests_gives_no_findings() -> None:
@@ -386,3 +476,25 @@ def test_the_view_says_so_when_the_index_is_empty(tmp_path: Path) -> None:
     out = io.StringIO()
     assert run_checks_view(config, days=0, limit=5, index=index([]), out=out, now=at(60)) == 0
     assert "no findings" in out.getvalue() or "no requests" in out.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("first", "began_in_window", "restart"),
+    [
+        (140_000, True, 100_000),  # its own start, capped at 100k
+        (60_000, True, 60_000),  # its own start
+        (60_000, False, 100_000),  # a mid-life context of an older session
+    ],
+)
+def test_the_restart_point_does_not_depend_on_the_window(
+    first: int, began_in_window: bool, restart: int
+) -> None:
+    from capcom.types import SessionInfo
+
+    contexts = [first] + [first + 1_000 * i for i in range(1, 300)]
+    reqs = [r for i, c in enumerate(contexts) for r in run(1, start=1 + i, cache_read=c)]
+    idx = index(reqs)
+    began = SINCE + timedelta(seconds=1) if began_in_window else SINCE - timedelta(days=20)
+    idx.infos = [SessionInfo("s1", reqs[0].project_dir, first_seen=began, last_seen=UNTIL)]
+    f = only(_checks(idx), "long_running_agents")
+    assert f.saving_usd_per_week == pytest.approx(_simulated(contexts, restart))

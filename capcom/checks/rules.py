@@ -9,10 +9,10 @@ size in tokens times that request's price per prompt token (facts.py), which is
 "size x requests x the right price" with cache reads and rewrites priced as they
 were billed. Each check's docstring says what it counts.
 
-The context and cache findings are disjoint within a project: long contexts and
-late compactions price the tokens past their threshold at the cache-read price
-(what rereading them cost, split between the two at LATE_COMPACTION), while the
-rewrite findings (idle, tool waits, model switches; each request in at most one)
+The context findings price rereads at the cache-read price: long contexts and
+late compactions (two ways to the same rereads, so they overlap each other)
+against a simulated handoff or earlier compaction, while the rewrite findings
+(idle, tool waits, model switches; each request in at most one)
 count only a rewrite's premium above that read. Items carried in prompts are
 priced at the full prompt price, so they overlap those findings: `overlaps()` names
 the kinds a finding may share dollars with, and such findings are not to be added up.
@@ -30,8 +30,6 @@ from pathlib import Path
 from capcom.checks.agents import AgentDefinition
 from capcom.checks.facts import (
     EVIDENCE_PER_FINDING,
-    LATE_COMPACTION,
-    LONG_CONTEXT,
     LONG_REPORT_TOKENS,
     Account,
     Compaction,
@@ -40,8 +38,17 @@ from capcom.checks.facts import (
     LongContext,
     Rewrite,
     Thread,
+    heartbeat,
 )
 from capcom.cost.top import TEMPORARY, project_label
+from capcom.explain.shared import (
+    IDLE_EXPIRY,
+    LATE_COMPACTION,
+    LATE_RESUME_EXPIRY,
+    LONG_CONTEXT,
+    RESTART_CONTEXT,
+    TOOL_WAIT_EXPIRY,
+)
 from capcom.types import AttrValue, Evidence, Finding
 
 MEMORY_BUDGET_TOKENS = 2_000  # one always-loaded file of about 150 lines
@@ -560,9 +567,19 @@ def agent_tools_unused(
 ) -> list[Finding]:
     """A custom agent type whose spawns never call some of the tools its definition
     gives it (its `tools:` line, or the tools listed in its requests when the line
-    gives it every tool). Saving: the unused tools' listed sizes x the agent's
-    requests x each request's prompt price; for tools no listing sized, the median
-    tool size seen in request shapes.
+    gives it every tool). Saving: only tools whose schemas ride in the prompt count,
+    those an api-request-shape lists without `defer_loading` and those a
+    deferred_tools_record loaded; a deferred tool rides by name only and saves
+    nothing. Per unused tool, its listed size x each request's prompt price, over
+    the requests that carried it. The api-request-shape listings are logged only by
+    recent Claude Code versions, so their dollars are scaled from the requests that
+    logged a listing to all the agent's requests in scope:
+
+        usd = shape_usd x requests / requests_with_a_shape + record_usd
+
+    which keeps the weekly figure the same whether the window reaches back before
+    those listings or not. An entry of a `tools:` line no listing names is priced
+    at the median tool size seen in request shapes.
 
     Only the spawns the definition governs in Claude Code projects count: a
     project-level definition's own project, or (user level) every project but the
@@ -572,11 +589,15 @@ def agent_tools_unused(
 
     An agent type with no definition file (a plugin's agent, or one Claude Code
     makes itself, such as its workflow agent) is skipped: there is no file to change.
-    With a `tools:` line, the pasted line keeps every entry used anywhere or not
-    understood, in the file's order. Without one the agent inherits every tool, and
-    a line would restrict it: the line then holds only tools it called that its own
-    listings name (never a name from elsewhere), is offered only after
-    MIN_RESTRICT_SPAWNS spawns, and says in a comment how many tools it removes."""
+    The tools called are read over CALL_LOOKBACK at least (facts.type_calls), so
+    a short window does not drop a tool used three weeks ago. With a `tools:` line,
+    the pasted line keeps every entry used anywhere or not understood, in the
+    file's order. Without one the agent inherits every tool, and a line would
+    restrict it: the line then holds every tool the agent type called in any Claude
+    Code project (an MCP server's tools as the server, `mcp__<server>`), never one
+    called only in OpenClaw workspaces, is offered only after MIN_RESTRICT_SPAWNS
+    spawns, and says in a comment that it is a restriction and how many tools it
+    removes."""
     out: list[Finding] = []
     for kind, all_threads in _agent_threads(facts).items():
         if kind in BUILT_IN_AGENTS or kind.startswith("(") or len(all_threads) < MIN_AGENTS:
@@ -601,44 +622,52 @@ def _tools_unused_for(
 ) -> list[Finding]:
     out: list[Finding] = []
     for definition, scope, claimed in _scoped(facts, defs, user_dir):
-        threads = [
-            t
-            for t in all_threads
-            if (
-                t.project in scope
-                if scope is not None
-                else t.project not in claimed and not _is_openclaw(facts, t.project, openclaw_root)
-            )
-        ]
+
+        def governed(
+            project: str, scope: set[str] | None = scope, claimed: set[str] = claimed
+        ) -> bool:
+            if scope is not None:
+                return project in scope
+            return project not in claimed and not _is_openclaw(facts, project, openclaw_root)
+
+        threads = [t for t in all_threads if governed(t.project)]
         if len(threads) < MIN_AGENTS:
             continue
         keys = {(t.session_id, t.agent_id) for t in threads}
-        called: set[str] = set()
-        for k in keys:
-            called |= facts.calls_by_thread.get(k, set())
+        # in any Claude Code project the definition governs, over the call lookback
+        called_cc: set[str] = set()
         called_anywhere: set[str] = set()
-        for t in all_threads:
-            called_anywhere |= facts.calls_by_thread.get((t.session_id, t.agent_id), set())
+        for (k, project), names in facts.type_calls.items():
+            if k != kind:
+                continue
+            called_anywhere |= names
+            if governed(project):
+                called_cc |= names
+        called = set().union(*(facts.calls_by_thread.get(k, set()) for k in keys))
         if not called:
             continue
-        sized: dict[str, _Sum] = {}
+        sized: dict[str, dict[str, _Sum]] = defaultdict(dict)  # name -> family -> sum
+        shape_requests: dict[tuple[str, str | None], int] = {}
         for sid, aid, key, acc in _accounts(facts, lambda k: k[0] == "tool"):
             if (sid, aid) in keys:
-                sized.setdefault(key[2], _Sum()).add(sid, aid, acc)
+                sized[key[2]].setdefault(key[1], _Sum()).add(sid, aid, acc)
+                if key[1] == "shape":
+                    shape_requests[(sid, aid)] = max(
+                        shape_requests.get((sid, aid), 0), acc.requests
+                    )
         spawns = len(threads)
         requests = sum(t.requests for t in threads)
+        scale = requests / sum(shape_requests.values()) if shape_requests else 1.0
         restricts = not definition.tools
         dropped: list[str] = []
         if definition.tools:
             given = list(dict.fromkeys(definition.tools))
-            used = {e: _entry_used(e, called_anywhere) for e in given}
+            used = {e: _entry_used(e, called_anywhere | called) for e in given}
             unused = [e for e in given if used[e] is False]
             keep = [e for e in given if used[e] is not False]
         else:
             given = sorted(n for n in sized if n not in PLACEHOLDER_TOOLS)
-            keep = sorted(
-                {_server_entry(n) or n for n in given if any(_entry_matches(n, c) for c in called)}
-            )
+            keep = sorted({_server_entry(n) or n for n in called_cc | called})
             unused = [n for n in given if not any(_entry_matches(k, n) for k in keep)]
             dropped = sorted(
                 c for c in called_anywhere if not any(_entry_matches(n, c) for n in keep)
@@ -649,9 +678,17 @@ def _tools_unused_for(
         rate_sum = sum(t.rate_sum for t in threads)
         estimate = facts.tool_token_estimate()
         usd = 0.0
+        with_schema = 0
         for e in unused:
-            priced = [v.usd for n, v in sized.items() if _entry_matches(e, n)]
-            usd += sum(priced) if priced else estimate * rate_sum
+            fams = [v for n, v in sized.items() if _entry_matches(e, n)]
+            if not fams:  # named by no listing: a tools: line entry of unknown size
+                usd += estimate * rate_sum
+                with_schema += 1
+                continue
+            shape = sum(v["shape"].usd for v in fams if "shape" in v)
+            record = sum(v["record"].usd for v in fams if "record" in v)
+            usd += shape * scale + record
+            with_schema += 1 if any("shape" in v or "record" in v for v in fams) else 0
         line = f"tools: {', '.join(keep)}"
         if not restricts:
             advice = (
@@ -663,14 +700,15 @@ def _tools_unused_for(
             advice = (
                 f"{definition.path} has no tools: line in its frontmatter, so {kind} "
                 "inherits every tool "
-                f"({len(given)} in its listings). Adding one restricts it to the {len(keep)} "
-                "it called: a tool a later task needs would then be missing until added "
+                f"({len(given)} in its listings). Adding one is a restriction: it keeps "
+                f"the {len(keep)} it called in any Claude Code project (an MCP server as "
+                "a whole), and a tool a later task needs would be missing until added "
                 "back."
             )
             if dropped:
                 advice += (
-                    f" Left out: {_list_names(dropped, 4)}, called only in OpenClaw or "
-                    "other projects' sessions or missing from its listings."
+                    f" Left out: {_list_names(dropped, 4)}, called only in OpenClaw "
+                    "workspaces or in projects another definition governs."
                 )
             if spawns >= MIN_RESTRICT_SPAWNS:
                 advice += (
@@ -678,7 +716,7 @@ def _tools_unused_for(
                     f"{definition.path} (between its --- lines):"
                 )
                 change = (
-                    f"# adds a tools: line: the {kind} agent then has only these "
+                    f"# a restriction: the {kind} agent then has only these "
                     f"{len(keep)} tools; today it inherits all {len(given)}\n{line}"
                 )
             else:
@@ -695,7 +733,9 @@ def _tools_unused_for(
             summary=(
                 f"Across {spawns} {kind} spawns it used {n_used} of the "
                 f"{len(given)} tools it is given; the other {len(unused)} rode in "
-                f"each of its {requests:,} requests."
+                f"each of its {requests:,} requests, {with_schema} of them with their "
+                "schema (the rest are deferred, sent by name only, and saving them is "
+                "not counted)."
             ),
             advice=advice,
             change=change,
@@ -707,6 +747,8 @@ def _tools_unused_for(
                 "requests": requests,
                 "restricts": restricts,
                 "tools_left_out": len(dropped),
+                "unused_with_schema": with_schema,
+                "listing_scale": round(scale, 4),
             },
         )
         if f:
@@ -959,26 +1001,55 @@ def large_memory(facts: Facts) -> list[Finding]:
 # --------------------------------------------------------------------------- context
 
 
+def _heartbeats(facts: Facts) -> set[tuple[str, str | None]]:
+    """The main threads resumed as a heartbeat (facts.heartbeat)."""
+    return {k for k, t in facts.threads.items() if t.agent_id is None and heartbeat(t)}
+
+
+def _net(rereads: float, handoffs: float) -> float:
+    """What a handoff saves: the rereads it avoids less the rebuild it costs, never
+    below zero (a thread that barely passed the line saves nothing)."""
+    return max(0.0, rereads - handoffs)
+
+
 def long_running_agents(facts: Facts) -> list[Finding]:
-    """Threads whose prompts grew past LONG_CONTEXT. Saving: each such turn's
-    (context - LONG_CONTEXT) x its model's cache-read price, what rereading the
-    tokens past the useful size cost (a rewrite's premium on them is left to the
-    rewrite findings); the part above LATE_COMPACTION before a late compaction is
-    left to `late_compactions`."""
+    """Threads whose prompts grew past LONG_CONTEXT. Saving, per thread, what its
+    requests paid to read their prompts less what they would have paid had it
+    handed off each time it passed the line (facts.simulate):
+
+        sum over its requests of context x read price - simulated cost
+
+    floored at zero. The simulated agent follows the thread's own requests: it
+    grows by the same per-request increments, and each time it passes
+    LONG_CONTEXT a fresh agent takes over at the thread's first context when its
+    session began in the window, at most RESTART_CONTEXT (an agent that continues
+    the work needs its files and state back), else at RESTART_CONTEXT. Its first
+    request writes that context to the cache
+    (5-minute lifetime for a subagent, the thread's own otherwise) instead of
+    reading it. Prices are
+    the read price of each request (a rewrite's premium is left to the rewrite
+    findings). Heartbeat sessions (facts.heartbeat) are left to
+    `heartbeat_growing_session`. An earlier compaction is the other way to the
+    same dollars: `late_compactions` overlaps this finding."""
     out: list[Finding] = []
     grouped: dict[str, list[tuple[str, LongContext]]] = defaultdict(list)
+    beats = _heartbeats(facts)
     for project, lc in facts.long_context.items():
         grouped[_group(project)].append((project, lc))
     for project, items in grouped.items():
         lcs = [lc for _, lc in items]
-        usd = sum(lc.excess_usd for lc in lcs)
-        threads: set[tuple[str, str | None]] = set().union(*(lc.threads for lc in lcs))
-        turns = sum(lc.turns for lc in lcs)
-        biggest = max(lc.max_context for lc in lcs)
+        per_thread = [v for lc in lcs for k, v in lc.per_thread.items() if k not in beats]
+        if not per_thread:
+            continue
+        usd = sum(max(0.0, v[0]) for v in per_thread)
+        handoffs = int(sum(v[1] for v in per_thread))
+        threads: set[tuple[str, str | None]] = set().union(*(lc.threads for lc in lcs)) - beats
+        turns = int(sum(v[2] for v in per_thread))
         evs = sorted(
-            (e for lc in lcs for e in lc.evidence.values()),
+            (e for lc in lcs for k, e in lc.evidence.items() if k not in beats),
             key=lambda p: -p[0],
         )
+        biggest = evs[0][0] if evs else max(lc.max_context for lc in lcs)
         subagents = sum(1 for _, aid in threads if aid is not None)
         f = _finding(
             facts,
@@ -989,7 +1060,10 @@ def long_running_agents(facts: Facts) -> list[Finding]:
             summary=(
                 f"{len(threads)} thread(s) ({subagents} subagents) ran {turns:,} turns past "
                 f"{_k(LONG_CONTEXT)} tokens, up to {_k(biggest)}; every such turn rereads "
-                "the whole context."
+                f"the whole context. Handing off at {_k(LONG_CONTEXT)} ({handoffs} "
+                f"handoff(s), assuming a fresh agent restarts at about "
+                f"{_k(RESTART_CONTEXT)} tokens and grows as the thread did) would have "
+                "read that much less."
             ),
             advice=(
                 "One task per agent: hand off with a short note and start fresh, or "
@@ -1001,6 +1075,9 @@ def long_running_agents(facts: Facts) -> list[Finding]:
                 "turns": turns,
                 "max_context": biggest,
                 "threshold": LONG_CONTEXT,
+                "handoffs": handoffs,
+                "restart_tokens": RESTART_CONTEXT,
+                "past_line_usd": round(sum(v[3] for v in per_thread), 6),
             },
         )
         if f:
@@ -1009,17 +1086,25 @@ def long_running_agents(facts: Facts) -> list[Finding]:
 
 
 def late_compactions(facts: Facts) -> list[Finding]:
-    """Compactions that started above LATE_COMPACTION tokens. Saving: the turns
-    before each one, (context - LATE_COMPACTION) x their cache-read price."""
+    """Compactions that started above LATE_COMPACTION tokens. Saving, per
+    compaction, floored at zero: from the turn its thread passed LATE_COMPACTION to
+    the compaction, each turn's context x read price less the same for a thread
+    compacted then (facts.simulate): it restarts at the post-compaction size the
+    logs show (or RESTART_CONTEXT if larger), written once, and grows by the
+    thread's own increments (compacting again at the line). It overlaps
+    `long_running_agents`, the other way to the same dollars."""
     per_project: dict[str, list[Compaction]] = defaultdict(list)
+    beats = _heartbeats(facts)
     for (sid, _aid), comps in facts.compactions.items():
+        if (sid, _aid) in beats:
+            continue  # heartbeat_growing_session counts these sessions whole
         for c in comps:
             if c.pre_tokens > LATE_COMPACTION and c.timestamp >= facts.since:
                 per_project[_group(facts.project_of(sid))].append(c)
     out: list[Finding] = []
     for project, found in per_project.items():
         comps = sorted(found, key=lambda c: -c.pre_tokens)
-        usd = sum(c.excess_usd for c in comps)
+        usd = sum(max(0.0, c.excess_usd) for c in comps)
         pres = [c.pre_tokens for c in comps]
         f = _finding(
             facts,
@@ -1030,7 +1115,9 @@ def late_compactions(facts: Facts) -> list[Finding]:
             summary=(
                 f"{len(comps)} compaction(s) started above {_k(LATE_COMPACTION)} tokens "
                 f"({', '.join(_k(p) for p in pres[:5])}); the turns before them reread "
-                "everything above that."
+                f"everything; compacting at the line (assuming a restart at about "
+                f"{_k(RESTART_CONTEXT)} tokens or the logged post size) saves the "
+                "difference."
             ),
             advice=(
                 f"Compact by hand when the context passes {_k(LATE_COMPACTION)}, or end the "
@@ -1061,36 +1148,89 @@ def late_compactions(facts: Facts) -> list[Finding]:
 # --------------------------------------------------------------------------- cache
 
 
+# A cache rewrite after a pause has one of three causes, named as explain names
+# them: the thread was running a tool (tool wait), a subagent sat finished until
+# its parent resumed it (late resume), or the main thread waited on the user (user
+# away). Only pauses past the cache lifetime count, and never one under 5 minutes.
+IDLE_CAUSES = {
+    "subagent_cache_expiry": TOOL_WAIT_EXPIRY,
+    "subagent_resumed_late": LATE_RESUME_EXPIRY,
+    "idle_cache_rewrites": IDLE_EXPIRY,
+}
+
+
 def idle_cache_rewrites(facts: Facts) -> list[Finding]:
-    """Requests that rewrote at least half their prompt to the cache after their
-    thread had been idle past the cache lifetime (5 minutes, or 1 hour when the
-    request wrote with the 1-hour lifetime). Saving: each rewrite's cost above
-    reading the same tokens from the cache."""
-    return _rewrites(
+    """Requests that rewrote at least half their prompt after a pause past the
+    cache lifetime (5 minutes, or 1 hour when the request wrote with the 1-hour
+    lifetime) that explain's `expiry_kind` names IDLE_EXPIRY: no tool or
+    background agent ran through it and no lead resumed it, so someone was away
+    (an away_summary confirms some). Saving: each rewrite's cost above reading the
+    same tokens."""
+    out = _rewrites(
         facts,
         facts.idle,
         kind="idle_cache_rewrites",
         title="Cache rewrites after idling",
         what="after a pause longer than the cache lifetime",
         advice=(
-            "Group work so sessions don't sit idle past the cache lifetime between "
-            "turns, and check the 1-hour cache lifetime is in use for long pauses."
+            "Before a long break, compact or end the session with a handoff note, and "
+            "group work so a session doesn't sit idle past the cache lifetime between "
+            "turns; check the 1-hour lifetime is in use for long pauses."
         ),
     )
+    grouped = _by_group(facts.idle)
+    for i, f in enumerate(out):
+        rws = grouped[f.scope]
+        confirmed = sum(rw.confirmed for rw in rws)
+        longest = max(rw.longest for rw in rws).total_seconds() / 60
+        out[i] = replace(
+            f,
+            summary=(
+                f"{f.summary} {confirmed} of them after an away_summary; the longest "
+                f"pause was {longest:.0f} min."
+            ),
+            metrics={**f.metrics, "after_away_summary": confirmed},
+        )
+    return out
+
+
+def subagent_resumed_late(facts: Facts) -> list[Finding]:
+    """Subagent requests that rewrote at least half their prompt after a pause past
+    the cache lifetime with no tool call running: the subagent had stopped and its
+    parent resumed it late. Saving: each rewrite's cost above reading the same
+    tokens."""
+    out = _rewrites(
+        facts,
+        facts.resumes,
+        kind="subagent_resumed_late",
+        title="Subagents resumed after their cache expired",
+        what="when their parent resumed them past the cache lifetime",
+        advice=(
+            "A subagent left waiting longer than its 5-minute cache lifetime rewrites its "
+            "whole context when the parent resumes it. Have it report and finish, and "
+            "start a fresh agent for the next step instead of resuming the old one."
+        ),
+    )
+    grouped = _by_group(facts.resumes)
+    for i, f in enumerate(out):
+        longest = max(rw.longest for rw in grouped[f.scope]).total_seconds() / 60
+        out[i] = replace(f, summary=f"{f.summary} The longest pause was {longest:.0f} min.")
+    return out
 
 
 def subagent_cache_expiry(facts: Facts) -> list[Finding]:
-    """Subagent requests that rewrote at least half their prompt because a tool call
-    ran past the cache lifetime (5 minutes for subagents): the last result of the
-    previous request's calls came back after the lifetime, and the rewrite followed
-    it within a minute. Saving: each rewrite's cost above reading the same tokens.
-    These rewrites are left out of `idle_cache_rewrites`. No setting is known to
-    change a subagent's lifetime, so there is no change to paste."""
+    """Requests that rewrote at least half their prompt because a tool call ran past
+    the cache lifetime (5 minutes for subagents): the last result of the previous
+    request's calls came back after the lifetime (facts.expiry_kind, explain's
+    rule). Mostly subagents; a main thread's long call counts here too. Saving:
+    each rewrite's cost above reading the same tokens. These rewrites are left out
+    of the other two pause causes. No setting is known to change a subagent's
+    lifetime, so there is no change to paste."""
     out = _rewrites(
         facts,
         facts.tool_waits,
         kind="subagent_cache_expiry",
-        title="Subagent caches expired during long tool calls",
+        title="Caches expired during long tool calls",
         what="after a tool call ran past the cache lifetime",
         advice=(
             "Run long commands (builds, test suites, wait loops) in the background and "
@@ -1100,9 +1240,7 @@ def subagent_cache_expiry(facts: Facts) -> list[Finding]:
             "run time): allow it in the agent's settings, or approve the command sooner."
         ),
     )
-    grouped: dict[str, list[Rewrite]] = defaultdict(list)
-    for project, rw in facts.tool_waits.items():
-        grouped[_group(project)].append(rw)
+    grouped = _by_group(facts.tool_waits)
     for i, f in enumerate(out):
         rws = grouped[f.scope]
         causes: dict[str, int] = defaultdict(int)
@@ -1125,6 +1263,13 @@ def subagent_cache_expiry(facts: Facts) -> list[Finding]:
             },
         )
     return out
+
+
+def _by_group(data: Mapping[str, Rewrite]) -> dict[str, list[Rewrite]]:
+    grouped: dict[str, list[Rewrite]] = defaultdict(list)
+    for project, rw in data.items():
+        grouped[_group(project)].append(rw)
+    return grouped
 
 
 def model_switches(facts: Facts) -> list[Finding]:
@@ -1167,7 +1312,12 @@ def _rewrites(
             ),
             advice=advice,
             evidence=tuple(e for _, e in evs[:EVIDENCE_PER_FINDING]),
-            metrics={"rewrites": count, "days": len(days), "tokens": tokens},
+            metrics={
+                "rewrites": count,
+                "days": len(days),
+                "tokens": tokens,
+                **({"cause": IDLE_CAUSES[kind]} if kind in IDLE_CAUSES else {}),
+            },
         )
         if f:
             out.append(f)
@@ -1240,12 +1390,16 @@ def all_findings(
         long_running_agents,
         late_compactions,
         idle_cache_rewrites,
+        subagent_resumed_late,
         subagent_cache_expiry,
         model_switches,
         images_in_tool_results,
     ):
         found.extend(check(facts))
     found.extend(agent_tools_unused(facts, definitions, openclaw_root, user_dir))
+    from capcom.checks.sessions import session_findings  # it builds on this module
+
+    found.extend(session_findings(facts, definitions, openclaw_root))
     found.sort(key=lambda f: (-f.saving_usd_per_week, f.kind, f.scope))
     present = {f.kind for f in found}
     return [replace(f, metrics={**f.metrics, "overlaps": overlaps(f.kind, present)}) for f in found]
@@ -1267,13 +1421,27 @@ _CONTEXT = (
     "long_running_agents",
     "late_compactions",
     "idle_cache_rewrites",
+    "subagent_resumed_late",
     "subagent_cache_expiry",
     "model_switches",
+    "session_never_ended",
+    "heartbeat_growing_session",
 )
 _OVERLAP_PAIRS: frozenset[frozenset[str]] = frozenset(
     {frozenset({a, b}) for a in _PROMPT_ITEMS for b in _CONTEXT}
     | {frozenset({"agent_tools_unused", b}) for b in _PROMPT_ITEMS[:3]}
     | {frozenset({"one_command_subagents", b}) for b in (*_PROMPT_ITEMS, *_CONTEXT)}
+    # two ways to the same rereads: a handoff, an earlier compaction, a fresh session
+    | {
+        frozenset(pair)
+        for pair in (
+            ("long_running_agents", "late_compactions"),
+            ("long_running_agents", "session_never_ended"),
+            ("late_compactions", "session_never_ended"),
+        )
+    }
+    # pricing a type's requests on Sonnet cuts every dollar they spent
+    | {frozenset({"model_mix", b}) for b in (*_PROMPT_ITEMS, *_CONTEXT, "one_command_subagents")}
 )
 
 

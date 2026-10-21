@@ -403,9 +403,9 @@ def test_an_agent_without_a_tools_line_gets_a_line_marked_as_a_restriction(
     assert f.change is not None
     comment, line = f.change.splitlines()
     assert line == "tools: Read"
-    assert comment.startswith("# adds a tools: line")  # a YAML comment: safe to paste
+    assert comment.startswith("# a restriction")  # a YAML comment: safe to paste
     assert "only these 1 tools" in comment and "inherits all 2" in comment
-    assert "no tools: line" in f.advice and "restricts it" in f.advice
+    assert "no tools: line" in f.advice and "is a restriction" in f.advice
     assert f.metrics["restricts"] is True
     assert f.saving_usd_per_week == pytest.approx(1_000 * 400 * READ_RATE)
 
@@ -421,14 +421,14 @@ def test_few_spawns_without_a_tools_line_get_advice_but_no_line(tmp_path: Path) 
     assert f.saving_usd_per_week == pytest.approx(1_000 * 120 * READ_RATE)
 
 
-def test_the_restricting_line_holds_only_tools_from_its_claude_code_listings(
+def test_the_restricting_line_keeps_every_tool_called_in_claude_code_projects(
     tmp_path: Path,
 ) -> None:
     folder = _definition(tmp_path, "model: opus")
     root = tmp_path / ".openclaw"
     claw = re.sub(r"[^A-Za-z0-9]", "-", str(root)) + "-workspace"  # Claude Code's naming
-    # Claude Code spawns: Read listed and called; "ghost" called but in no listing
-    reqs, agents = _coder_runs(("Read", "ghost"), spawns=10)
+    # Claude Code spawns: Read listed and called; Grep called but in no listing
+    reqs, agents = _coder_runs(("Read", "Grep"), spawns=10)
     evs = _listing(("Read", "Write", "Bash"), spawns=10)
     # OpenClaw spawns call its own tools, listed in their own sessions only
     more, more_agents = _coder_runs(("process", "mcp__claw__exec"), session="s9", project=claw)
@@ -448,10 +448,74 @@ def test_the_restricting_line_holds_only_tools_from_its_claude_code_listings(
     idx = index(reqs + more, evs, agents + more_agents)
     found = run_checks(idx, TABLE, SINCE, UNTIL, agent_dirs=[folder], openclaw_root=root)
     f = only(found, "agent_tools_unused")
-    assert f.change is not None and f.change.splitlines()[-1] == "tools: Read"
-    for name in ("process", "mcp__claw__exec", "ghost"):
+    assert f.change is not None and f.change.splitlines()[-1] == "tools: Grep, Read"
+    for name in ("process", "mcp__claw__exec"):
         assert name not in f.change and name in f.advice  # named as left out
     assert f.metrics["spawns"] == 10 and f.metrics["tools_given"] == 3
+
+
+def _shapes(names: tuple[str, ...], minute: float = 9, spawns: int = 10, **attrs) -> list:  # type: ignore[no-untyped-def, type-arg]
+    return [
+        ev(
+            EventKind.TOOL_SET,
+            minute,
+            agent=f"a{i}",
+            source="api-request-shape",
+            names=names,
+            size_tokens=8000,
+            **attrs,
+        )
+        for i in range(spawns)
+    ]
+
+
+def test_deferred_tools_ride_by_name_and_save_nothing(tmp_path: Path) -> None:
+    folder = _definition(tmp_path, "model: opus")
+    reqs, agents = _coder_runs(("Read",), spawns=10)
+    evs = _shapes(("Read", "Write", "Bash"), deferred_names=("Write",), tools_size_tokens=2_000)
+    evs += [
+        ev(
+            EventKind.TOOL_SET,
+            9,
+            agent=f"a{i}",
+            source="deferred_tools_delta",
+            added=("mcp__x__y",),
+            size_tokens=10,
+        )
+        for i in range(10)
+    ]
+    f = only(_checks(index(reqs, evs, agents), [folder]), "agent_tools_unused")
+    # only Bash's schema (2,000 tokens over Read and Bash) rides; Write and mcp__x__y
+    # are names only
+    assert f.saving_usd_per_week == pytest.approx(1_000 * 400 * READ_RATE)
+    assert f.metrics["tools_given"] == 3 and f.metrics["unused_with_schema"] == 1
+    assert "deferred, sent by name only" in f.summary
+
+
+@pytest.mark.parametrize("minute", [9, 29.5])
+def test_the_saving_is_the_same_when_listings_begin_mid_window(
+    tmp_path: Path, minute: float
+) -> None:
+    # listings logged from the start, or only for the last half of the requests (an
+    # older Claude Code logged none): the same weekly figure
+    folder = _definition(tmp_path, "model: opus")
+    reqs, agents = _coder_runs(("Read",), spawns=10)
+    evs = _shapes(("Read", "Write"), minute=minute, tools_size_tokens=2_000)
+    f = only(_checks(index(reqs, evs, agents), [folder]), "agent_tools_unused")
+    assert f.saving_usd_per_week == pytest.approx(1_000 * 400 * READ_RATE)
+
+
+def test_tools_called_before_a_short_window_stay_in_the_line(tmp_path: Path) -> None:
+    folder = _definition(tmp_path, "model: opus")
+    reqs, agents = _coder_runs(("Read",), spawns=10)
+    # ten days before the window, a coder called one of the improved server's tools
+    early = run(1, start=-60 * 24 * 10, agent="old", calls={0: ("mcp__improved__find",)})
+    agents.append(agent("old", "coder"))
+    names = ("Read", "Write", "mcp__improved__find", "mcp__improved__get_plan")
+    evs = _shapes(names, tools_size_tokens=4_000)
+    f = only(_checks(index(reqs + early, evs, agents), [folder]), "agent_tools_unused")
+    assert f.change is not None and f.change.splitlines()[-1] == "tools: Read, mcp__improved"
+    assert f.saving_usd_per_week == pytest.approx(1_000 * 400 * READ_RATE)  # Write only
 
 
 def test_a_project_level_definition_counts_only_its_own_project(tmp_path: Path) -> None:

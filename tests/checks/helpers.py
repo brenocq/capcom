@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 from capcom.cost.prices import load_prices
-from capcom.types import AgentInfo, AttrValue, Event, EventKind, Finding, Request
+from capcom.types import AgentInfo, AttrValue, Event, EventKind, Finding, Request, SessionInfo
 from tests.cost.fakes import T0, FakeIndex, at, req
 
 SINCE = T0
@@ -104,3 +104,16 @@ def only(findings: list[Finding], kind: str) -> Finding:
     found = [f for f in findings if f.kind == kind]
     assert len(found) == 1, kinds(findings)
     return found[0]
+
+
+def began(idx: SortedIndex) -> SortedIndex:
+    """`idx` with every session's first_seen at its first request: sessions that
+    began in the window, whose first context the checks may take as their start."""
+    first: dict[str, Request] = {}
+    for r in sorted(idx.reqs, key=lambda r: r.timestamp):
+        first.setdefault(r.session_id, r)
+    idx.infos = [
+        SessionInfo(sid, r.project_dir, first_seen=r.timestamp, last_seen=UNTIL)
+        for sid, r in first.items()
+    ]
+    return idx
