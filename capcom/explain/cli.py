@@ -12,13 +12,17 @@ from capcom.config import Config
 from capcom.explain import explain
 from capcom.explain import matched as is_matched
 from capcom.explain.fmt import CAUSE_LABELS, CONFIDENCE_LABELS, day_hm, usd
+from capcom.timeline.groups import ProjectNames
 from capcom.types import CauseKind, Confidence, Explanation, Index, PriceTable, Spike
 
 FindSpikes = Callable[[Index, PriceTable, datetime, datetime], list[Spike]]
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
-def _project(project_dir: str) -> str:
+def _project(project_dir: str, names: ProjectNames | None = None) -> str:
+    """The project's display name: the shared rule (ProjectNames) when given."""
+    if names is not None:
+        return names.label(project_dir)
     from capcom.cost.top import project_label
 
     return project_label(project_dir)
@@ -43,6 +47,7 @@ def format_spikes(
     limit: int,
     projects: dict[str, str],
     titles: dict[str, str],
+    names: ProjectNames | None = None,
 ) -> str:
     by_spike: dict[Spike, list[Explanation]] = {}
     for e in explanations:
@@ -59,7 +64,9 @@ def format_spikes(
         exps = by_spike[s]
         where = "all sessions"
         if s.session_id is not None:
-            where = titles.get(s.session_id) or _project(projects.get(s.session_id, s.session_id))
+            where = titles.get(s.session_id) or _project(
+                projects.get(s.session_id, s.session_id), names
+            )
             where = where if len(where) <= 48 else where[:47] + "…"
         if s.scope == "session":
             where += " (session-wide)"
@@ -132,9 +139,11 @@ def run_spikes(
     explanations = explain(index, table, spikes)
     projects: dict[str, str] = {}
     titles: dict[str, str] = {}
-    for info in index.sessions():
+    sessions = list(index.sessions())
+    names = ProjectNames.build(sessions, config.openclaw_root)
+    for info in sessions:
         projects[info.session_id] = info.project_dir
         if info.title:
             titles[info.session_id] = info.title
-    print(format_spikes(explanations, limit, projects, titles), file=out)
+    print(format_spikes(explanations, limit, projects, titles, names), file=out)
     return 0
