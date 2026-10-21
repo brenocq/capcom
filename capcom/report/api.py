@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import importlib
 import math
 import statistics
 from collections.abc import Mapping, Sequence
@@ -1433,12 +1434,14 @@ def _open_marks(ctx: Context) -> tuple[dict[str, Any], Any]:
         return {}, lambda kind: None
     label = didit.labeler(ctx)
     named = getattr(backend, "measure_name", None)
+    table: Any = None
+    if named is None and getattr(backend, "__name__", "") == "capcom.changes":
+        with contextlib.suppress(ImportError, AttributeError):  # its table of measures
+            table = importlib.import_module("capcom.changes.measures").MEASURES
 
     def measure_name(kind: str) -> str | None:
-        if not callable(named):
-            return None
         with contextlib.suppress(Exception):
-            name = named(kind)
+            name = named(kind) if callable(named) else table[kind].label if table else None
             return name if isinstance(name, str) else None
         return None
 

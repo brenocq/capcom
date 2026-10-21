@@ -514,6 +514,8 @@ class Handler(BaseHTTPRequestHandler):
             self._error(err.status, err.code, err.message)
         except Unavailable:
             self._error(HTTPStatus.NOT_IMPLEMENTED, "unavailable", "capcom.changes is missing.")
+        except KeyError:  # unmarked meanwhile
+            self._error(HTTPStatus.NOT_FOUND, "not_found", "no such change")
         except ValueError as err:  # capcom.changes refused it
             self._error(HTTPStatus.BAD_REQUEST, "bad_request", str(err))
         except sqlite3.Error:

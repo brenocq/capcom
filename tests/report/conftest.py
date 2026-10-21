@@ -4,6 +4,7 @@ server for the website tests. All data here is made up."""
 from __future__ import annotations
 
 import json
+import os
 import threading
 import urllib.error
 import urllib.request
@@ -213,6 +214,18 @@ def serve(site: Site) -> Iterator[Client]:
     finally:
         server.shutdown()
         server.server_close()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def scratch_data_home(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """capcom.changes keeps its marks under $XDG_DATA_HOME: never the real one here."""
+    old = os.environ.get("XDG_DATA_HOME")
+    os.environ["XDG_DATA_HOME"] = str(tmp_path_factory.mktemp("data"))
+    yield
+    if old is None:
+        os.environ.pop("XDG_DATA_HOME", None)
+    else:
+        os.environ["XDG_DATA_HOME"] = old
 
 
 @pytest.fixture(scope="session")

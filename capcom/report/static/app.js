@@ -10,6 +10,7 @@ import { renderSessions } from './sessions.js';
 import { renderSpikes } from './spikes.js';
 import { renderChecks } from './checks.js';
 import { renderLimits } from './limits.js';
+import { renderChanges, renderChange } from './changes.js';
 
 const ICON = {
   overview: 'M3 12h4l3-8 4 16 3-8h4',
@@ -18,6 +19,7 @@ const ICON = {
   spikes: 'M3 18l5-5 4 3 8-10',
   checks: 'M9 11l3 3 8-8M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9',
   limits: 'M4 18l4-8 4 5 4-9v12M3 20h18',
+  changes: 'M21 12a9 9 0 1 1-4.5-7.8M21 4.5L12 13.5l-3-3',
 };
 const NAV = [
   ['overview', '/', 'Overview'],
@@ -25,6 +27,7 @@ const NAV = [
   ['sessions', '/sessions', 'Sessions'],
   ['spikes', '/spikes', 'Spikes'],
   ['checks', '/checks', 'Checks'],
+  ['changes', '/changes', 'Did it work?'],
   ['limits', '/limits', 'Limits'],
 ];
 
@@ -83,7 +86,8 @@ function drawSidebar() {
     h('a.brand', { href: '/' }, mark(), h('span', { text: 'capcom' })),
     form,
     h('div.nav', null, NAV.map(([id, href, label, soon]) => h('a', { href, 'aria-current': id === active ? 'page' : null },
-      icon(ICON[id]), h('span', { text: label }), soon ? h('span.soon', { text: soon, title: `Coming in milestone ${soon.slice(1)}` }) : null))),
+      icon(ICON[id]), h('span', { text: label }), soon ? h('span.soon', { text: soon, title: `Coming in milestone ${soon.slice(1)}` }) : null,
+      id === 'changes' && statusData && statusData.changes ? h('span.soon', { text: String(statusData.changes), title: `${statusData.changes} change${statusData.changes === 1 ? '' : 's'} marked as applied` }) : null))),
     liveList(),
     footer(),
   );
@@ -140,6 +144,7 @@ const PAGES = {
   day: renderDay,
   spikes: renderSpikes,
   checks: renderChecks,
+  changes: (main, r, live) => (r.arg ? renderChange(main, r, live) : renderChanges(main, r, live)),
   limits: renderLimits,
 };
 
@@ -163,6 +168,8 @@ async function renderPage() {
 }
 
 window.addEventListener('capcom-route', () => { drawSidebar(); renderPage(); });
+// a mark was written: redraw the page and the sidebar's count
+window.addEventListener('capcom-changed', () => { renderPage(); refreshStatus(); });
 
 drawSidebar();
 renderPage();
