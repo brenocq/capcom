@@ -16,10 +16,17 @@ Tables (schema version in `schema_version`):
   field with the sequence number of the write that set it (from `counters`), merged
   per field when read, so forgetting a file drops only its contribution
 - cost_states: one row per (file, pos), flagged when it comes from its session's
-  main log; the last per session is the main log's highest pos
+  main log; the last per session is the main log's highest pos. `next_ts` is the time
+  of the first timestamped record after the line: the source fills it within a parse
+  call, and `apply` fills what is still missing from the file's next batch
+- shared_replies: (session_id, message_id) of each reply found in the logs of two
+  sessions (a forked or copied session). `requests` keeps one row per message_id, so
+  the session whose row was replaced lost that request; found when a write replaces a
+  row of another session, and kept as history (forget_file leaves it)
 
-Version 2 lacked cost_states.ts: a writable open migrates it in place (the index keeps
-history the logs may have lost) and queues the files with cost-states for a reread.
+Version 2 lacked cost_states.ts, version 3 cost_states.next_ts and shared_replies: a
+writable open migrates them in place (the index keeps history the logs may have lost)
+and queues the files with cost-states for a reread.
 
 Times are stored as integer microseconds since the Unix epoch, UTC.
 """
@@ -54,12 +61,12 @@ from capcom.types import (
     Usage,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _US = timedelta(microseconds=1)
 _IN_CHUNK = 500  # ids per `IN (...)` query
-_OUTPUT, _ESTIMATED = 11, 24  # positions in a request row
+_SESSION, _OUTPUT, _ESTIMATED = 2, 11, 24  # positions in a request row
 
 _SESSION_FIELDS = ("project_dir", "cwd", "title", "version", "entrypoint", "git_branch")
 _AGENT_FIELDS = (
@@ -76,6 +83,14 @@ _AGENT_FIELDS = (
 def _seq_cols(names: Sequence[str], typ: str = "") -> str:
     return ",\n    ".join(f"{n} {typ}, {n}_seq INTEGER".replace("  ", " ") for n in names)
 
+
+_SHARED = """
+CREATE TABLE IF NOT EXISTS shared_replies (
+    session_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    PRIMARY KEY (session_id, message_id)
+) WITHOUT ROWID;
+"""
 
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -165,10 +180,11 @@ CREATE TABLE IF NOT EXISTS cost_states (
     start_time_ms INTEGER,
     has_unknown_model_cost INTEGER,
     ts INTEGER,
+    next_ts INTEGER,
     PRIMARY KEY (file, pos)
 );
 CREATE INDEX IF NOT EXISTS cost_states_session ON cost_states (session_id, main, pos);
-"""
+{_SHARED}"""
 
 _REQUEST_COLS = (
     "message_id, file, session_id, agent_id, project_dir, ts, model, input, cache_read, "
@@ -220,7 +236,7 @@ _UPSERT_AGENT = _upsert_part("agent_parts", "agent_id", _AGENT_FIELDS)
 
 _INSERT_COST = (
     "INSERT OR REPLACE INTO cost_states (file, pos, session_id, main, total_cost_usd, models, "
-    "start_time_ms, has_unknown_model_cost, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    "start_time_ms, has_unknown_model_cost, ts, next_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
 _UPSERT_FILE = (
@@ -430,7 +446,11 @@ class SqliteIndex:
         sess: list[SessionInfo] = []
         agents: list[AgentInfo] = []
         costs: list[tuple[Any, ...]] = []
+        earliest: datetime | None = None  # the batch's earliest record time
         for r in batch.records:
+            t = _record_time(r)
+            if t is not None and (earliest is None or t < earliest):
+                earliest = t
             if isinstance(r, Request):
                 u = r.usage
                 row = [
@@ -494,11 +514,24 @@ class SqliteIndex:
                         r.start_time_ms,
                         _int_opt(r.has_unknown_model_cost),
                         None if r.timestamp is None else _aware("timestamp", r.timestamp),
+                        None
+                        if r.next_timestamp is None
+                        else _aware("next_timestamp", r.next_timestamp),
                     )
                 )
             else:
                 raise TypeError(f"not a capcom record: {type(r).__name__}")
         with self._tx() as cur:
+            if earliest is not None:
+                # This file's cost-states before this batch that no record followed yet:
+                # every record of this batch comes after them in the file.
+                row = cur.execute("SELECT pos FROM files WHERE path = ?", (file,)).fetchone()
+                if row is not None and row[0] > 0:
+                    cur.execute(
+                        "UPDATE cost_states SET next_ts = ? "
+                        "WHERE file = ? AND next_ts IS NULL AND pos < ?",
+                        (_aware("timestamp", earliest), file, row[0]),
+                    )
             if reqs:
                 self._write_requests(cur, reqs)
             if evs:
@@ -525,25 +558,34 @@ class SqliteIndex:
         # Records of one reply can arrive in different scans, a later one with fewer
         # tool calls or (when estimated) a smaller output than before: keep the union of
         # the tool calls, and the larger output when the new one is an estimate.
+        # A row of another session replaced here: both sessions hold this reply.
         ids = list(reqs)
-        old: dict[str, tuple[int, list[list[Any]]]] = {}
+        old: dict[str, tuple[int, list[list[Any]], str]] = {}
         for i in range(0, len(ids), _IN_CHUNK):
             chunk = ids[i : i + _IN_CHUNK]
-            for mid, output, tools in cur.execute(
-                "SELECT message_id, output, tool_calls FROM requests "
+            for mid, output, tools, session in cur.execute(
+                "SELECT message_id, output, tool_calls, session_id FROM requests "
                 f"WHERE message_id IN ({', '.join('?' * len(chunk))})",
                 chunk,
             ):
-                old[mid] = (output, json.loads(tools) if tools else [])
+                old[mid] = (output, json.loads(tools) if tools else [], session)
         rows = []
+        shared: list[tuple[str, str]] = []
         for mid, (row, tools) in reqs.items():
             prev = old.get(mid)
             if prev is not None:
                 tools = _union(prev[1], tools)
                 if row[_ESTIMATED]:
                     row[_OUTPUT] = max(row[_OUTPUT], prev[0])
+                if prev[2] != row[_SESSION]:
+                    shared += [(prev[2], mid), (row[_SESSION], mid)]
             rows.append((*row, _dumps(tools) if tools else None))
         cur.executemany(_INSERT_REQUEST, rows)
+        if shared:
+            cur.executemany(
+                "INSERT OR IGNORE INTO shared_replies (session_id, message_id) VALUES (?, ?)",
+                shared,
+            )
 
     def forget_file(self, path: Path) -> None:
         """Drop every row that came from `path`, and its FileState."""
@@ -642,9 +684,9 @@ class SqliteIndex:
     def last_cost_states(self) -> Iterator[CostState]:
         """The last cost-state of each session: the highest offset in the session's
         main log, or in its other files when the main log has none."""
-        for session, pos, total, models, start_ms, unknown, ts in self._con.execute(
+        for session, pos, total, models, start_ms, unknown, ts, next_ts in self._con.execute(
             "SELECT session_id, pos, total_cost_usd, models, start_time_ms, "
-            "has_unknown_model_cost, ts FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY "
+            "has_unknown_model_cost, ts, next_ts FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY "
             "session_id ORDER BY main DESC, pos DESC, file) AS rank FROM cost_states) "
             "WHERE rank = 1 ORDER BY session_id"
         ):
@@ -656,7 +698,29 @@ class SqliteIndex:
                 if models
                 else {}
             )
-            yield CostState(session, pos, total, loaded, start_ms, _bool_opt(unknown), _dt_opt(ts))
+            yield CostState(
+                session,
+                pos,
+                total,
+                loaded,
+                start_ms,
+                _bool_opt(unknown),
+                _dt_opt(ts),
+                _dt_opt(next_ts),
+            )
+
+    def shared_replies(
+        self, session_id: str, since: datetime | None = None, until: datetime | None = None
+    ) -> int:
+        """How many replies of `session_id` with a time in [since, until) are also in
+        another session's log (its request row may be the other session's)."""
+        where, args = _range(since, until, None)
+        where = [f"r.{w}" for w in where]
+        sql = (
+            "SELECT COUNT(*) FROM shared_replies s JOIN requests r USING (message_id) "
+            f"WHERE {' AND '.join(['s.session_id = ?', *where])}"
+        )
+        return int(self._con.execute(sql, [session_id, *args]).fetchone()[0])
 
 
 def _session_row(file: str, s: SessionInfo, seq: int) -> tuple[Any, ...]:
@@ -679,6 +743,14 @@ def _agent_row(file: str, a: AgentInfo, seq: int) -> tuple[Any, ...]:
     return (file, a.agent_id, *pairs)
 
 
+def _record_time(r: object) -> datetime | None:
+    if isinstance(r, (Request, Event)):
+        return r.timestamp
+    if isinstance(r, SessionInfo):
+        return r.first_seen
+    return None
+
+
 def _migrate_2_to_3(con: sqlite3.Connection) -> None:
     """Add cost_states.ts and set the offset of every file with cost-states to 0, so
     the next scan reads them again (idempotent: rows upsert by their keys) and fills
@@ -690,6 +762,25 @@ def _migrate_2_to_3(con: sqlite3.Connection) -> None:
             con.execute("UPDATE files SET pos = 0 WHERE path IN (SELECT file FROM cost_states)")
             con.execute("DELETE FROM schema_version")
             con.execute("INSERT INTO schema_version (version) VALUES (3)")
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
+    con.execute("COMMIT")
+
+
+def _migrate_3_to_4(con: sqlite3.Connection) -> None:
+    """Add cost_states.next_ts and shared_replies, and queue every file with
+    cost-states for a reread (as 2 -> 3 does): the reread fills next_ts and, as it
+    replaces request rows another session wrote last, finds the shared replies of
+    every session that has a cost-state. One transaction."""
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        if con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 3:
+            con.execute("ALTER TABLE cost_states ADD COLUMN next_ts INTEGER")
+            con.execute(_SHARED)
+            con.execute("UPDATE files SET pos = 0 WHERE path IN (SELECT file FROM cost_states)")
+            con.execute("DELETE FROM schema_version")
+            con.execute("INSERT INTO schema_version (version) VALUES (4)")
     except BaseException:
         con.execute("ROLLBACK")
         raise
@@ -722,8 +813,11 @@ def open_index(path: Path, readonly: bool = False) -> SqliteIndex:
             if row[0] is None:
                 con.executescript(_SCHEMA)
                 con.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
-            elif row[0] == 2:
-                _migrate_2_to_3(con)
+            else:
+                if row[0] == 2:
+                    _migrate_2_to_3(con)
+                if con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 3:
+                    _migrate_3_to_4(con)
         row = con.execute("SELECT MAX(version) FROM schema_version").fetchone()
         version = row[0] if row else None
         if version != SCHEMA_VERSION:

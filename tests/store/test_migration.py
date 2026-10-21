@@ -1,4 +1,5 @@
-"""Schema 2 -> 3: cost_states gains its time, in place, and the files are read again."""
+"""Schemas 2 -> 3 -> 4: cost_states gains its times (ts, then next_ts) and the index
+its shared_replies, in place, and the files with cost-states are read again."""
 
 from __future__ import annotations
 
@@ -28,11 +29,20 @@ _V2_COST_STATES = """CREATE TABLE IF NOT EXISTS cost_states (
 );"""
 
 
-def _v2_schema() -> str:
-    schema = index_module._SCHEMA
+def _old_schema(version: int) -> str:
+    """The schema as version 2 or 3 created it: version 3 added cost_states.ts,
+    version 4 cost_states.next_ts and the shared_replies table."""
+    schema = index_module._SCHEMA.replace(index_module._SHARED, "")
     start = schema.index("CREATE TABLE IF NOT EXISTS cost_states (")
     end = schema.index(");", start) + 2
-    return schema[:start] + _V2_COST_STATES + schema[end:]
+    table = _V2_COST_STATES
+    if version == 3:
+        table = table.replace("    PRIMARY KEY", "    ts INTEGER,\n    PRIMARY KEY")
+    return schema[:start] + table + schema[end:]
+
+
+def _v2_schema() -> str:
+    return _old_schema(2)
 
 
 def _file_row(con: sqlite3.Connection, path: Path, pos: int) -> None:
@@ -128,3 +138,69 @@ def test_v2_index_is_migrated_in_place_and_reread(config: Config) -> None:
     source = FakeSource()
     run_scan(config, quiet=True, source=source)
     assert source.calls == []  # read once: unchanged files are skipped again
+
+
+def test_v3_index_is_migrated_in_place_and_reread(config: Config) -> None:
+    main = config.projects_dir / "-home-u-p" / "s1.jsonl"
+    fork = config.projects_dir / "-tmp-x" / "s3.jsonl"  # a copy holding reply m1
+    write_lines(main, {"t": "req", "id": "m1", "ts": 1, "out": 5})
+    cost_pos = main.stat().st_size
+    write_lines(main, {"t": "cost", "usd": 0.5, "ts": 1}, {"t": "req", "id": "m2", "ts": 3})
+    write_lines(fork, {"t": "req", "id": "m1", "ts": 1, "out": 5})
+
+    # The index as schema version 3 left it: m1's row is the fork's (written last).
+    config.index_path.parent.mkdir(parents=True)
+    con = sqlite3.connect(config.index_path)
+    con.executescript(_old_schema(3))
+    assert "next_ts" not in _old_schema(3) and "shared_replies" not in _old_schema(3)
+    con.execute("INSERT INTO schema_version (version) VALUES (3)")
+    _file_row(con, main, main.stat().st_size)
+    _file_row(con, fork, fork.stat().st_size)
+    _request_row(con, "m2", main, 0)
+    _request_row(con, "m1", fork, 5)
+    con.execute("UPDATE requests SET session_id = 's3' WHERE message_id = 'm1'")
+    con.execute(
+        "INSERT INTO cost_states (file, pos, session_id, main, total_cost_usd, ts) "
+        "VALUES (?, ?, 's1', 1, 0.5, 0)",
+        (str(main), cost_pos),
+    )
+    con.commit()
+    con.close()
+
+    with pytest.raises(RuntimeError, match="capcom scan"):
+        open_index(config.index_path, readonly=True)
+    with open_index(config.index_path) as ix:
+        assert ix.file_state(main).offset == 0  # type: ignore[union-attr]  # queued
+        assert ix.file_state(fork).offset == fork.stat().st_size  # type: ignore[union-attr]
+        assert next(ix.last_cost_states()).next_timestamp is None
+    con = sqlite3.connect(config.index_path)
+    assert con.execute("SELECT version FROM schema_version").fetchall() == [(SCHEMA_VERSION,)]
+    assert SCHEMA_VERSION == 4
+    con.close()
+
+    source = FakeSource(batch_lines=2)  # the cost-state ends a batch
+    run_scan(config, quiet=True, source=source)
+    assert source.calls == [(main, 0)]
+    with open_index(config.index_path, readonly=True) as ix:
+        (cs,) = ix.last_cost_states()
+        assert (cs.offset, cs.timestamp, cs.next_timestamp) == (cost_pos, at(1), at(3))
+        # The reread replaced the fork's row of m1: both sessions hold it.
+        assert ix.shared_replies("s1") == ix.shared_replies("s3") == 1
+        assert sorted(r.message_id for r in ix.requests()) == ["m1", "m2"]
+
+
+def test_v2_index_migrates_through_v3(config: Config) -> None:
+    config.index_path.parent.mkdir(parents=True)
+    con = sqlite3.connect(config.index_path)
+    con.executescript(_old_schema(2))
+    con.execute("INSERT INTO schema_version (version) VALUES (2)")
+    con.commit()
+    con.close()
+    with open_index(config.index_path) as ix:
+        assert list(ix.last_cost_states()) == []
+        assert ix.shared_replies("s1") == 0
+    con = sqlite3.connect(config.index_path)
+    cols = [r[1] for r in con.execute("PRAGMA table_info(cost_states)")]
+    assert cols[-2:] == ["ts", "next_ts"]
+    assert con.execute("SELECT version FROM schema_version").fetchall() == [(4,)]
+    con.close()

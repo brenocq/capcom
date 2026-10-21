@@ -350,3 +350,56 @@ def test_readonly_sees_live_writer(tmp_path: Path) -> None:
     assert [r.message_id for r in ro.requests()] == ["m1", "m2"]
     ro.close()
     w.close()
+
+
+def test_next_timestamp_roundtrip_and_fill_from_the_next_batch(ix: SqliteIndex) -> None:
+    put(ix, A, CostState("s1", 10, 1.0, timestamp=at(1), next_timestamp=at(2)), offset=20)
+    assert next(ix.last_cost_states()).next_timestamp == at(2)
+    # A cost-state at the end of a batch: no record after it yet.
+    put(ix, A, req("m1", 3), CostState("s1", 30, 1.5, timestamp=at(3)), offset=40)
+    assert next(ix.last_cost_states()).next_timestamp is None
+    # The next batch (of this file only) fills it from its earliest time.
+    put(ix, C, req("m9", 3.5, session="s2"), offset=10)
+    assert next(ix.last_cost_states()).next_timestamp is None
+    put(ix, A, req("m2", 5), ev("k1", 4.5), offset=60)
+    got = {c.offset: c.next_timestamp for c in ix.last_cost_states()}
+    assert got == {30: at(4.5)}
+    con = sqlite3.connect(ix.path)
+    assert con.execute("SELECT pos, next_ts IS NULL FROM cost_states ORDER BY pos").fetchall() == [
+        (10, 0),
+        (30, 0),
+    ]
+    con.close()
+    # A later batch never moves a filled time.
+    put(ix, A, req("m3", 4), offset=80)
+    assert next(ix.last_cost_states()).next_timestamp == at(4.5)
+
+
+def test_next_timestamp_not_filled_on_a_reread_from_zero(ix: SqliteIndex) -> None:
+    put(ix, A, req("m1", 1), CostState("s1", 30, 1.5), offset=40)
+    con = sqlite3.connect(ix.path)
+    con.execute("UPDATE files SET pos = 0")  # queued for a reread, as a migration does
+    con.commit()
+    con.close()
+    # The rows before the cost-state, read again, must not fill its time.
+    put(ix, A, req("m1", 1), CostState("s1", 30, 1.5), offset=40)
+    assert next(ix.last_cost_states()).next_timestamp is None
+    put(ix, A, req("m2", 5), offset=60)
+    assert next(ix.last_cost_states()).next_timestamp == at(5)
+
+
+def test_shared_replies(ix: SqliteIndex) -> None:
+    fork = LogFile(Path("/logs/tmp/s3.jsonl"), LogKind.SESSION, "-tmp-x", "s3")
+    put(ix, A, req("m1", 1), req("m2", 2), req("m3", 9), offset=10)
+    put(ix, B, req("m3", 9), offset=10)  # a subagent of the same session: not shared
+    assert ix.shared_replies("s1") == 0
+    put(ix, fork, req("m1", 1, session="s3"), req("m2", 2, session="s3"), offset=10)
+    assert ix.shared_replies("s1") == ix.shared_replies("s3") == 2
+    assert ix.shared_replies("s1", since=at(1.5)) == 1
+    assert ix.shared_replies("s1", until=at(1.5)) == 1
+    assert ix.shared_replies("s2") == 0
+    assert {r.message_id: r.session_id for r in ix.requests()}["m1"] == "s3"  # the last wins
+    ix.forget_file(fork.path)  # history: the logs once held both
+    assert ix.shared_replies("s1") == 0  # no request row left to time it
+    put(ix, fork, req("m1", 1, session="s3"), offset=10)
+    assert ix.shared_replies("s1") == 1
