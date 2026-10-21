@@ -778,3 +778,13 @@ def test_workflow_agent_gets_agent_info(tmp_path: Path) -> None:
     (log,) = logs_of(projects)
     (agent,) = of(parse(log), AgentInfo)
     assert agent == AgentInfo("w1", "s1", agent_type="reviewer", spawn_depth=2)
+
+
+def test_cost_state_timestamp(sample: tuple[Path, dict[str, Any]]) -> None:
+    projects, _ = sample
+    main = next(f for f in logs_of(projects) if f.kind == LogKind.SESSION)
+    (cost,) = of(parse(main), CostState)
+    assert cost.timestamp == at(4102)  # the last reply before it
+    # A parse that starts at the cost-state line has seen no time yet.
+    (late,) = of(parse(main, start=cost.offset), CostState)
+    assert late.offset == cost.offset and late.timestamp is None

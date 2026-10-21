@@ -898,6 +898,8 @@ class _Parser:
                 models=models,
                 start_time_ms=_opt_int(rec.get("startTime")),
                 has_unknown_model_cost=_bool(rec.get("hasUnknownModelCost")),
+                # The last timestamped record decoded before it in this parse call.
+                timestamp=self.last_ts,
             )
         )
 
