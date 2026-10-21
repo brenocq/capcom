@@ -40,7 +40,7 @@ import threading
 import traceback
 import webbrowser
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, tzinfo
 from http import HTTPStatus
@@ -93,6 +93,7 @@ NO_INDEX_PAGE = """<!doctype html>
 CACHE_BYTES = 32 * 1024 * 1024  # encoded replies kept, all endpoints together
 CACHE_TTL = 300.0  # seconds: "today", "last hour" and "running" move with the clock
 UNCACHED = {"status", "live"}  # cheap, and about the current minute
+MARKED = {"checks", "changes"}  # replies that show marks: keyed on the marks file too
 
 
 class ApiCache:
@@ -221,7 +222,7 @@ def _changes_stamp(site: Site) -> tuple[int, int]:
     try:
         path = site.changes_path or Path(site.analysis.changes().store_path())
         st = os.stat(path)
-    except (OSError, Unavailable):
+    except (OSError, ValueError, Unavailable):  # ValueError: a path it refuses
         return (-1, -1)
     return (st.st_size, st.st_mtime_ns)
 
@@ -269,6 +270,39 @@ class Site:
     read_only: bool = False  # True: no POST /api/changes, no buttons that write
     token: str = field(default_factory=lambda: secrets.token_urlsafe(32))  # per launch
     write_lock: threading.Lock = field(default_factory=threading.Lock)
+    facts: FactsHolder = field(default_factory=lambda: FactsHolder())
+    request_timeout: float = 30.0  # seconds a client may take to send its request
+
+
+class FactsHolder:
+    """capcom.changes' cache of daily facts, kept for one index generation: measuring
+    every mark reads each day of the logs once, and the next request at the same
+    generation reads none. A new generation starts an empty cache. Partial days (the
+    current one, cut at the request's clock) are dropped on each use, so only whole
+    days stay. Thread-safe."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._gen: tuple[int, ...] | None = None
+        self._facts: dict[Any, Any] = {}
+
+    def get(self, gen: tuple[int, ...]) -> dict[Any, Any]:
+        with self._lock:
+            if gen != self._gen:
+                self._gen, self._facts = gen, {}
+            for key in list(self._facts):
+                if not _whole_day(key):
+                    self._facts.pop(key, None)
+            return self._facts
+
+
+def _whole_day(key: Any) -> bool:
+    """A facts key (since, until) that starts and ends at a local midnight."""
+    try:
+        since, until = key
+        return bool(since.time() == until.time() == datetime.min.time())
+    except (TypeError, ValueError, AttributeError):
+        return False
 
 
 class Scanner:
@@ -450,8 +484,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             self._post()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            pass  # TimeoutError: a body slower than request_timeout; the socket closes
         except Exception:
             print("capcom serve: error while answering a request:", file=sys.stderr)
             traceback.print_exc()
@@ -507,8 +541,9 @@ class Handler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.SERVICE_UNAVAILABLE, "no_index", str(err))
             return
         try:
-            with site.write_lock:
-                payload = didit.write(self._context(index, site.clock()), body)
+            now = site.clock()
+            ctx = self._context(index, now)
+            payload = didit.write(ctx, body, lock=site.write_lock, known=self._known(now))
             self._json(HTTPStatus.OK, payload)
         except api.ApiError as err:
             self._error(err.status, err.code, err.message)
@@ -525,6 +560,42 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             index.close()
 
+    def _key(
+        self, name: str, args: tuple[str, ...], query: Mapping[str, str], now: datetime
+    ) -> tuple[Any, ...]:
+        """An API reply's cache key: the index generation (and the usage samples'
+        stamp) first, which `ApiCache.put` drops older entries by; then the day, the
+        endpoint, its argument and query, and for the replies that show marks
+        (MARKED), the marks file's stamp."""
+        site = self.site
+        watch = site.cache.watch(site.index_path) if site.cache is not None else None
+        gen = generation(site.index_path, watch)
+        gen += _limits_stamp(site.state_dir)  # the recorder writes without a scan
+        today = now.astimezone(site.tz).date().isoformat()  # the windows start at midnight
+        params = tuple((k, query[k]) for k in PARAMS.get(name, ()) if k in query)
+        marks = _changes_stamp(site) if name in MARKED else ()  # a mark writes without a scan
+        return (gen, today, name, args, params, marks)
+
+    def _known(self, now: datetime) -> Callable[[int], list[didit.Known] | None]:
+        """The findings of a Checks window from its cached reply, if there is one."""
+
+        def known(days: int) -> list[didit.Known] | None:
+            site = self.site
+            if site.cache is None:
+                return None
+            queries: list[dict[str, str]] = [{"days": str(days)}] + ([{}] if days == 14 else [])
+            for query in queries:
+                body = site.cache.get(self._key("checks", (), query, now), now.timestamp())
+                if body is not None:
+                    rows = json.loads(body)["findings"]
+                    return [
+                        (r["kind"], r["scope"], r["title"], float(r["saving_usd_per_week"]))
+                        for r in rows
+                    ]
+            return None
+
+        return known
+
     def _context(self, index: Any, now: datetime) -> api.Context:
         site = self.site
         return api.Context(
@@ -538,6 +609,12 @@ class Handler(BaseHTTPRequestHandler):
             state_dir=site.state_dir,
             scanning=site.scanner is not None and site.scanner.first_scan,
             changes_path=site.changes_path,
+            facts_cache=site.facts.get(
+                generation(
+                    site.index_path,
+                    site.cache.watch(site.index_path) if site.cache is not None else None,
+                )
+            ),
         )
 
     def _page(self, path: str) -> None:
@@ -590,12 +667,7 @@ class Handler(BaseHTTPRequestHandler):
         key: tuple[Any, ...] | None = None
         now = site.clock()
         if site.cache is not None and name not in UNCACHED:
-            gen = generation(site.index_path, site.cache.watch(site.index_path))
-            gen += _limits_stamp(site.state_dir)  # the recorder writes without a scan
-            gen += _changes_stamp(site)  # so does a mark
-            today = now.astimezone(site.tz).date().isoformat()  # the windows start at midnight
-            args = tuple((k, query[k]) for k in PARAMS.get(name, ()) if k in query)
-            key = (gen, today, name, tuple(parts[1:]), args)
+            key = self._key(name, tuple(parts[1:]), query, now)
             hit = site.cache.get(key, now.timestamp())
             if hit is not None:
                 self._send(HTTPStatus.OK, hit, TYPES[".json"])
@@ -660,7 +732,9 @@ class _Server(ThreadingHTTPServer):
 
 def make_server(site: Site, port: int) -> ThreadingHTTPServer:
     """A server bound to 127.0.0.1:`port` (0: any free port); not started."""
-    handler = type("SiteHandler", (Handler,), {"site": site})
+    # `timeout`: a socket timeout, so a client that sends less than it announced (or
+    # nothing) cannot hold a thread
+    handler = type("SiteHandler", (Handler,), {"site": site, "timeout": site.request_timeout})
     return _Server((HOST, port), handler)
 
 

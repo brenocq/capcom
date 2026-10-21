@@ -159,3 +159,31 @@ console.log(JSON.stringify({
     assert {"before: 38.2", "after: 4.1", "Applied Oct 22", "none", "Oct 23"} <= set(got["texts"])
     assert abs(float(got["appliedX"]) - float(got["afterX"])) < 0.01  # the line opens week 5
     assert got["label"].endswith("Oct 23 6.2, Oct 30 no requests")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_verdict_labels() -> None:
+    script = (
+        FAKE_DOM
+        + """
+globalThis.document.querySelector = () => null;
+const m = await import('./marks.js');
+const labels = Object.entries(m.VERDICTS).map(([k, v]) => [k, v.label]);
+console.log(JSON.stringify(Object.fromEntries(labels)));
+"""
+    )
+    out = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=STATIC,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    assert json.loads(out.stdout) == {
+        "working": "Working",
+        "no_effect": "No clear effect",
+        "worse": "Worse",
+        "too_early": "Too early",
+        "no_data": "Can\u2019t tell",
+    }

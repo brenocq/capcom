@@ -436,7 +436,10 @@ The user marks a finding as applied on a date; `capcom.changes` measures the
 finding's own rate over the 4 weeks before that date and from the day after, weekly
 (`design.md`, "Did it work?"). The marks live in `$XDG_DATA_HOME/capcom/changes.jsonl`,
 the only file capcom writes besides its cache; its size and modification time are
-part of every cache key, so a mark shows on Checks and here at once. All dates are
+part of the cache key of `checks` and `changes` (the replies that show marks), so a
+mark shows on Checks and here at once and leaves every other reply cached. The
+measures share one cache of daily facts per index generation, kept by the server, so
+only the first `changes` request after a scan reads the logs' days. All dates are
 `YYYY-MM-DD` local dates; `marked_at` and `since` are ISO 8601 times. 501
 (`module` "changes") while `capcom.changes` is missing.
 
@@ -455,7 +458,7 @@ Result = Mark + {days_since, measure, before, after, before_range: [low, high] |
 render as text. `title` and `expected_usd_per_week` are the finding's when it was
 marked. `verdict` is `working` (the after rate sits below the before weeks' range),
 `no_effect` (inside it), `worse` (above it), `too_early` (too few days or requests
-since; `verdict_due` says when) or `no_data`. `measured_usd_per_week` is positive for
+since; `verdict_due` says when) or `no_data` (the pages say "Can't tell"). `measured_usd_per_week` is positive for
 a saving: (before − after) × the after workload × the unit's average price in the
 before window, API-equivalent. `quality` holds the signals to judge a model change
 by (turns per spawn, tool errors per 100 calls); empty otherwise.
@@ -493,7 +496,9 @@ The page asks the user to confirm each; "Not this" is remembered in the browser 
 
 #### `POST /api/changes`
 
-The one write. The request must have:
+The one write. The request must have (and send it within 30 seconds: every request
+has a socket timeout, so a body shorter than its `Content-Length` cannot hold a
+thread):
 
 - a `Host` of `127.0.0.1` or `localhost` (403, as every request);
 - an `Origin` of `http://127.0.0.1:<port>` or `http://localhost:<port>`, this server's
@@ -512,8 +517,11 @@ The one write. The request must have:
 ```
 
 A mark's `kind` and `scope` must name a finding of Checks over `days` (7, 14 or 30;
-14 by default) without an open mark (409 `already_marked`); its title and saving are
-taken from that finding, not from the request. `applied_on` cannot be after today nor
+14 by default) without an open mark (409 `already_marked`: one open mark per
+finding, so re-marking is changing the date, or unmarking first); its title and
+saving are taken from that finding (from the cached Checks reply of that window when
+there is one), not from the request. The finding is looked up before the write lock
+is taken; under it, only the marks are read again and written. `applied_on` cannot be after today nor
 before the first day the index holds; `id` must be an open mark (404). The reply is
 `{mark: Mark}`, or `{unmarked: id}`. `capcom serve --read-only` answers 405 and the
 pages leave out every button that writes.

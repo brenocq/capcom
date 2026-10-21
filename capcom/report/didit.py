@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from datetime import date, timedelta
 from typing import Any
 
@@ -151,7 +152,8 @@ def summary(ctx: Context) -> dict[str, Any]:
     label = labeler(ctx)
     today = ctx.today()
     marks = sorted(_marks(ctx), key=lambda m: (m.applied_on, m.id), reverse=True)
-    results = [backend.measure(ctx.index, ctx.table, m, ctx.now) for m in marks]
+    cache = ctx.facts_cache  # the daily facts, shared by every mark and request
+    results = [backend.measure(ctx.index, ctx.table, m, ctx.now, cache=cache) for m in marks]
     counts = {v.value: 0 for v in Verdict}
     for r in results:
         counts[r.verdict.value] += 1
@@ -184,7 +186,7 @@ def one(ctx: Context, raw: str) -> dict[str, Any]:
     mark = next((m for m in _marks(ctx) if m.id == wanted), None)
     if mark is None:
         raise ApiError(404, "not_found", "no such change")
-    r = _backend(ctx).measure(ctx.index, ctx.table, mark, ctx.now)
+    r = _backend(ctx).measure(ctx.index, ctx.table, mark, ctx.now, cache=ctx.facts_cache)
     return result_json(r, labeler(ctx), ctx.today(), weeks=True)
 
 
@@ -199,10 +201,13 @@ def noticed(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     days = _days(query)
     findings = _findings(ctx, days)
     saving = {finding_id(f.kind, f.scope): f.saving_usd_per_week for f in findings}
-    marked = open_by_finding(_marks(ctx))
+    marks = _marks(ctx)
+    marked = open_by_finding(marks)
     label = labeler(ctx)
     rows = []
-    for n in _backend(ctx).noticed(ctx.index, ctx.table, findings, ctx.now):
+    since = ctx.midnight(days - 1)
+    seen = _backend(ctx).noticed(ctx.index, ctx.table, findings, ctx.now, since=since, marks=marks)
+    for n in seen:
         fid = finding_id(n.kind, n.scope)
         if fid in marked:
             continue
@@ -294,20 +299,47 @@ def _applied_on(ctx: Context, raw: Any) -> date:
     return day
 
 
-def _id(body: Mapping[str, Any], marks: Sequence[ChangeMark]) -> ChangeMark:
+def _id(body: Mapping[str, Any]) -> int:
     raw = body["id"]
     if not isinstance(raw, int) or isinstance(raw, bool):
         raise _bad("id must be a number")
-    mark = next((m for m in marks if m.id == raw), None)
+    return raw
+
+
+def _open(marks: Sequence[ChangeMark], wanted: int) -> ChangeMark:
+    mark = next((m for m in marks if m.id == wanted), None)
     if mark is None:
         raise ApiError(404, "not_found", "no such change")
     return mark
 
 
-def write(ctx: Context, body: Any) -> dict[str, Any]:
+# A finding as a mark needs it: kind, scope, title, weekly saving
+Known = tuple[str, str, str, float]
+
+
+def _finding(
+    ctx: Context, days: int, kind: str, scope: str, known: Callable[[int], Any] | None
+) -> Known | None:
+    """The finding a mark answers, from the cached Checks reply of that window when
+    there is one (`known`), else from a Checks pass."""
+    rows: Sequence[Known] | None = known(days) if known is not None else None
+    if rows is None:
+        rows = [(f.kind, f.scope, f.title, f.saving_usd_per_week) for f in _findings(ctx, days)]
+    return next((r for r in rows if r[0] == kind and r[1] == scope), None)
+
+
+def write(
+    ctx: Context,
+    body: Any,
+    lock: AbstractContextManager[Any] | None = None,
+    known: Callable[[int], Any] | None = None,
+) -> dict[str, Any]:
     """Mark a finding as applied, edit a mark's date or note, or unmark it. `body` is the
     parsed JSON; anything outside the schema is refused before capcom.changes is
-    called. Returns the mark as it now stands (`{"unmarked": id}` for an unmark)."""
+    called. The body is checked, and the finding looked up (`known(days)`: the cached
+    Checks rows as `Known` tuples, or None), before `lock` is taken; under it only the
+    marks are read again and written. Returns the mark as it now stands
+    (`{"unmarked": id}` for an unmark)."""
     if not isinstance(body, dict):
         raise _bad("the body must be a JSON object")
     action = body.get("action")
@@ -319,14 +351,16 @@ def write(ctx: Context, body: Any) -> dict[str, Any]:
     if extra := body.keys() - needed - optional:
         raise _bad("unknown fields: " + ", ".join(sorted(extra)))
     backend = _backend(ctx)
-    marks = _marks(ctx)
     label = labeler(ctx)
+    held = lock if lock is not None else nullcontext()
     if action == "unmark":
-        mark = _id(body, marks)
-        backend.unmark(mark.id, path=ctx.changes_path)
+        wanted = _id(body)
+        with held:
+            mark = _open(_marks(ctx), wanted)
+            backend.unmark(mark.id, path=ctx.changes_path)
         return {"unmarked": mark.id}
     if action == "edit":
-        mark = _id(body, marks)
+        wanted = _id(body)
         if "applied_on" not in body and "note" not in body:
             raise _bad("an edit needs applied_on or note")
         changes: dict[str, Any] = {}
@@ -334,7 +368,9 @@ def write(ctx: Context, body: Any) -> dict[str, Any]:
             changes["applied_on"] = _applied_on(ctx, body["applied_on"])
         if "note" in body:
             changes["note"] = _note(body)
-        edited = backend.edit(mark.id, path=ctx.changes_path, **changes)
+        with held:
+            mark = _open(_marks(ctx), wanted)
+            edited = backend.edit(mark.id, path=ctx.changes_path, **changes)
         return {"mark": mark_json(edited, label)}
     kind = _text(body, "kind", MAX_FIELD)
     scope = _text(body, "scope", MAX_FIELD)
@@ -349,20 +385,22 @@ def write(ctx: Context, body: Any) -> dict[str, Any]:
     days = body.get("days", 14)
     if not isinstance(days, int) or isinstance(days, bool) or days not in CHECK_DAYS:
         raise _bad("days must be one of 7, 14, 30")
-    found = next((f for f in _findings(ctx, days) if f.kind == kind and f.scope == scope), None)
+    found = _finding(ctx, days, kind, scope, known)
     if found is None:
         raise _bad("no such finding in the Checks of that window")
-    if finding_id(kind, scope) in open_by_finding(marks):
-        raise ApiError(409, "already_marked", "this finding is already marked as applied")
-    made = backend.mark(
-        kind,
-        scope,
-        day,
-        found.title,
-        what=what,
-        note=note,
-        expected_usd_per_week=found.saving_usd_per_week,
-        source=source,
-        path=ctx.changes_path,
-    )
+    with held:
+        # one open mark per finding: re-marking is Change the date, or Unmark first
+        if finding_id(kind, scope) in open_by_finding(_marks(ctx)):
+            raise ApiError(409, "already_marked", "this finding is already marked as applied")
+        made = backend.mark(
+            kind,
+            scope,
+            day,
+            found[2],
+            what=what,
+            note=note,
+            expected_usd_per_week=found[3],
+            source=source,
+            path=ctx.changes_path,
+        )
     return {"mark": mark_json(made, label)}

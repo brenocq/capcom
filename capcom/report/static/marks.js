@@ -51,7 +51,7 @@ export const VERDICTS = {
   no_effect: { label: 'No clear effect', cls: 'meh', icon: [['path', { d: 'M6 12h12' }]] },
   worse: { label: 'Worse', cls: 'bad', icon: [['path', { d: 'M12 19V6M6 11l6-6 6 6' }]] },
   too_early: { label: 'Too early', cls: 'wait', icon: CLOCK },
-  no_data: { label: 'No data', cls: 'wait', icon: [['circle', { cx: 12, cy: 12, r: 9 }], ['path', { d: 'M8 12h8' }]] },
+  no_data: { label: 'Can’t tell', cls: 'wait', icon: [['circle', { cx: 12, cy: 12, r: 9 }], ['path', { d: 'M8 12h8' }]] },
 };
 export const VERDICT_ORDER = ['working', 'no_effect', 'worse', 'too_early', 'no_data'];
 

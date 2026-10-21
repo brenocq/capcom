@@ -6,16 +6,18 @@ from __future__ import annotations
 import http.client
 import json
 import re
+import socket
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
-from datetime import UTC
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from capcom.report.server import Site
-from capcom.types import Finding
+from capcom.report.server import FactsHolder, Site
+from capcom.types import ChangeMark, Finding
 from tests.report.conftest import FAKE, NOW, TABLE, Client, serve
 from tests.report.fake_changes import FakeChanges
 
@@ -32,6 +34,7 @@ class Fixture:
     client: Client
     site: Site
     fake: FakeChanges
+    checks_runs: list[bool]
 
     @property
     def port(self) -> int:
@@ -72,15 +75,25 @@ class Fixture:
         return self.post(body | kw)
 
 
-def _make(index_path: Path, tmp_path: Path, read_only: bool = False) -> Iterator[Fixture]:
+def _make(
+    index_path: Path, tmp_path: Path, read_only: bool = False, timeout: float = 30.0
+) -> Iterator[Fixture]:
     fake = FakeChanges(tmp_path / "changes.jsonl", noticed_kind="model")
-    analysis = replace(FAKE, checks_fn=checks_fn, changes_mod=fake)
+    checks_runs: list[bool] = []  # one per Checks pass: was the write lock held?
+    sites: list[Site] = []
+
+    def recording_checks(*args: Any) -> list[Finding]:
+        checks_runs.append(sites[0].write_lock.locked())
+        return checks_fn()
+
+    analysis = replace(FAKE, checks_fn=recording_checks, changes_mod=fake)
     site = Site(
         index_path, TABLE, analysis, clock=lambda: NOW, tz=UTC,
-        changes_path=fake.path, read_only=read_only,
+        changes_path=fake.path, read_only=read_only, request_timeout=timeout,
     )  # fmt: skip
+    sites.append(site)
     for client in serve(site):
-        yield Fixture(client, site, fake)
+        yield Fixture(client, site, fake, checks_runs)
 
 
 @pytest.fixture
@@ -253,9 +266,10 @@ OK = {"action": "mark", "kind": "tool_wait", "scope": "all", "applied_on": "2026
     ],
 )  # fmt: skip
 def test_refuses_a_bad_schema(fx: Fixture, body: Any) -> None:
+    assert fx.mark(kind="model", scope="coder")[0] == 200  # mark 1 exists: ids are real
     status, d = fx.post(body)
-    assert status in (400, 404), d
-    assert fx.fake.calls == []
+    assert status == 400, d
+    assert fx.fake.calls == ["mark"]
 
 
 def test_one_mark_per_finding(fx: Fixture) -> None:
@@ -278,3 +292,91 @@ def test_read_only_turns_the_write_off(ro: Fixture) -> None:
     body = ro.client.get("/checks")[1]
     assert b'<meta name="capcom-read-only" content="1">' in body
     assert ro.client.get("/api/changes")[0] == 200  # reads still work
+
+
+# --------------------------------------------------------------------------- review fixes
+
+
+def test_measures_share_one_facts_cache(fx: Fixture) -> None:
+    fx.mark()
+    fx.mark(kind="model", scope="coder", applied_on="2026-10-12")
+    fx.client.get("/api/changes")
+    fx.client.get("/api/changes/1")
+    caches = fx.fake.caches
+    assert len(caches) == 3 and caches[0] is not None
+    # every mark of a request, and the next request at the same index generation
+    assert caches[0] is caches[1] is caches[2]
+
+
+def test_facts_keep_whole_days_only() -> None:
+    from datetime import datetime, timedelta
+
+    holder = FactsHolder()
+    day = datetime(2026, 10, 20, tzinfo=UTC)
+    facts = holder.get((1,))
+    facts[(day, day + timedelta(days=1))] = "whole"
+    facts[(day + timedelta(days=1), NOW)] = "partial"
+    assert list(holder.get((1,)).values()) == ["whole"]
+    assert holder.get((2,)) == {}  # a new generation starts empty
+
+
+def test_a_mark_keeps_unrelated_replies_cached(fx: Fixture) -> None:
+    cache = fx.site.cache
+    assert cache is not None
+    fx.client.get("/api/sessions?days=7")
+    fx.mark()
+    hits = cache.hits
+    fx.client.get("/api/sessions?days=7")
+    assert cache.hits == hits + 1
+
+
+def test_the_write_lock_never_waits_on_checks(fx: Fixture) -> None:
+    assert fx.mark()[0] == 200
+    assert fx.checks_runs and not any(fx.checks_runs)
+    # with Checks of that window cached, a mark runs no Checks pass at all
+    fx.client.get("/api/checks?days=14")
+    runs = len(fx.checks_runs)
+    assert fx.mark(kind="model", scope="coder")[0] == 200
+    assert len(fx.checks_runs) == runs
+
+
+def test_noticed_gets_the_marks_and_the_window(fx: Fixture) -> None:
+    fx.mark()
+    fx.client.get("/api/changes/noticed?days=7")
+    args = fx.fake.noticed_args[-1]
+    assert args["since"] == datetime(2026, 10, 15, tzinfo=UTC)
+    assert [m.id for m in args["marks"]] == [1]
+
+
+class RefusingChanges(FakeChanges):
+    """A backend that refuses its marks path (as capcom.changes does under ~/.claude)."""
+
+    def store_path(self) -> Path:
+        raise ValueError("refusing to write marks there")
+
+    def load(self, path: Path | None = None) -> list[ChangeMark]:
+        raise ValueError("refusing to read marks there")
+
+
+def test_a_refused_marks_path_leaves_checks_working(index_path: Path, tmp_path: Path) -> None:
+    analysis = replace(FAKE, checks_fn=checks_fn, changes_mod=RefusingChanges(tmp_path / "x"))
+    for client in serve(Site(index_path, TABLE, analysis, clock=lambda: NOW, tz=UTC)):
+        status, d, _ = client.get("/api/checks")
+        assert status == 200
+        assert all(r["mark"] is None for r in d["findings"])
+
+
+def test_a_slow_body_cannot_hold_a_thread(index_path: Path, tmp_path: Path) -> None:
+    for fx in _make(index_path, tmp_path, timeout=0.5):
+        head = (
+            "POST /api/changes HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            f"Origin: http://127.0.0.1:{fx.port}\r\nX-Capcom-Token: {fx.site.token}\r\n"
+            "Content-Type: application/json\r\nContent-Length: 100\r\n\r\n"
+        )
+        with socket.create_connection(("127.0.0.1", fx.port), timeout=5) as sock:
+            sock.sendall(head.encode() + b'{"action"')  # 9 of the 100 bytes, then nothing
+            started = time.monotonic()
+            while sock.recv(1024):
+                pass  # the server closes the connection
+            assert time.monotonic() - started < 3
+        assert fx.fake.calls == []

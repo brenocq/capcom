@@ -106,6 +106,8 @@ class Context:
     state_dir: Path | None = None  # where the usage samples are; None: no samples
     scanning: bool = False  # serve's first scan is still running: totals may be partial
     changes_path: Path | None = None  # the marks (changes.jsonl); None: capcom.changes' own
+    # capcom.changes' daily facts for this index generation, shared across requests
+    facts_cache: dict[Any, Any] | None = None
 
     def local(self, t: datetime) -> datetime:
         return t.astimezone(self.tz)
@@ -1430,7 +1432,7 @@ def _open_marks(ctx: Context) -> tuple[dict[str, Any], Any]:
     try:
         backend = ctx.analysis.changes()
         found = didit.open_by_finding(didit._marks(ctx))
-    except Unavailable:
+    except (Unavailable, ValueError, OSError):  # no backend, or a marks file it refuses
         return {}, lambda kind: None
     label = didit.labeler(ctx)
     named = getattr(backend, "measure_name", None)

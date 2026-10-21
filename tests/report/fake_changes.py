@@ -28,6 +28,8 @@ class FakeChanges:
         self.path = path
         self.noticed_kind = noticed_kind
         self.calls: list[str] = []
+        self.caches: list[dict[Any, Any] | None] = []  # the facts cache of each measure
+        self.noticed_args: list[dict[str, Any]] = []
 
     def store_path(self) -> Path:
         return self.path
@@ -111,8 +113,15 @@ class FakeChanges:
         self._append({"event": "unmark", "id": id}, path)
 
     def measure(
-        self, index: Index, table: PriceTable, mark: ChangeMark, now: datetime
+        self,
+        index: Index,
+        table: PriceTable,
+        mark: ChangeMark,
+        now: datetime,
+        *,
+        cache: dict[Any, Any] | None = None,
     ) -> ChangeResult:
+        self.caches.append(cache)
         today = now.date()
         start = mark.applied_on - timedelta(days=28)
         weeks = [
@@ -143,8 +152,16 @@ class FakeChanges:
         )
 
     def noticed(
-        self, index: Index, table: PriceTable, findings: Sequence[Finding], now: datetime
+        self,
+        index: Index,
+        table: PriceTable,
+        findings: Sequence[Finding],
+        now: datetime,
+        *,
+        since: datetime | None = None,
+        marks: Sequence[ChangeMark] | None = None,
     ) -> list[NoticedChange]:
+        self.noticed_args.append({"since": since, "marks": marks})
         where = Path("/home/user/.claude/agents/coder.md")
         since = now - timedelta(hours=2)
         return [
