@@ -289,7 +289,9 @@ def finding_overlaps(f: Finding) -> tuple[str, ...]:
 def counted_findings(findings: Sequence[Finding], dirs: Collection[str]) -> list[bool]:
     """Which findings a total may add: largest first, each that counts dollars none
     counted so far does. Two project folders (in `dirs`) are apart; a scope of "all"
-    or an agent type may cover any folder."""
+    or an agent type may cover any folder. A judgement call (metrics
+    "judgement_call", such as a cheaper model for an agent) is never counted: its
+    saving would shrink every other one on the same requests."""
 
     def same_place(a: str, b: str) -> bool:
         return a == b or a not in dirs or b not in dirs
@@ -297,6 +299,9 @@ def counted_findings(findings: Sequence[Finding], dirs: Collection[str]) -> list
     kept: list[tuple[str, str]] = []  # (kind, scope) of the findings counted so far
     counted: list[bool] = []
     for f in findings:
+        if f.metrics.get("judgement_call"):
+            counted.append(False)
+            continue
         over = finding_overlaps(f)
         ok = not any(k in over and same_place(sc, f.scope) for k, sc in kept)
         if ok:
@@ -313,15 +318,28 @@ def savings_total(findings: Sequence[Finding], dirs: Collection[str]) -> dict[st
     flags = counted_findings(findings, dirs)
     picked = [f for f, ok in zip(findings, flags, strict=True) if ok]
     usd = sum(f.saving_usd_per_week for f in picked)
-    n = len(picked)
+    judged = [f for f in findings if f.metrics.get("judgement_call")]
+    n, of = len(picked), len(findings) - len(judged)
     them = "finding that doesn't" if n == 1 else "findings that don't"
     text = f"up to ${usd:,.2f}/week across {n} {them} overlap"
-    if n < len(findings):
-        text += f" (of {len(findings)}; overlapping savings are counted once)"
+    if n < of:
+        text += f" (of {of}; overlapping savings are counted once)"
+    judged_usd = sum(f.saving_usd_per_week for f in judged)
+    if judged:
+        text += (
+            f"; judgement calls on quality ({len(judged)}, such as a cheaper model for an "
+            f"agent): up to ${judged_usd:,.2f}/week more, not in the total"
+        )
     return {
         "usd_per_week": round(usd, 6),
         "findings": n,
         "of": len(findings),
         "all": n == len(findings),
         "text": text,
+        # only when there are any, so the API is unchanged without them
+        **(
+            {"judgement_calls": {"usd_per_week": round(judged_usd, 6), "findings": len(judged)}}
+            if judged
+            else {}
+        ),
     }

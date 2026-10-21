@@ -81,3 +81,15 @@ def test_a_judgement_call_is_listed_but_kept_out_of_the_total(tmp_path: Path) ->
     assert "+ a judgement call: not added to the total" in text
     assert "* overlaps" not in text  # long-running is counted, not pushed out
     assert "Together: up to $10.53/week across 1 finding that doesn't overlap" in text
+
+
+def test_the_website_total_leaves_judgement_calls_out_and_names_them() -> None:
+    from capcom.report.tally import counted_findings, savings_total
+
+    mix = Finding("model_mix", "T", "coder", "", 50.0, "", metrics={"judgement_call": True})
+    long = _f("long_running_agents", "-p-a", 10.0)
+    assert counted_findings([mix, long], {"-p-a"}) == [False, True]
+    total = savings_total([mix, long], {"-p-a"})
+    assert total is not None and total["usd_per_week"] == pytest.approx(10.0)
+    assert total["judgement_calls"] == {"usd_per_week": 50.0, "findings": 1}
+    assert "judgement calls on quality (1" in total["text"] and "$50.00/week more" in total["text"]

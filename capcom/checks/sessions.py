@@ -49,7 +49,7 @@ NEVER_ENDED_AUTO = 2  # ... or this many automatic ones (the context hit its top
 FRESH_SPAN = timedelta(days=1)  # sessions this short give the typical fresh context
 FRESH_CONTEXT_DEFAULT = 50_000  # when the window has no such session
 MIX_MIN_SPAWNS = 5  # spawns of a type before judging its model
-MIX_TOP_SHARE = 0.5  # share of the type's spend on Opus (or Fable)
+MIX_TOP_SHARE = 0.5  # share of the type's spend on Opus
 MIX_SHORT_OUTPUT = 1_000  # mean output tokens per request on that model, at most
 MIX_TOOL_CALLS = 0.7  # mean tool calls per request on that model, at least
 
@@ -244,11 +244,12 @@ def model_mix(
     definitions: Mapping[str, AgentDefinition | Sequence[AgentDefinition]],
     openclaw_root: Path | None = None,
 ) -> list[Finding]:
-    """A subagent type that spends most of its cost (MIX_TOP_SHARE) on Opus or
-    Fable, in short turns (at most MIX_SHORT_OUTPUT output tokens per request on
-    average) heavy on tools (at least MIX_TOOL_CALLS calls per request), over
-    MIX_MIN_SPAWNS spawns or more in Claude Code projects (OpenClaw workspaces left
-    out). Saving: what those requests cost less the same usage priced on the Sonnet
+    """A subagent type (never the main thread, whose model the user picks) that
+    spends most of its cost (MIX_TOP_SHARE) on Opus, in short turns (at most
+    MIX_SHORT_OUTPUT output tokens per request on average) heavy on tools (at least
+    MIX_TOOL_CALLS calls per request), over MIX_MIN_SPAWNS spawns or more in Claude
+    Code projects (OpenClaw workspaces left out). Saving: what those requests cost
+    less the same usage, with the same cache reads and writes, priced on the Sonnet
     of the same version. Whether Sonnet does the work as well is a judgement call;
     the `model: sonnet` line is offered only when a definition file exists."""
     per_type: dict[str, list[ModelMix]] = defaultdict(list)
@@ -303,7 +304,7 @@ def model_mix(
             scope=kind,
             summary=(
                 f"{share:.0%} of the {_usd(cost)} its {len(threads)} spawns spent went to "
-                f"{main} or another model priced above Sonnet, in short turns ({output:,.0f} "
+                f"Opus ({main} the most), in short turns ({output:,.0f} "
                 f"output tokens and {calls:.1f} tool calls per request); on Sonnet the "
                 f"same {requests:,} requests would have cost {_usd(top - usd)}."
             ),

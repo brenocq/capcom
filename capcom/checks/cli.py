@@ -160,9 +160,8 @@ def run_checks_view(
     # a judgement call (model_mix) shrinks every saving on the same requests: it
     # stays out of the total, and the total is taken over the other findings
     judged = [bool(f.metrics.get("judgement_call")) for f in findings]
-    rest = [f for f, j in zip(findings, judged, strict=True) if not j]
-    flags = iter(counted_findings(rest, dirs))
-    counted: list[bool | None] = [None if j else next(flags) for j in judged]
+    flags = counted_findings(findings, dirs)  # never counts a judgement call
+    counted: list[bool | None] = [None if j else c for j, c in zip(judged, flags, strict=True)]
     print(format_findings(findings, limit, names, dirs, counted), file=out)
     print(file=out)
     if any(judged):
@@ -189,7 +188,7 @@ def run_checks_view(
             file=out,
         )
     _print_small(small, out)
-    total = savings_total(rest, dirs)
+    total = savings_total(findings, dirs)
     if total is not None:
         print(f"Together: {total['text']}.", file=out)
     return 0

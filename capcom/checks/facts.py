@@ -81,7 +81,7 @@ RESUME_GAP = timedelta(minutes=10)  # a main-thread pause this long starts a new
 # Tool names the agent types called are read this far back at least, so the
 # tools: line a check pastes does not depend on a short window.
 CALL_LOOKBACK = timedelta(days=30)
-TOP_FAMILIES = ("fable", "opus")  # priced above Sonnet; model_mix prices them as Sonnet
+TOP_FAMILIES = ("opus",)  # model_mix prices these as the Sonnet of the same version
 
 ItemKey = tuple[str, ...]
 ThreadKey = tuple[str, str | None]  # (session_id, agent_id)
