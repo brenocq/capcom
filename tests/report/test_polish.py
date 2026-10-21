@@ -163,3 +163,69 @@ def test_no_cache(projects_index: Path) -> None:
     site = _site(projects_index, cache=None)
     for client in serve(site):
         assert client.get("/api/overview")[0] == 200
+
+
+# --------------------------------------------------------------------------- short history
+
+
+def _history(path: Path, reqs: list[Any]) -> None:
+    ix = open_index(path)
+    _put(ix, _log(TOY, "h"), [SessionInfo("h", TOY, cwd="/x"), *reqs])
+    ix.close()
+
+
+def test_averages_count_only_days_with_history(tmp_path: Path) -> None:
+    """Two days of history: the averages divide by the days that have data."""
+    path = tmp_path / "index.sqlite"
+    old = [req("h", (NOW - timedelta(days=d)).replace(hour=8), TOY, input=70_000) for d in (1, 2)]
+    _history(path, [*old, req("h", NOW.replace(hour=9), TOY, input=70_000)])
+    for client in serve(_site(path)):
+        d = client.get("/api/overview")[1]
+    prev = d["previous_7_days"]
+    assert prev["days"] == 2
+    assert prev["daily_average_usd"] == pytest.approx(usd(old) / 2, abs=1e-6)
+    assert prev["same_hour_average_usd"] == pytest.approx(usd(old) / 2, abs=1e-6)
+    assert d["week"]["full_days"] == 2 and d["week"]["days"] == 3
+    assert d["week"]["elapsed_days"] == pytest.approx(2 + 15 / 24, abs=1e-3)
+
+
+def test_same_time_comparison_waits_for_a_baseline(tmp_path: Path) -> None:
+    """A cent of baseline at 00:30: no comparison; at 15:00 there is one."""
+    path = tmp_path / "index.sqlite"
+    _history(
+        path, [req("h", NOW - timedelta(days=1, hours=15) + timedelta(minutes=10), TOY, input=10)]
+    )
+    early = NOW.replace(hour=0, minute=30)
+    for client in serve(_site(path, clock=lambda: early)):
+        prev = client.get("/api/overview")[1]["previous_7_days"]
+    assert 0 < prev["same_hour_average_usd"] < 1
+    assert prev["comparable"] is False
+    for client in serve(_site(path)):
+        assert client.get("/api/overview")[1]["previous_7_days"]["comparable"] is True
+
+
+def test_today_against_the_same_hour_across_daylight_saving(tmp_path: Path) -> None:
+    """New York left daylight saving on 2026-11-01: local hours still line up."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    ny = ZoneInfo("America/New_York")
+    now = datetime(2026, 11, 4, 15, 0, tzinfo=ny)
+    path = tmp_path / "index.sqlite"
+    early, late = [], []
+    for d in range(1, 8):
+        day = (now - timedelta(days=d)).date()
+        early.append(
+            req("h", datetime(day.year, day.month, day.day, 8, tzinfo=ny), TOY, input=70_000)
+        )
+        late.append(
+            req("h", datetime(day.year, day.month, day.day, 20, tzinfo=ny), TOY, input=700_000)
+        )
+    _history(path, sorted([*early, *late], key=lambda r: r.timestamp))
+    for client in serve(_site(path, clock=lambda: now, tz=ny)):
+        d = client.get("/api/overview")[1]
+    prev = d["previous_7_days"]
+    assert prev["days"] == 7 and prev["same_hour"] == "15:00"
+    assert prev["same_hour_average_usd"] == pytest.approx(usd(early) / 7, abs=1e-6)
+    assert prev["daily_average_usd"] == pytest.approx(usd(early + late) / 7, abs=1e-6)
+    assert d["week"]["elapsed_days"] == pytest.approx(6 + 15 / 24, abs=1e-3)

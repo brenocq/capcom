@@ -37,17 +37,21 @@ export async function renderOverview(main, r) {
   main.append(h('div.grid', { style: '--min:440px' }, limitCard('5-hour window'), limitCard('Weekly limit')));
 
   // KPI cards
-  // today so far against the previous 7 days up to the same time of day; the week
-  // over the days elapsed (6 full ones and today so far)
+  // today so far against the previous days with history up to the same time of day
+  // (once that baseline is $1 or an hour of today has passed); the week over the
+  // days elapsed since its start or the first request
   const prev = d.previous_7_days;
   const avg = prev.same_hour_average_usd;
   let costNote = 'Not billed on your plan.';
-  if (range === 'today' && avg > 0) {
+  if (range === 'today' && prev.comparable && avg > 0) {
     const diff = t.usd / avg - 1;
-    costNote = `${pct(Math.abs(diff))} ${diff >= 0 ? 'above' : 'below'} the ${usd(avg)} you spent by ${prev.same_hour} on an average day of the previous 7. Not billed on your plan.`;
+    const over = prev.days === 1 ? 'the previous day' : `an average day of the previous ${prev.days}`;
+    costNote = `${pct(Math.abs(diff))} ${diff >= 0 ? 'above' : 'below'} the ${usd(avg)} you spent by ${prev.same_hour} on ${over}. Not billed on your plan.`;
   } else if (range === '7d') {
-    const days = d.week.elapsed_days || 7;
-    costNote = `${usd(t.usd / days)} a day on average, over ${days.toFixed(1)} days (6 full days and today so far). Not billed on your plan.`;
+    const days = d.week.elapsed_days || 1;
+    const full = d.week.full_days;
+    const parts = full ? `${full} full day${full === 1 ? '' : 's'} with history and today so far` : 'today so far';
+    costNote = `${usd(t.usd / days)} a day on average, over ${days.toFixed(1)} days (${parts}). Not billed on your plan.`;
   }
   const lower = estimateNote(t);
   const lowerNote = lower ? h('span.note', { title: LOWER_TITLE, text: 'A lower bound: part of the output is estimated from content length.' }) : null;
