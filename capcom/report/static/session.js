@@ -51,13 +51,18 @@ export async function renderSession(main, r) {
   main.append(agentsTable(d));
 }
 
+function joinAnd(items) {
+  return items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
+
 function calibration(c, t) {
   const ok = c.comparable && c.spread !== null && Math.abs(c.spread) <= 0.02;
   const mark = s('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', 'stroke-width': 2, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true', style: `stroke:${ok ? 'var(--ok)' : 'var(--clay)'}` },
     s('path', { d: ok ? 'M20 6L9 17l-5-5' : 'M12 8v5M12 16.5v.5' }));
   const apart = c.spread === null ? '' : `, ${pct(Math.abs(c.spread), 1)} apart`;
   const lead = ok ? 'Totals checked.' : c.comparable ? 'Totals differ.' : 'Not directly comparable.';
-  const why = c.comparable ? '' : ` Claude Code also counts ${c.reasons.join(', ') || 'calls the logs lack'}.`;
+  const reasons = c.reason_labels || c.reasons;
+  const why = c.comparable ? '' : ` The two cannot be compared exactly because of ${reasons.length ? joinAnd(reasons) : 'calls the logs lack'}.`;
   const est = estimateNote(t);
   return h('section.card.banner', null, mark,
     h('span.msg', null, h('strong', { text: lead }), ` Claude Code's own estimate for this session is ${usd(c.claude_code_usd)}; capcom's, over the same window of the logs, is ${usd(c.capcom_usd)}${apart}.${why}${est ? ' ' + est + '.' : ''}`),
@@ -68,6 +73,9 @@ function unfolded(d) {
   const card = h('section.card', null, h('div.split', null, h('h2', { text: 'How the session unfolded' }),
     h('span.note', { text: 'Active time; pauses over 30 minutes are squeezed to a mark. Hover for values.' })));
   const R = d.requests;
+  if (d.thinned) {
+    card.append(h('p.note', { style: 'margin:0', text: `Showing ${d.thinned.kept.toLocaleString('en-US')} of ${d.thinned.requests.toLocaleString('en-US')} requests: in each run of neighbors of a thread, the costliest and the largest and smallest context, plus every request of a spike. Totals count them all.` }));
+  }
   if (!R.t.length) { card.append(empty(null, 'No model requests in this session.')); return card; }
   const start = R.t[0], end = Math.max(R.t[R.t.length - 1], start + 60e3);
   const x = activeAxis(start, end, d.pauses);

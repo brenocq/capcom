@@ -6,7 +6,7 @@ import {
 } from './lib.js';
 import { bandChart, sparkline } from './charts.js';
 import { pendingBlock } from './sessions.js';
-import { memberColor, memberLabel, timelineMissing } from './spend.js';
+import { memberColor, memberLabel, timelineMissing, spikeMarks, spikeList, pickSpikes } from './spend.js';
 
 function greeting(d) {
   const hr = d.getHours();
@@ -69,6 +69,7 @@ export async function renderOverview(main, r) {
   const head = h('div.split', null, h('h2', { text: "Today's spend, adding up" }));
   chart.append(head);
   const c = d.cumulative_today;
+  let picked = pickSpikes(d.spikes_today, now.getTime() - 864e5, now.getTime());
   if (c && c.times.length && c.total[c.total.length - 1] > 0) {
     const members = c.members.map((m, i) => ({ ...m, label: memberLabel(m, 'category'), color: memberColor(m, i, 'category'), values: c.values[i] }));
     head.append(legend(members.map((m) => ({ label: m.label, color: m.color, value: (m.key === 'output' ? outputUsd(d.today.totals) : usd(m.final)) })), usd(d.today.totals.usd)));
@@ -77,11 +78,13 @@ export async function renderOverview(main, r) {
     const start = new Date(c.times[Math.max(0, first - 1)] - c.step_s * 1000); start.setMinutes(0, 0, 0);
     const end = new Date(now); end.setHours(end.getHours() + 1, 0, 0, 0);
     const keep = c.times.map((tm, i) => i).filter((i) => c.times[i] >= start.getTime());
+    picked = pickSpikes(d.spikes_today, start.getTime(), end.getTime());
     chart.append(bandChart({
       times: keep.map((i) => c.times[i]), total: keep.map((i) => c.total[i]),
       members: members.map((m) => ({ ...m, values: keep.map((i) => m.values[i]) })),
       start: start.getTime(), end: end.getTime(), now: now.getTime(), height: 300, left: 44,
       timeLabel: (tm) => hm(new Date(tm)),
+      marks: spikeMarks(picked, 1),
     }));
   } else if (c) {
     chart.append(empty(null, 'Nothing spent yet today.'));
@@ -91,8 +94,7 @@ export async function renderOverview(main, r) {
   const est = estimateNote(d.today.totals);
   if (est) chart.append(h('p.note', { style: 'margin:0', text: est + '.' }));
   const why = h('aside.card.grow1', null, h('h2', { text: 'Why it jumped' }));
-  const spikes = await pendingBlock('spikes', 'days=1');
-  why.append(spikes.block || h('p.para', { text: `${spikes.data.spikes.length} spikes today. See the Spikes page.` }));
+  why.append(...spikeList(picked, 1));
   main.append(h('div.row-wrap', null, chart, why));
 
   // by project, by agent type, checks

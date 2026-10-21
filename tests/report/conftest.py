@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+import capcom.timeline
 from capcom.cost.model import price
 from capcom.cost.prices import load_prices
 from capcom.report.analysis import Analysis
@@ -29,7 +30,6 @@ from capcom.types import (
     Explanation,
     FileState,
     Finding,
-    GroupBy,
     Index,
     LogFile,
     LogKind,
@@ -37,7 +37,6 @@ from capcom.types import (
     PriceTable,
     Record,
     Request,
-    Series,
     SessionInfo,
     Spike,
     ToolCall,
@@ -150,63 +149,15 @@ def build_index(path: Path) -> Path:
 
 # --------------------------------------------------------------------------- fake analysis
 
-CATS = ("cache_read", "cache_write", "output", "input")
+
+def real_spikes(
+    index: Index, table: PriceTable, since: datetime, until: datetime, sid: str | None
+) -> list[Spike]:
+    return capcom.timeline.find_spikes(index, table, since, until, sid)
 
 
-def _member(r: Request, by: GroupBy, cat: str) -> str:
-    if by is GroupBy.CATEGORY:
-        return cat
-    if by is GroupBy.PROJECT:
-        return r.project_dir
-    if by is GroupBy.MODEL:
-        return r.model
-    if by is GroupBy.SESSION:
-        return r.session_id
-    return "main" if r.agent_id is None else "scout"
-
-
-def fake_per_step(
-    index: Index, table: PriceTable, since: datetime, until: datetime, by: GroupBy, step: timedelta
-) -> list[Series]:
-    n = max(1, -(-int((until - since).total_seconds()) // int(step.total_seconds())))
-    times = tuple(since + i * step for i in range(n))
-    values: dict[str, list[float]] = {}
-    for r in index.requests(since=since, until=until):
-        if r.model.startswith("<"):
-            continue
-        c = price(r, table)
-        i = int((r.timestamp - since) / step)
-        parts = {
-            "cache_read": c.cache_read,
-            "cache_write": c.cache_write,
-            "output": c.output + c.web,
-            "input": c.input,
-        }
-        for cat in CATS:
-            values.setdefault(_member(r, by, cat), [0.0] * n)[i] += parts[cat]
-    out = [Series(k, k.upper(), times, tuple(v)) for k, v in values.items()]
-    return sorted(out, key=lambda s: -sum(s.values))
-
-
-def fake_cumulative(
-    index: Index, table: PriceTable, since: datetime, until: datetime, by: GroupBy, step: timedelta
-) -> list[Series]:
-    out = []
-    for s in fake_per_step(index, table, since, until, by, step):
-        run, acc = 0.0, []
-        for v in s.values:
-            run += v
-            acc.append(run)
-        out.append(Series(s.key, s.label, s.times, tuple(acc)))
-    return sorted(out, key=lambda s: -s.values[-1])
-
-
-def not_yet(*args: Any) -> Any:
+def not_yet(*args: Any, **kwargs: Any) -> Any:
     raise NotImplementedError("stub")
-
-
-def fake_spikes(*args: Any) -> list[Spike]:
-    return []
 
 
 def fake_explain(index: Index, table: PriceTable, spikes: Sequence[Spike]) -> list[Explanation]:
@@ -217,7 +168,10 @@ def fake_checks(*args: Any) -> list[Finding]:
     return [Finding("k", "A finding", "all", "summary", 3.5, "advice")]
 
 
-FAKE = Analysis(fake_cumulative, fake_per_step, fake_spikes, fake_explain, fake_checks)
+# capcom.timeline is real; explain and checks are fakes until they are built
+FAKE = Analysis(
+    capcom.timeline.cumulative, capcom.timeline.per_step, real_spikes, fake_explain, fake_checks
+)
 STUBS = Analysis(not_yet, not_yet, not_yet, not_yet, not_yet)
 
 

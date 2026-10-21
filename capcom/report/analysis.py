@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Protocol
 
 from capcom.types import (
     Explanation,
@@ -33,7 +34,23 @@ class Unavailable(Exception):
         self.milestone = milestone
 
 
-SeriesFn = Callable[[Index, PriceTable, datetime, datetime, GroupBy, timedelta], list[Series]]
+class SeriesFn(Protocol):
+    """capcom.timeline.cumulative or per_step: `top` keeps the largest members and
+    folds the rest into one "(other)" series."""
+
+    def __call__(
+        self,
+        index: Index,
+        table: PriceTable,
+        since: datetime,
+        until: datetime,
+        by: GroupBy,
+        step: timedelta,
+        *,
+        top: int | None = None,
+    ) -> list[Series]: ...
+
+
 SpikesFn = Callable[[Index, PriceTable, datetime, datetime, str | None], list[Spike]]
 ExplainFn = Callable[[Index, PriceTable, Sequence[Spike]], list[Explanation]]
 ChecksFn = Callable[[Index, PriceTable, datetime, datetime], list[Finding]]
@@ -64,9 +81,12 @@ class Analysis:
         until: datetime,
         by: GroupBy,
         step: timedelta,
+        top: int | None = None,
     ) -> list[Series]:
         return _call(
-            "timeline", 2, lambda: self.cumulative_fn(index, table, since, until, by, step)
+            "timeline",
+            2,
+            lambda: self.cumulative_fn(index, table, since, until, by, step, top=top),
         )
 
     def per_step(
@@ -77,8 +97,24 @@ class Analysis:
         until: datetime,
         by: GroupBy,
         step: timedelta,
+        top: int | None = None,
     ) -> list[Series]:
-        return _call("timeline", 2, lambda: self.per_step_fn(index, table, since, until, by, step))
+        return _call(
+            "timeline", 2, lambda: self.per_step_fn(index, table, since, until, by, step, top=top)
+        )
+
+    def find_spikes(
+        self,
+        index: Index,
+        table: PriceTable,
+        since: datetime,
+        until: datetime,
+        session_id: str | None = None,
+    ) -> list[Spike]:
+        """Spikes alone (for chart markers), without the explanations."""
+        return _call(
+            "timeline", 2, lambda: self.find_spikes_fn(index, table, since, until, session_id)
+        )
 
     def spikes(
         self, index: Index, table: PriceTable, since: datetime, until: datetime

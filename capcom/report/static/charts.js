@@ -71,7 +71,7 @@ export function xAxis(ticks, x0, x1, left, xOf) {
 // Cumulative lines, largest first, each with a band down to the next line, filled
 // in its own color with a vertical fade; the total on top in the text color.
 // opts: {times, members: [{label, values, color}], total, start, end, now,
-//        height, left, timeLabel(t)}
+//        height, left, timeLabel(t), marks: [{n, t, href, aria}]}
 export function bandChart(opts) {
   const { members, total } = opts;
   const times = [opts.start, ...opts.times];
@@ -106,6 +106,15 @@ export function bandChart(opts) {
   if (opts.now && opts.now < x1) {
     const f = ((opts.now - x0) / (x1 - x0) * 100).toFixed(2) + '%';
     plot.append(h('div.nowline', { style: `left:${f}` }), h('span.nowlab', { style: `left:${f}`, text: 'now' }));
+  }
+  // spike markers: numbered, on the total line at the spike's start, linking to /spikes
+  for (const m of opts.marks || []) {
+    if (m.t < x0 || m.t > x1) continue;
+    let i = times.findIndex((tm) => tm >= m.t);
+    if (i < 0) i = times.length - 1;
+    const left = ((m.t - x0) / (x1 - x0) * 100).toFixed(2) + '%';
+    const top = ((1 - tot[i] / ymax) * 100).toFixed(2) + '%';
+    plot.append(h('a.spikemark', { href: m.href || '/spikes', style: `left:${left};top:${top}`, 'aria-label': m.aria || `Spike ${m.n}`, title: m.aria || '', text: String(m.n) }));
   }
   const guide = h('div.guide', { hidden: true });
   plot.append(guide);

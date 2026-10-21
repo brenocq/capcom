@@ -8,14 +8,17 @@ names, counts, times and dollars; never a prompt, a reply or a spawn description
 
 from __future__ import annotations
 
+import contextlib
+import math
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, tzinfo
+from datetime import date, datetime, time, timedelta, tzinfo
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
+from capcom.config import load_config
 from capcom.cost.calibrate import check_session
 from capcom.cost.model import price
 from capcom.cost.prices import is_placeholder, normalize
@@ -30,6 +33,7 @@ from capcom.report.tally import (
     project_display,
     project_names,
 )
+from capcom.timeline.groups import OPENCLAW, TEMPORARY, folder_name
 from capcom.types import (
     AgentInfo,
     EventKind,
@@ -39,12 +43,30 @@ from capcom.types import (
     Request,
     Series,
     SessionInfo,
+    Spike,
 )
 
 LIVE_WINDOW = timedelta(minutes=10)
-TOP_MEMBERS = 5  # series beyond these are folded into "other"
+TOP_MEMBERS = 6  # series beyond these are folded into "other"
 SPEND_DAYS = (7, 14, 30, 90)
 OTHER = "(other)"
+MAX_MARKERS = 12  # spike markers on a cumulative chart: the largest by excess
+MAX_POINTS = 4000  # per-request columns of a session above this are thinned
+
+# Why a session's totals cannot be compared with Claude Code's cost-state
+# (capcom.cost.calibrate reason ids), in words for the report.
+REASON_LABELS = {
+    "WebFetch": "WebFetch calls, whose page summaries Claude Code bills separately",
+    "WebSearch": "web searches, billed per search",
+    "away": "away summaries, which the log does not record",
+    "compaction": "compaction summaries, which the log does not record",
+    "calls not in the log": "model calls missing from the log",
+    "shares replies with another session": "replies shared with another session",
+    "model only in cost-state": "a model only Claude Code recorded",
+    "no startTime": "no process start time, so the window is a guess",
+    "below $0.10": "a total under $0.10, where fixed side calls weigh too much",
+    "estimated output": "estimated output tokens",
+}
 
 # Cumulative-chart step per window length, so a chart has a few hundred points.
 _STEPS = {1: timedelta(minutes=5), 7: timedelta(minutes=30), 14: timedelta(hours=1)}
@@ -72,14 +94,29 @@ class Context:
     now: datetime
     tz: tzinfo | None = None  # None: the machine's local time zone
     index_path: Path | None = None
+    openclaw_root: Path | None = None  # None: from the configuration
 
     def local(self, t: datetime) -> datetime:
         return t.astimezone(self.tz)
 
+    def today(self) -> date:
+        return self.local(self.now).date()
+
+    def at_midnight(self, day: date) -> datetime:
+        """The aware local midnight that starts `day` (its own UTC offset, so a
+        daylight-saving change between it and today does not shift it)."""
+        if self.tz is None:
+            return datetime.combine(day, time()).astimezone()  # naive: the machine's zone
+        return datetime.combine(day, time(), tzinfo=self.tz)
+
     def midnight(self, days_back: int = 0) -> datetime:
-        """Local midnight of today, `days_back` days earlier."""
-        n = self.local(self.now).replace(hour=0, minute=0, second=0, microsecond=0)
-        return n - timedelta(days=days_back)
+        """Local midnight of today's local date, `days_back` calendar days earlier."""
+        return self.at_midnight(self.today() - timedelta(days=days_back))
+
+    @property
+    def openclaw_dir(self) -> str:
+        root = self.openclaw_root or load_config().openclaw_root
+        return folder_name(root)
 
     def infos(self) -> dict[str, SessionInfo]:
         return {s.session_id: s for s in self.index.sessions()}
@@ -103,7 +140,8 @@ def _int(query: Mapping[str, str], name: str, default: int, lo: int, hi: int) ->
 
 def _window(ctx: Context, names: Mapping[str, str] | None = None) -> Window:
     infos = ctx.infos()
-    return Window(ctx.table, infos, ctx.agents(), names or project_names(infos.values()))
+    names = names or project_names(infos.values())
+    return Window(ctx.table, infos, ctx.agents(), names, ctx.openclaw_dir)
 
 
 # --------------------------------------------------------------------------- series
@@ -122,18 +160,36 @@ def _fold(series: Sequence[Series], keep: Sequence[str]) -> list[tuple[str, str,
     return out
 
 
-def _relabel(series: list[Series], by: GroupBy, names: Mapping[str, str]) -> list[Series]:
-    """Project series named like the rest of the site (the cwd's last part)."""
-    if by is not GroupBy.PROJECT:
-        return series
-    return [Series(s.key, names[s.key], s.times, s.values) if s.key in names else s for s in series]
+def _tidy(series: list[Series], by: GroupBy, names: Mapping[str, str]) -> list[Series]:
+    """Series named like the rest of the site: web tools counted with output (as in
+    every total), projects by the cwd's last part. Largest final value first, with
+    "other" last."""
+    if by is GroupBy.CATEGORY:
+        web = next((s for s in series if s.key == "web"), None)
+        series = [s for s in series if s.key != "web"]
+        if web is not None:
+            out = next((s for s in series if s.key == "output"), None)
+            if out is None:
+                series.append(Series("output", "Output", web.times, web.values))
+            else:
+                merged = tuple(a + b for a, b in zip(out.values, web.values, strict=True))
+                series = [
+                    Series(s.key, s.label, s.times, merged) if s is out else s for s in series
+                ]
+            series.sort(key=lambda s: (s.key == OTHER, -sum(s.values) if s.values else 0.0))
+    elif by is GroupBy.PROJECT:
+        labels = {TEMPORARY: "temporary folders", OPENCLAW: OPENCLAW}
+        series = [
+            Series(s.key, labels.get(s.key) or names.get(s.key) or s.label, s.times, s.values)
+            for s in series
+        ]
+    return series
 
 
 def _cumulative_json(series: Sequence[Series], step: timedelta, until: datetime) -> dict[str, Any]:
-    """Members (largest first, at most TOP_MEMBERS plus "other") and the total.
-    Point i is the cumulative value at the end of step i, clamped to `until`."""
-    keep = [s.key for s in series[:TOP_MEMBERS]]
-    members = _fold(series, keep)
+    """Members (largest first, "other" last) and the total. Point i is the cumulative
+    value at the end of step i, clamped to `until`."""
+    members = [(s.key, s.label, s.values) for s in series]
     times: list[int] = []
     if series:
         times = [ms(min(t + step, until)) for t in series[0].times]
@@ -148,6 +204,43 @@ def _cumulative_json(series: Sequence[Series], step: timedelta, until: datetime)
         ],
         "values": [[round(x, 6) for x in v] for _, _, v in members],
         "total": total,
+    }
+
+
+def _spike_marks(
+    ctx: Context,
+    since: datetime,
+    until: datetime,
+    titles: Mapping[str, str | None],
+    unavailable: list[str],
+) -> dict[str, Any] | None:
+    """The window's spikes (capcom.timeline.find_spikes) as chart markers: the
+    MAX_MARKERS largest by excess, numbered in time order."""
+    found: list[Spike] | None = _try(
+        lambda: ctx.analysis.find_spikes(ctx.index, ctx.table, since, until), unavailable
+    )
+    if found is None:
+        return None
+    marks = sorted(found, key=lambda sp: -sp.excess_usd)[:MAX_MARKERS]
+    marks.sort(key=lambda sp: (sp.start, sp.session_id or ""))
+    return {
+        "count": len(found),
+        "excess_usd": round(sum(sp.excess_usd for sp in found), 6),
+        "marks": [
+            {
+                "n": i + 1,
+                "t": ms(sp.start),
+                "end": ms(sp.end),
+                "kind": sp.kind.value,
+                "session_id": sp.session_id,
+                "title": titles.get(sp.session_id) if sp.session_id else None,
+                "agent_id": sp.agent_id,
+                "requests": len(sp.message_ids),
+                "cost_usd": round(sp.cost_usd, 6),
+                "excess_usd": round(sp.excess_usd, 6),
+            }
+            for i, sp in enumerate(marks)
+        ],
     }
 
 
@@ -169,8 +262,12 @@ def status(ctx: Context) -> dict[str, Any]:
     out["prices_checked"] = ctx.table.checked.isoformat()
     if ctx.index_path is not None:
         st = ctx.index_path.stat()
+        mtime = st.st_mtime
+        wal = ctx.index_path.with_name(ctx.index_path.name + "-wal")
+        with contextlib.suppress(OSError):  # writes land in the WAL until a checkpoint
+            mtime = max(mtime, wal.stat().st_mtime)
         out["index"] = {
-            "updated": iso(datetime.fromtimestamp(st.st_mtime).astimezone(), ctx.tz),
+            "updated": iso(datetime.fromtimestamp(mtime).astimezone(), ctx.tz),
             "size_bytes": st.st_size,
         }
     return out
@@ -209,6 +306,10 @@ def overview(ctx: Context) -> dict[str, Any]:
         ),
         unavailable,
     )
+    if cum is not None:
+        cum = _tidy(cum, GroupBy.CATEGORY, names)
+    titles = {sid: s.title for sid, s in infos.items()}
+    marks = _spike_marks(ctx, today_since, ctx.now, titles, unavailable)
     spark_since = max(today_since, ctx.now - timedelta(hours=2))
     spark = _try(
         lambda: ctx.analysis.per_step(
@@ -254,6 +355,7 @@ def overview(ctx: Context) -> dict[str, Any]:
         "previous_7_days": {"since": iso(prev_since, ctx.tz), "daily_average_usd": prev_usd / 7},
         "spending_now": {"usd_last_hour": round(last_hour.usd, 6), "spark": spark_json},
         "cumulative_today": None if cum is None else _cumulative_json(cum, step, ctx.now),
+        "spikes_today": marks,
         "limits": {"available": False, "message": LIMITS_NOTE},
         "unavailable": unavailable,
     }
@@ -275,30 +377,42 @@ def spend(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     unavailable: list[str] = []
     step = _STEPS[days]
     cum = _try(
-        lambda: ctx.analysis.cumulative(ctx.index, ctx.table, since, ctx.now, group, step),
+        lambda: ctx.analysis.cumulative(
+            ctx.index, ctx.table, since, ctx.now, group, step, top=TOP_MEMBERS
+        ),
         unavailable,
     )
     hourly = _try(
         lambda: ctx.analysis.per_step(
-            ctx.index, ctx.table, since, ctx.now, group, timedelta(hours=1)
+            ctx.index, ctx.table, since, ctx.now, group, timedelta(hours=1), top=TOP_MEMBERS
         ),
         unavailable,
     )
     if cum is not None:
-        cum = _relabel(cum, group, w.names)
+        cum = _tidy(cum, group, w.names)
     if hourly is not None:
-        hourly = _relabel(hourly, group, w.names)
+        hourly = _tidy(hourly, group, w.names)
     cum_json = None if cum is None else _cumulative_json(cum, step, ctx.now)
     daily_json = heat_json = None
     if hourly is not None:
         keep = [m["key"] for m in cum_json["members"] if m["key"] != OTHER] if cum_json else []
         if not keep:
-            finals = sorted(hourly, key=lambda s: -sum(s.values))
-            keep = [s.key for s in finals[:TOP_MEMBERS]]
-        daily_json, heat_json = _daily_and_heat(ctx, hourly, keep, since, days)
+            keep = [s.key for s in hourly if s.key != OTHER]
+        elif {s.key for s in hourly if s.key != OTHER} != set(keep):
+            # a near tie ranked the members differently: fold the full series instead
+            full = _try(
+                lambda: ctx.analysis.per_step(
+                    ctx.index, ctx.table, since, ctx.now, group, timedelta(hours=1)
+                ),
+                unavailable,
+            )
+            hourly = _tidy(full or [], group, w.names)
+        daily_json, heat_json = _daily_and_heat(ctx, hourly, keep, days)
+    titles = {sid: info.title for sid, info in w.infos.items()}
+    marks = _spike_marks(ctx, since, ctx.now, titles, unavailable)
 
     rows = w.session_rows(ctx.tz)
-    temporary = [r for r in rows if r["project"] == "(temporary)"]
+    temporary = [r for r in rows if r["temporary"]]
     return {
         "window": {
             "days": days,
@@ -310,6 +424,7 @@ def spend(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
         "sessions_count": len(rows) - len(temporary),
         "temporary_sessions": len(temporary),
         "cumulative": cum_json,
+        "spikes": marks,
         "daily": daily_json,
         "heatmap": heat_json,
         "context_buckets": w.context_json(),
@@ -319,11 +434,14 @@ def spend(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
 
 
 def _daily_and_heat(
-    ctx: Context, hourly: Sequence[Series], keep: Sequence[str], since: datetime, days: int
+    ctx: Context, hourly: Sequence[Series], keep: Sequence[str], days: int
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Hourly steps (from local midnight, so each lies within one local hour) summed
+    by local date and by local weekday and hour. The dates count back from today's
+    local date, whatever daylight-saving changes lie between."""
     members = _fold(hourly, keep)
-    first = ctx.local(since).date()
-    dates = [first + timedelta(days=i) for i in range(days)]
+    today = ctx.today()
+    dates = [today - timedelta(days=days - 1 - i) for i in range(days)]
     pos = {d: i for i, d in enumerate(dates)}
     per_day = [[0.0] * len(members) for _ in dates]
     cells = [[0.0] * 24 for _ in range(7)]
@@ -384,7 +502,8 @@ def sessions(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
             or q in r["project_dir"].lower()
             or any(q in t for t in types.get(r["session_id"], ()))
         ]
-    rows.sort(key=lambda r: (r[sort] or "", r["usd"]), reverse=True)
+    # numbers stay numbers, ISO times stay strings; a missing value sorts last
+    rows.sort(key=lambda r: (r[sort] is not None, r[sort] or 0, r["usd"]), reverse=True)
     return {
         "window": {"days": days, "since": iso(since, ctx.tz), "until": iso(ctx.now, ctx.tz)},
         "total": len(rows),
@@ -398,8 +517,9 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
     if info is None and not reqs:
         raise ApiError(404, "not_found", "no such session")
     agent_infos = {a.agent_id: a for a in ctx.index.agents(session_id=session_id)}
-    names = project_names([info] if info else [])
-    w = Window(ctx.table, {info.session_id: info} if info else {}, agent_infos, names)
+    names = project_names(ctx.index.sessions())  # a temporary folder names its project
+    openclaw = ctx.openclaw_dir
+    w = Window(ctx.table, {info.session_id: info} if info else {}, agent_infos, names, openclaw)
 
     agent_order: list[str] = []
     agent_pos: dict[str, int] = {}
@@ -411,11 +531,13 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
     main = _Span()
     spans: dict[str, _Span] = {}
     counted: list[Request] = []
+    message_ids: list[str] = []
     for req in reqs:
         cost = w.add(req)
         if cost is None:
             continue
         counted.append(req)
+        message_ids.append(req.message_id)
         aid = req.agent_id
         if aid is None:
             span = main
@@ -491,9 +613,17 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
                 "spread": None if c.claude_code_usd == 0 else round(c.spread, 6),
                 "comparable": c.comparable,
                 "reasons": list(c.reasons),
+                "reason_labels": [REASON_LABELS.get(r, r) for r in c.reasons],
             }
             break
 
+    row = w.sessions.get(session_id)
+    thinned = None
+    if len(counted) > MAX_POINTS:
+        spiky = _session_spike_requests(ctx, session_id, counted, message_ids)
+        kept = thin(cols["agent"], cols["usd"], cols["context"], spiky, limit=MAX_POINTS)
+        cols = {k: [v[i] for i in kept] for k, v in cols.items()}
+        thinned = {"requests": len(counted), "kept": len(kept), "spikes": len(spiky)}
     seen = [
         t for t in (reqs[-1].timestamp if reqs else None, info.last_seen if info else None) if t
     ]
@@ -504,7 +634,7 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
         "session": {
             "session_id": session_id,
             "title": info.title if info else None,
-            "project": project_display(project_dir, names),
+            "project": project_display(project_dir, names, openclaw),
             "project_dir": project_dir,
             "cwd": info.cwd if info else None,
             "git_branch": info.git_branch if info else None,
@@ -517,9 +647,10 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
             "efforts": sorted(efforts),
         },
         "totals": w.total.to_json(),
-        "active_seconds": round(w.sessions[session_id].active_seconds) if reqs else 0,
+        "active_seconds": round(row.active_seconds) if row else 0,  # None: placeholders only
         "calibration": calibration,
         "requests": cols,
+        "thinned": thinned,
         "main": main.to_json() if main.requests else None,
         "agents": agents_json,
         "agent_types": type_rows,
@@ -570,6 +701,55 @@ def _type_row(kind: str, group: list[_Span], total: float) -> dict[str, Any]:
     }
 
 
+def _session_spike_requests(
+    ctx: Context, session_id: str, counted: Sequence[Request], message_ids: Sequence[str]
+) -> set[int]:
+    """Column positions of the requests that make up the session's spikes (none
+    when capcom.timeline is not available)."""
+    since, until = counted[0].timestamp, counted[-1].timestamp + timedelta(seconds=1)
+    try:
+        found = ctx.analysis.find_spikes(ctx.index, ctx.table, since, until, session_id)
+    except Unavailable:
+        return set()
+    ids = {m for sp in found for m in sp.message_ids}
+    return {i for i, m in enumerate(message_ids) if m in ids}
+
+
+def thin(
+    threads: Sequence[int],
+    usd: Sequence[float],
+    context: Sequence[int],
+    keep: set[int],
+    limit: int = MAX_POINTS,
+) -> list[int]:
+    """Positions of the per-request points to keep for a session's charts, about
+    `limit` of them (plus a few per thread), in order.
+
+    Each thread's requests (main or one subagent, in time order) are cut into runs
+    of `ceil(3 n / budget)`; a run keeps its costliest request and its largest and
+    smallest context (local maxima of cost and context, and the drops a compaction
+    leaves). Every thread keeps its first and last request, and every position in
+    `keep` (the spikes) stays; `budget` is `limit` less those, but at least a
+    quarter of it."""
+    n = len(usd)
+    if n <= limit:
+        return list(range(n))
+    by_thread: dict[int, list[int]] = {}
+    for i, a in enumerate(threads):
+        by_thread.setdefault(a, []).append(i)
+    budget = max(limit - len(keep) - 2 * len(by_thread), limit // 4)
+    run = math.ceil(3 * n / budget)
+    out = set(keep)
+    for idx in by_thread.values():
+        out.update((idx[0], idx[-1]))
+        for c in range(0, len(idx), run):
+            chunk = idx[c : c + run]
+            out.add(max(chunk, key=usd.__getitem__))
+            out.add(max(chunk, key=context.__getitem__))
+            out.add(min(chunk, key=context.__getitem__))
+    return sorted(out)
+
+
 def _price_total(ctx: Context, req: Request) -> float:
     return price(req, ctx.table).total
 
@@ -578,7 +758,8 @@ def live(ctx: Context) -> dict[str, Any]:
     since = ctx.now - LIVE_WINDOW
     infos = ctx.infos()
     names = project_names(infos.values())
-    w = Window(ctx.table, infos, {}, names)
+    openclaw = ctx.openclaw_dir
+    w = Window(ctx.table, infos, {}, names, openclaw)
     for req in ctx.index.requests(since=since):
         w.add(req)
     ids = set(w.sessions)
@@ -592,7 +773,7 @@ def live(ctx: Context) -> dict[str, Any]:
             {
                 "session_id": sid,
                 "title": info.title if info else None,
-                "project": project_display(project_dir, names),
+                "project": project_display(project_dir, names, openclaw),
                 "agents_active": len(row.agents) if row else 0,
                 "usd_last_10_min": round(usd, 6),
                 "usd_per_hour": round(usd * 3600 / LIVE_WINDOW.total_seconds(), 6),

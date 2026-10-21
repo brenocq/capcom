@@ -2,7 +2,7 @@
 // hour-by-weekday heatmap, tokens against dollars, context size, costliest sessions.
 
 import {
-  h, api, usd, tokens, pct, seg, legend, empty, errorBox, setQuery, monthDay, localDate, dayName,
+  h, api, usd, tokens, pct, seg, legend, empty, errorBox, setQuery, monthDay, localDate, dayName, hm,
   outputUsd, estimateNote, SERIES, OTHER_COLOR, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor,
 } from './lib.js';
 import { bandChart, dayBars, heatmap, heatScale } from './charts.js';
@@ -22,6 +22,57 @@ export function memberLabel(m, group) {
   if (group === 'category' && CATEGORY_LABELS[m.key]) return CATEGORY_LABELS[m.key];
   if (m.key === '(other)') return 'other';
   return m.label;
+}
+
+const KINDS = {
+  single_request: ['One request far above its recent median', 'Single request'],
+  slope_change: ['The spend rate rose and stayed up', 'Slope change'],
+};
+
+function spikeWhen(m) {
+  const d = new Date(m.t);
+  const where = [m.title || (m.session_id ? m.session_id.slice(0, 8) : null), m.agent_id ? 'subagent' : 'main thread'].filter(Boolean);
+  return [`${monthDay(d)} ${hm(d)}`, ...where].join(' · ');
+}
+
+// The markers that fit a chart from x0 to x1 (ms): the largest by excess first, at
+// least `gap` of the axis apart, at most `max`, renumbered in time order. The list
+// beside the chart uses the same set, so the numbers match.
+export function pickSpikes(sp, x0, x1, gap = 0.04, max = 8) {
+  if (!sp) return null;
+  const span = Math.max(x1 - x0, 1);
+  const chosen = [];
+  for (const m of [...sp.marks].sort((a, b) => b.excess_usd - a.excess_usd)) {
+    if (m.t < x0 || m.t > x1) continue;
+    if (chosen.every((c) => Math.abs(c.t - m.t) / span >= gap)) chosen.push(m);
+    if (chosen.length >= max) break;
+  }
+  chosen.sort((a, b) => a.t - b.t);
+  return { ...sp, marks: chosen.map((m, i) => ({ ...m, n: i + 1 })) };
+}
+
+// chart markers from a picked spikes block; `days` picks the Spikes window
+export function spikeMarks(sp, days) {
+  if (!sp) return [];
+  return sp.marks.map((m) => ({ n: m.n, t: m.t, href: `/spikes?days=${days}`, aria: `Spike ${m.n}: +${usd(m.excess_usd)} over the baseline, ${spikeWhen(m)}` }));
+}
+
+// the numbered list next to a chart: the largest spikes first
+export function spikeList(sp, days, limit = 4) {
+  if (!sp) return [timelineMissing('Spike detection')];
+  if (!sp.count) return [empty(null, 'No spikes: the spend rose at its usual pace.')];
+  const rows = [...sp.marks].sort((a, b) => b.excess_usd - a.excess_usd).slice(0, limit);
+  const out = rows.map((m) => h('a.spikerow', { href: `/spikes?days=${days}` },
+    h('span.num', { text: String(m.n) }),
+    h('span.body', null,
+      h('span.meta', { text: spikeWhen(m) }),
+      h('b', { text: KINDS[m.kind] ? KINDS[m.kind][0] : m.kind }),
+      h('span.tags', null, h('span.tag', { text: KINDS[m.kind] ? KINDS[m.kind][1] : m.kind }),
+        h('span.plus', { text: `+${usd(m.excess_usd)}` }),
+        h('span.note', { text: `${m.requests} request${m.requests === 1 ? '' : 's'}, ${usd(m.cost_usd)} in all` })))));
+  const more = sp.count > rows.length ? `${sp.count} spike${sp.count === 1 ? '' : 's'} in all, +${usd(sp.excess_usd)} over their baselines; the largest are marked. ` : '';
+  out.push(h('p.note', { style: 'margin:8px 0 0', text: `${more}Their causes are explained from milestone 3.` }));
+  return out;
 }
 
 export function timelineMissing(what) {
@@ -45,20 +96,25 @@ export async function renderSpend(main, r) {
 
   // cumulative
   const cum = h('section.card', { style: 'padding-bottom:18px' });
+  let picked = null;
   const head = h('div.split', null, h('h2', { text: TITLES[days] || 'Adding up' }));
   cum.append(head);
   if (d.cumulative && d.cumulative.times.length) {
     const c = d.cumulative;
     const members = c.members.map((m, i) => ({ ...m, label: memberLabel(m, group), color: memberColor(m, i, group), values: c.values[i] }));
     head.append(legend(members.map((m) => ({ label: m.label, color: m.color, value: usd(m.final, m.final >= 100 ? 0 : 2) })), usd(t.usd, t.usd >= 100 ? 0 : 2)));
-    cum.append(bandChart({ times: c.times, members, total: c.total, start: since.getTime(), end: until.getTime(), height: 340, left: 52 }));
+    picked = pickSpikes(d.spikes, since.getTime(), until.getTime());
+    cum.append(bandChart({ times: c.times, members, total: c.total, start: since.getTime(), end: until.getTime(), height: 340, left: 52, marks: spikeMarks(picked, days) }));
   } else if (d.cumulative) {
     cum.append(empty(null, 'No spend in this window.'));
   } else {
     cum.append(timelineMissing('The cumulative chart'));
   }
   const note = estimateNote(t);
-  cum.append(h('p.note', { style: 'margin:0' }, 'Spikes are marked here from milestone 3.', note ? ' ' + note + '.' : ''));
+  const sp = d.spikes;
+  const shown = picked ? picked.marks.length : 0;
+  const spikeNote = !sp ? '' : sp.count ? `${sp.count} spike${sp.count === 1 ? '' : 's'}, +${usd(sp.excess_usd)} over their baselines; ${shown < sp.count ? `the ${shown} largest that fit are marked` : 'each is marked'}. ` : 'No spikes in this window. ';
+  cum.append(h('p.note', { style: 'margin:0' }, spikeNote, note ? note + '.' : ''));
   main.append(cum);
 
   // per day + tokens vs dollars

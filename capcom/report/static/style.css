@@ -120,6 +120,15 @@ button { font: inherit; color: inherit; }
 .xaxis span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
 .guide { position: absolute; top: 0; bottom: 0; border-left: 1px dashed var(--l35); pointer-events: none; }
 .nowline { position: absolute; top: -6px; bottom: 0; border-left: 1px dashed var(--l35); }
+.spikemark { position: absolute; transform: translate(-50%, -135%); width: 26px; height: 26px; border-radius: 999px; background: var(--text); color: var(--inv); font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center; text-decoration: none; box-shadow: 0 0 0 3px var(--card); z-index: 2; }
+.spikemark:hover, .spikemark:focus-visible { background: var(--clay); }
+.spikerow { display: flex; gap: 12px; padding: 12px 0; border-top: 0.5px solid var(--l12); text-decoration: none; color: var(--text); }
+.spikerow .num { flex: 0 0 26px; height: 26px; border-radius: 999px; background: var(--text); color: var(--inv); font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center; }
+.spikerow .body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.spikerow .meta { font-size: 12px; color: var(--muted); }
+.spikerow .tags { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; }
+.spikerow .tag { background: var(--subtle); border-radius: 6px; padding: 2px 8px; }
+.spikerow .plus { color: var(--clay); font-weight: 600; }
 .nowlab { position: absolute; top: -22px; transform: translateX(-50%); font-size: 11px; color: var(--muted); }
 .tip { position: fixed; z-index: 10; pointer-events: none; background: var(--card); color: var(--text); border: 0.5px solid var(--l25); border-radius: 8px;
   box-shadow: 0 4px 14px rgba(0,0,0,0.12); padding: 8px 10px; font-size: 12px; min-width: 140px; }
