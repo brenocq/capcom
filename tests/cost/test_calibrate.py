@@ -1,31 +1,20 @@
-from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from dataclasses import replace
+from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
 from capcom.cost.calibrate import calibrate
 from capcom.cost.prices import load_prices
-from capcom.types import CostState, Event, EventKind, ModelUsage
+from capcom.sources.claude_code import ClaudeCodeSource
+from capcom.store.index import open_index
+from capcom.types import CostState, Event, EventKind, FileState, LogFile, LogKind, ModelUsage
+from tests.fixtures.generate import Reply, SessionWriter
+from tests.fixtures.generate import at as gen_at
 
 from .fakes import T0, FakeIndex, at, req
 
 T = load_prices()
-
-
-@dataclass
-class SharedIndex(FakeIndex):
-    """A FakeIndex with the store's optional `shared_replies` count."""
-
-    shared: dict[str, list[datetime]] = field(default_factory=dict)
-
-    def shared_replies(
-        self, session_id: str, since: datetime | None = None, until: datetime | None = None
-    ) -> int:
-        return sum(
-            1
-            for t in self.shared.get(session_id, [])
-            if (since is None or t >= since) and (until is None or t < until)
-        )
 
 
 M = 1_000_000
@@ -108,9 +97,22 @@ def test_the_window_ends_at_the_next_record_after_the_cost_state() -> None:
     assert cal.capcom_usd == pytest.approx(80.0)
 
 
+def test_a_next_record_out_of_order_does_not_cut_the_replies_before_it() -> None:
+    last = at(5)
+    reqs = [req("s1", when=at(1), output=M), req("s1", when=last, output=M)]
+    early = at(3)  # the next record's time, before the cost-state's own
+    state = replace(cs("s1", 40.0, when=last, claude_opus_5_5=40.0), next_timestamp=early)
+    [cal] = calibrate(FakeIndex(reqs=reqs, costs=[state]), T)
+    assert cal.capcom_usd == pytest.approx(40.0)  # the window ends at last + 1 ms
+    assert cal.comparable
+    after = [*reqs, req("s1", when=last + timedelta(milliseconds=1), output=M)]
+    [cal] = calibrate(FakeIndex(reqs=after, costs=[state]), T)
+    assert cal.capcom_usd == pytest.approx(40.0)
+
+
 def test_shared_replies_make_a_session_not_comparable() -> None:
     reqs = [req("s1", when=at(1), output=M), req("s2", when=at(1), output=M)]
-    idx = SharedIndex(reqs=reqs, costs=[cs("s1", 20.0, claude_opus_5_5=20.0)])
+    idx = FakeIndex(reqs=reqs, costs=[cs("s1", 20.0, claude_opus_5_5=20.0)])
     idx.shared = {"s1": [at(1)]}
     [cal] = calibrate(idx, T)
     assert cal.reasons == ("shares replies with another session",)
@@ -128,12 +130,14 @@ def _with_input(state: CostState, model: str, tokens: int) -> CostState:
 @pytest.mark.parametrize(
     ("logged", "cost_state", "comparable"),
     [
-        (100, 900, True),  # 9x, but below the token floor
-        (100, 1_200, False),  # 12x and 1,100 tokens more
-        (5_000, 40_000, True),  # 8x: within the ratio
-        (5_000, 60_000, False),  # 12x
+        (100, 900, True),  # 800 tokens more: below the token floor
+        (100, 1_200, False),  # 1,100 tokens more
+        (5_000, 5_900, True),
+        (5_000, 40_000, False),  # 8x: no ratio lets it through
         (0, 900, True),
         (0, 1_500, False),
+        (2_000_000, 2_030_000, True),  # 1.5 % of a large session's input
+        (2_000_000, 2_100_000, False),  # a large session missing a 100k-token call
     ],
 )
 def test_calls_not_in_the_log(logged: int, cost_state: int, comparable: bool) -> None:
@@ -232,3 +236,23 @@ def test_spread_sign() -> None:
         reqs=[req("s1", when=at(1), output=M)], costs=[cs("s1", 25.0, claude_opus_5_5=25.0)]
     )
     assert calibrate(idx, T)[0].spread == pytest.approx(-0.2)
+
+
+def test_shared_replies_against_the_store(tmp_path: Path) -> None:
+    """A session and a copy of its log (another session id) in a real SqliteIndex:
+    the copy, read last, keeps the reply's row, so only the original misses it."""
+    s = SessionWriter(tmp_path / "logs", cwd="/w", session_id="sess-orig")
+    s.assistant(Reply(gen_at(10), output=1_000_000))
+    s.cost_state(20.0, {"claude-opus-5-5": {"inputTokens": 3, "costUSD": 20.0}})
+    s.close()
+    fork = s.path.with_name("sess-copy.jsonl")
+    fork.write_text(s.path.read_text().replace("sess-orig", "sess-copy"))
+    with open_index(tmp_path / "cache" / "index.sqlite") as ix:
+        for path, sid in ((s.path, "sess-orig"), (fork, "sess-copy")):
+            log = LogFile(path, LogKind.SESSION, "-w", sid)
+            for b in ClaudeCodeSource().parse(log, 0):
+                ix.apply(log, b, FileState(path, 1, b.end_offset, 1, b.end_offset))
+        got = {c.session_id: c for c in calibrate(ix, T)}
+    # The original's window lost its only reply, so its model is "only in cost-state".
+    assert "shares replies with another session" in got["sess-orig"].reasons
+    assert got["sess-copy"].comparable

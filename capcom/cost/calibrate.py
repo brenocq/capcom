@@ -29,7 +29,7 @@ calls: `Calibration.comparable` says so, and `reasons` says why not.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from capcom.cost.model import price
 from capcom.cost.prices import canonical, is_placeholder
@@ -43,15 +43,15 @@ TARGET_SPREAD = 0.02
 # many dollars (the small Haiku call every process makes).
 IGNORED_SIDE_MODEL_SHARE = 0.01
 IGNORED_SIDE_MODEL_USD = 0.01
-# Calls the transcript lacks: cost-state's uncached input for a model above this
-# many times the logged uncached input, by more than this many tokens. On the
-# milestone 1 data (2,239 sessions), 1,419 of the 1,426 otherwise comparable
-# sessions match the log's uncached input exactly (1x), and sessions with WebFetch /
-# WebSearch summarizer calls sit at 10-1,000x. The token floor sits above the small
-# Haiku call every process makes (about 950 uncached tokens): on a session that
-# logs only a few Haiku requests it alone is 20-100x, yet the spread stays within 1 %.
-MISSING_CALLS_RATIO = 10.0
+# Calls the transcript lacks: cost-state's uncached input for a model above the
+# logged uncached input by more than this many tokens and this share of the logged
+# input. On the milestone 1 data (2,239 sessions), 1,419 of the 1,426 otherwise
+# comparable sessions match the log's uncached input exactly. The token floor sits
+# above the small Haiku call every process makes (about 950 uncached tokens); the
+# share keeps a large session missing one big call (a 100k-token summarizer) from
+# hiding behind a ratio.
 MISSING_CALLS_TOKENS = 1_000
+MISSING_CALLS_SHARE = 0.02
 
 SHARED_REPLIES = "shares replies with another session"
 MISSING_CALLS = "calls not in the log"
@@ -60,25 +60,15 @@ MISSING_CALLS = "calls not in the log"
 def window(cs: CostState) -> tuple[datetime | None, datetime | None]:
     """[since, until) of the requests a cost-state covers: from the process start
     to the first timestamped record after the cost-state line (exclusive); None
-    for an end that is not known."""
+    for an end that is not known. The end is never before the cost-state's own time
+    plus 1 ms: a next record out of order must not cut replies logged before it."""
     since = None
     if cs.start_time_ms is not None:
         since = datetime.fromtimestamp(cs.start_time_ms / 1000, UTC)
-    return since, cs.next_timestamp
-
-
-def _shared_replies(
-    index: Index, session_id: str, since: datetime | None, until: datetime | None
-) -> int:
-    """Replies of the session in the window that another session's log also holds.
-
-    The store finds them as it writes (a request row of another session replaced):
-    an optional method of the index, not part of the Index protocol, so an index
-    without it reports none."""
-    count = getattr(index, "shared_replies", None)
-    if count is None:
-        return 0
-    return int(count(session_id, since=since, until=until))
+    until = cs.next_timestamp
+    if until is not None and cs.timestamp is not None:
+        until = max(until, cs.timestamp + timedelta(milliseconds=1))
+    return since, until
 
 
 def check_session(index: Index, cs: CostState, table: PriceTable) -> Calibration:
@@ -114,13 +104,9 @@ def check_session(index: Index, cs: CostState, table: PriceTable) -> Calibration
         # Only models the window logs; one it lacks is "model only in cost-state".
         logged = logged_input.get(model, 0)
         excess = tokens - logged
-        if (
-            model in per_model
-            and excess > MISSING_CALLS_TOKENS
-            and tokens > MISSING_CALLS_RATIO * logged
-        ):
+        if model in per_model and excess > max(MISSING_CALLS_TOKENS, MISSING_CALLS_SHARE * logged):
             reasons.add(MISSING_CALLS)
-    if _shared_replies(index, cs.session_id, since, until):
+    if index.shared_replies(cs.session_id, since=since, until=until):
         reasons.add(SHARED_REPLIES)
     floor = max(IGNORED_SIDE_MODEL_USD, IGNORED_SIDE_MODEL_SHARE * cs.total_cost_usd)
     for model, usd in cc_models.items():
