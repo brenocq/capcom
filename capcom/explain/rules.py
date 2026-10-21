@@ -21,6 +21,7 @@ from capcom.cost.model import price, price_usage
 from capcom.cost.prices import canonical, lookup, price_at
 from capcom.explain import fmt, shared
 from capcom.explain.data import (
+    FIVE_MINUTES,
     ONE_HOUR,
     Member,
     SessionData,
@@ -69,6 +70,7 @@ POLL_COMMANDS = frozenset({"sleep", "watch", "until", "while", "wait", "inotifyw
 POLL_WORDS = ("wait", "poll")  # e.g. a waitlog.sh script
 PARALLEL_MIN = 4  # subagents working at once that make parallel work (rule 11)
 PARALLEL_PAD = timedelta(seconds=30)  # a thread counts as active this long after a request
+PARALLEL_RUN_GAP = timedelta(minutes=3)  # a longer gap ends a thread's run of work
 MAX_EVIDENCE = 6
 
 AGENT_TOOLS = frozenset({"Agent", "Task"})
@@ -388,37 +390,103 @@ def _ttl(thread: Thread, r: Request) -> str | None:
     return ttl if isinstance(ttl, str) and ttl else None
 
 
-def _tool_wait(rw: Rewrite) -> tuple[Event, timedelta] | None:
-    """The tool result the pause before `rw` waited for: the last result of the
-    previous request's calls, when it came back past the cache lifetime (the agent
-    was running a tool, not idle: the cache expired while it ran)."""
+USER_TOOLS = frozenset({"AskUserQuestion", "ExitPlanMode"})  # their result waits on the user
+RESUME_TOOLS = frozenset({"SendMessage", "Agent", "Task"})  # a lead's message to an agent
+BACKGROUND = "background subagents"  # what a main thread waited on through a gap
+RESUME_REACH = timedelta(minutes=3)  # a lead's message this close before a request resumed it
+RESUME_SKEW = timedelta(seconds=30)  # ... or this close after (the two logs' clocks differ)
+
+
+@dataclass
+class _Wait:
+    """What an agent waited on through a gap: `name` (a tool), from the previous
+    request for `ran`, then `after` until the next request."""
+
+    name: str
+    ran: timedelta
+    after: timedelta
+    line: str
+    event: Event | None = None
+
+
+def _tool_wait(rw: Rewrite) -> _Wait | None:
+    """The previous request's own tool calls (user-interaction tools left out: their
+    result waits on the user): from the request to the calls' last result."""
     p, r = rw.previous, rw.request
-    ids = {c.tool_use_id for c in p.tool_calls}
-    if not ids or rw.lifetime is None:
+    calls = {c.tool_use_id: c for c in p.tool_calls if c.name not in USER_TOOLS}
+    if not calls:
         return None
     results = [
         e
         for e in rw.member.thread.events_between(p.timestamp, r.timestamp, (EventKind.TOOL_RESULT,))
-        if e.attrs.get("tool_use_id") in ids
+        if e.attrs.get("tool_use_id") in calls
     ]
     if not results:
         return None
     last = results[-1]
+    name = calls[str(last.attrs.get("tool_use_id"))].name or "a tool"
     ran = last.timestamp - p.timestamp
-    if ran <= rw.lifetime:
+    line = f"The {name} call ran for {fmt.duration(ran)} before its result"
+    return _Wait(name, ran, r.timestamp - last.timestamp, line, last)
+
+
+def _background_wait(rw: Rewrite) -> _Wait | None:
+    """On a main thread: the session's other threads (background agents) working
+    through the gap, from the previous request to their last request in it."""
+    m, p, r = rw.member, rw.previous, rw.request
+    if m.thread.agent_id is not None:
         return None
-    return last, ran
+    inside = [
+        q
+        for aid, th in m.session.threads.items()
+        if aid is not None
+        for q in th.requests_between(p.timestamp, r.timestamp)
+        if q.timestamp > p.timestamp
+    ]
+    if not inside:
+        return None
+    last = max(q.timestamp for q in inside)
+    agents = len({q.agent_id for q in inside})
+    line = (
+        f"{agents} other thread{'s' if agents != 1 else ''} of the session made "
+        f"{len(inside)} requests during the gap, the last at {fmt.clock(last)}"
+    )
+    return _Wait(BACKGROUND, last - p.timestamp, r.timestamp - last, line)
+
+
+def _resumed(rw: Rewrite) -> bool:
+    """A subagent that had ended its turn (no tool call pending) and that a message
+    from another thread of its session (SendMessage, Agent) resumed just before."""
+    m, p, r = rw.member, rw.previous, rw.request
+    if m.thread.agent_id is None or p.tool_calls or p.stop_reason not in (None, "end_turn"):
+        return False
+    lo = max(p.timestamp, r.timestamp - RESUME_REACH)
+    return any(
+        c.name in RESUME_TOOLS
+        for aid, th in m.session.threads.items()
+        if aid != m.thread.agent_id
+        for q in th.requests_between(lo, r.timestamp + RESUME_SKEW)
+        if q.timestamp > p.timestamp
+        for c in q.tool_calls
+    )
 
 
 def _expired(rw: Rewrite, confidence: Confidence, how: str, wrote: Evidence) -> None:
     """A rewrite after a gap past the cache lifetime, named by who was waiting
-    (`shared.expiry_kind`): the agent on its own tool call, a finished subagent on
-    its lead, or the user."""
+    (`shared.expiry_kind`): the agent on its own tool call or background work, a
+    finished subagent on its lead, or the user."""
     m, p, r = rw.member, rw.previous, rw.request
     lifetime = rw.lifetime or ONE_HOUR
-    wait = _tool_wait(rw)
+    waits = [w for w in (_tool_wait(rw), _background_wait(rw)) if w is not None]
+    wait = max(waits, key=lambda w: w.ran, default=None)
+    resumed = _resumed(rw)
     sub = shared.expiry_kind(
-        rw.gap, lifetime, wait[1] if wait else None, m.thread.agent_id is not None
+        rw.gap,
+        lifetime,
+        wait.ran if wait else None,
+        wait.after if wait else None,
+        m.thread.agent_id is not None,
+        resumed,
     )
     rw.reason = shared.EXPIRY_CAUSES.get(sub or "", CauseKind.IDLE_REWRITE)
     rw.confidence = confidence
@@ -430,21 +498,14 @@ def _expired(rw: Rewrite, confidence: Confidence, how: str, wrote: Evidence) -> 
             r,
         ),
     ]
-    if wait is not None:
-        e, ran = wait
-        call = next(
-            (c for c in p.tool_calls if c.tool_use_id == e.attrs.get("tool_use_id")),
-            p.tool_calls[0],
-        )
-        rw.waited_on = call.name or "a tool"
-        rw.evidence.append(
-            _ev(f"The {rw.waited_on} call ran for {fmt.duration(ran)} before its result", m, e=e)
-        )
+    if wait is not None and rw.reason is CauseKind.TOOL_WAIT_EXPIRY:
+        rw.waited_on = wait.name
+        rw.evidence.append(_ev(wait.line, m, e=wait.event))
     elif rw.reason is CauseKind.LATE_RESUME_EXPIRY:
         rw.evidence.append(
             _ev(
-                f"The {_who(m)} had finished its turn at {fmt.clock(p.timestamp)} and was "
-                f"resumed {fmt.duration(rw.gap)} later",
+                f"The {_who(m)} had ended its turn at {fmt.clock(p.timestamp)}; a message "
+                f"from its lead resumed it {fmt.duration(rw.gap)} later",
                 m,
                 p,
             )
@@ -560,8 +621,22 @@ def classify(rw: Rewrite) -> None:
     if expired:
         _expired(rw, Confidence.LIKELY, how, wrote)
         return
-    # a gap within the cache lifetime is never an expiry, whatever else it holds (an
-    # away_summary too): the cache was still there
+    # a gap within a known cache lifetime is never an expiry, whatever else it holds:
+    # the cache was still there. With an assumed lifetime, an away_summary in a gap
+    # past the shortest lifetime says the user was away.
+    aways = [e for e in evs if e.kind is EventKind.AWAY]
+    if aways and not known and rw.gap > FIVE_MINUTES:
+        _expired(rw, Confidence.LIKELY, how, wrote)
+        rw.reason = CauseKind.IDLE_REWRITE
+        rw.evidence.insert(
+            0,
+            _ev(
+                f"away_summary at {fmt.clock(aways[-1].timestamp)}: the user was away",
+                m,
+                e=aways[-1],
+            ),
+        )
+        return
     deltas = [
         e
         for e in evs
@@ -776,11 +851,18 @@ def _expiry_text(reason: CauseKind, group: list[Rewrite], top: Rewrite) -> tuple
     return title, advice
 
 
+def _waiting(name: str | None) -> str:
+    """'its Bash call', or 'background subagents'."""
+    if name == BACKGROUND:
+        return name
+    return f"its {name or 'tool'} call"
+
+
 def _expiry_line(rw: Rewrite) -> Evidence:
     """One rewrite of a group of expiries, on one line."""
     m, r = rw.member, rw.request
     if rw.reason is CauseKind.TOOL_WAIT_EXPIRY:
-        why = f"while its {rw.waited_on or 'tool'} call ran"
+        why = f"while {_waiting(rw.waited_on)} ran"
     elif rw.reason is CauseKind.LATE_RESUME_EXPIRY:
         why = "after it had finished"
     else:
@@ -864,7 +946,7 @@ def _rewrite_summary(reason: CauseKind, group: list[Rewrite], excess: float) -> 
         if reason is CauseKind.TOOL_WAIT_EXPIRY:
             tool = lg.waited_on or "a tool"
             why = (
-                f"came {fmt.duration(top.gap)} after the previous one, once its {tool} call "
+                f"came {fmt.duration(top.gap)} after the previous one, once {_waiting(tool)} "
                 f"had run past the cache lifetime of {life}"
                 if len(group) == 1
                 else f"came after tool calls ran past the cache lifetime of {life} (the "
@@ -1812,16 +1894,41 @@ def polling(view: SpikeView) -> list[Candidate]:
 # --------------------------------------------------------------------------- rule 11: parallel work
 
 
-def _most_at_once(spans: Sequence[tuple[datetime, datetime]]) -> tuple[int, datetime | None]:
-    """The most spans open at one time, and the first time that many were."""
+def _crowded(
+    spans: Sequence[tuple[datetime, datetime]], least: int
+) -> tuple[int, list[tuple[datetime, datetime]]]:
+    """The most spans open at one time, and the windows where at least `least` were."""
     points = sorted([(a, 1) for a, _ in spans] + [(b, -1) for _, b in spans])
     n = best = 0
-    when = None
+    windows: list[tuple[datetime, datetime]] = []
+    start: datetime | None = None
     for t, d in points:
         n += d
-        if n > best:
-            best, when = n, t
-    return best, when
+        best = max(best, n)
+        if n >= least and start is None:
+            start = t
+        elif n < least and start is not None:
+            if t > start:
+                windows.append((start, t))
+            start = None
+    return best, windows
+
+
+def _runs(reqs: Sequence[Request]) -> list[tuple[datetime, datetime]]:
+    """A thread's stretches of work: its requests split at gaps over PARALLEL_RUN_GAP."""
+    out: list[tuple[datetime, datetime]] = []
+    for r in reqs:
+        if out and r.timestamp - out[-1][1] <= PARALLEL_RUN_GAP:
+            out[-1] = (out[-1][0], r.timestamp)
+        else:
+            out.append((r.timestamp, r.timestamp))
+    return [(a, b + PARALLEL_PAD) for a, b in out]
+
+
+def _scaled(u: Usage, f: float) -> Usage:
+    got = {k: int(getattr(u, k) * f) for k in USAGE_FIELDS}
+    got["thinking"] = min(got["thinking"], got["output"])
+    return Usage(**got)
 
 
 _PARALLEL_ADVICE = (
@@ -1832,33 +1939,53 @@ _PARALLEL_ADVICE = (
 
 
 def parallel_work(view: SpikeView) -> list[Candidate]:
-    """Rule 11: on a session spike where PARALLEL_MIN or more subagents work at once,
-    their own requests (what the other causes left of them) are the parallel work."""
-    if view.spike.scope != "session":
+    """Rule 11: on a session spike where PARALLEL_MIN or more subagents work at once
+    (each thread's runs of requests, split at gaps over PARALLEL_RUN_GAP), the
+    subagent requests inside those windows are the parallel work: what the other
+    causes left of them, up to their cost above the spike's usual pace over the
+    windows. The main thread's requests are never claimed."""
+    spike = view.spike
+    if spike.scope != "session":
         return []
     subs = [m for m in view.members if m.thread.agent_id is not None]
     if len(subs) < PARALLEL_MIN:
         return []
-    spans = [(m.requests[0].timestamp, m.requests[-1].timestamp + PARALLEL_PAD) for m in subs]
-    peak, when = _most_at_once(spans)
-    if peak < PARALLEL_MIN or when is None:
+    spans = [run for m in subs for run in _runs(m.requests)]
+    peak, windows = _crowded(spans, PARALLEL_MIN)
+    if peak < PARALLEL_MIN or not windows:
         return []
-    spent = sum(view.pricer.cost(r) for m in subs for r in m.requests)
+    inside = [
+        (m, r) for m in subs for r in m.requests if any(a <= r.timestamp < b for a, b in windows)
+    ]
+    span = (spike.end - spike.start).total_seconds()
+    rate = spike.baseline_usd / span if span > 0 else 0.0
+    length = sum((b - a).total_seconds() for a, b in windows)
+    spent = sum(view.pricer.cost(r) for _, r in inside)
+    allowed = spent - rate * length
+    left = sum(view.pricer.value(r, view.ledger.left(r)) for _, r in inside)
+    if allowed <= 0 or left <= 0:
+        return []
+    f = min(1.0, allowed / left)
     excess = sum(
-        view.ledger.take(r, view.ledger.left(r), CauseKind.PARALLEL_SUBAGENTS)
-        for m in subs
-        for r in m.requests
+        view.ledger.take(r, _scaled(view.ledger.left(r), f), CauseKind.PARALLEL_SUBAGENTS)
+        for _, r in inside
     )
     if excess <= 0:
         return []
+    when = windows[0][0]
+    subs = list({id(m): m for m, _ in inside}.values())
     types = Counter(m.session.agent_type(m.thread.agent_id) or "unknown type" for m in subs)
     mix = ", ".join(f"{k} \u00d7{v}" for k, v in types.most_common(4))
-    turns = sum(len(m.requests) for m in subs)
+    turns = len(inside)
     m0 = subs[0]
     evidence = [
-        _ev(f"{peak} subagents working at once at {fmt.clock(when)}", m0),
-        _ev(f"{len(subs)} subagents in the spike: {mix}", m0),
-        _ev(f"{turns} subagent requests in the spike, {fmt.usd(spent)} in all", m0),
+        _ev(
+            f"Up to {peak} subagents working at once; {PARALLEL_MIN} or more for "
+            f"{fmt.duration(timedelta(seconds=length))} from {fmt.clock(when)}",
+            m0,
+        ),
+        _ev(f"{len(subs)} subagents in those stretches: {mix}", m0),
+        _ev(f"{turns} subagent requests in them, {fmt.usd(spent)} in all", m0),
     ]
     return [
         Candidate(
@@ -1869,8 +1996,9 @@ def parallel_work(view: SpikeView) -> list[Candidate]:
             evidence,
             _PARALLEL_ADVICE,
             f"{len(subs)} subagents worked in this spike, up to {peak} at once, over "
-            f"{turns} requests. Their own work, apart from what the causes above claim, "
-            f"cost {fmt.usd(excess)}: the price of running them side by side.",
+            f"{turns} requests while {PARALLEL_MIN} or more ran. Their own work above the "
+            f"usual pace, apart from what the causes above claim, cost {fmt.usd(excess)}: "
+            "the price of running them side by side.",
         )
     ]
 

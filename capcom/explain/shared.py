@@ -34,15 +34,29 @@ EXPIRY_CAUSES: dict[str, CauseKind] = {v: k for k, v in EXPIRY_SUB_KINDS.items()
 
 
 def expiry_kind(
-    gap: timedelta, lifetime: timedelta, tool_ran: timedelta | None, subagent: bool
+    gap: timedelta,
+    lifetime: timedelta,
+    wait: timedelta | None,
+    after_wait: timedelta | None,
+    subagent: bool,
+    resumed: bool,
 ) -> str | None:
     """Who waited through a gap of `gap` between two requests of a thread whose cache
-    lives `lifetime`: TOOL_WAIT_EXPIRY when the previous request's tool call ran past
-    the lifetime (`tool_ran`: from the request to the call's last result), else
-    LATE_RESUME_EXPIRY on a subagent (it had finished and its lead resumed it late),
-    else IDLE_EXPIRY. None when the gap is within the lifetime: no expiry."""
+    lives `lifetime`. None when the gap is within the lifetime: no expiry.
+
+    `wait` is how long the agent waited on its own work: from the previous request
+    to its tool call's last result (user-interaction tools such as AskUserQuestion
+    excluded), or, on a main thread, to the last request of the session's other
+    threads (background work); `after_wait` runs from there to the next request.
+    TOOL_WAIT_EXPIRY when that wait ran past the lifetime and was the longer of the
+    two; else LATE_RESUME_EXPIRY on a subagent that had ended its turn and that a
+    message from its lead resumed (`resumed`); else IDLE_EXPIRY (someone was away)."""
     if gap <= lifetime:
         return None
-    if tool_ran is not None and tool_ran > lifetime:
-        return TOOL_WAIT_EXPIRY
-    return LATE_RESUME_EXPIRY if subagent else IDLE_EXPIRY
+    if wait is not None and wait > lifetime:
+        user_after = after_wait is not None and after_wait > lifetime and after_wait >= wait
+        if not user_after:
+            return TOOL_WAIT_EXPIRY
+    if subagent and resumed:
+        return LATE_RESUME_EXPIRY
+    return IDLE_EXPIRY
