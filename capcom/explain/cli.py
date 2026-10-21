@@ -62,6 +62,8 @@ def format_spikes(
         if s.session_id is not None:
             where = titles.get(s.session_id) or _project(projects.get(s.session_id, s.session_id))
             where = where if len(where) <= 48 else where[:47] + "…"
+        if s.scope == "session":
+            where += " (session-wide)"
         lines.append(f"{n:>3}. +{usd(s.excess_usd)}  {day_hm(s.start)}  {where}")
         lines.append(f"     {exps[0].title}")
         for e in exps:
