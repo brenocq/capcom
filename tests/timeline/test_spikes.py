@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from datetime import timedelta
 
 from capcom.cost.model import price
@@ -53,22 +54,25 @@ def test_single_request_spike() -> None:
 
 def test_single_request_negatives() -> None:
     # too little history: the first requests of a thread are never spikes
-    assert spikes(thread([CHEAP] * 3 + [REWRITE])) == []
+    assert spikes(thread([CHEAP] * 3 + [REWRITE] + [CHEAP] * 10)) == []
+    # too little look-ahead: the last turns of a thread are never single spikes
+    assert spikes(thread([CHEAP] * 25 + [REWRITE] + [CHEAP] * 9)) == []
     # under the ratio: 4x the median
-    assert spikes(thread([DEAR] * 25 + [{"cache_read": 250_000, "output": 37_500}])) == []
+    four = {"cache_read": 250_000, "output": 37_500}
+    assert spikes(thread([DEAR] * 25 + [four] + [DEAR] * 10)) == []
     # over the ratio but under the absolute floor ($0.01 -> $0.10)
     tiny = {"cache_read": 50_000}
-    assert spikes(thread([tiny] * 25 + [{"output": 5_000}])) == []
+    assert spikes(thread([tiny] * 25 + [{"output": 5_000}] + [tiny] * 10)) == []
     # a placeholder reply is not a request
-    synth = req(when=at(30), model="<synthetic>", output=10**7)
-    assert spikes([*thread([CHEAP] * 25), synth]) == []
+    synth = req(when=at(25.5), model="<synthetic>", output=10**7)
+    assert spikes([*thread([CHEAP] * 40), synth]) == []
 
 
 def test_median_is_per_thread() -> None:
     # the main thread is expensive, the subagent cheap: a subagent request at the
     # main thread's level is a spike only within its own thread
     main = thread([REWRITE] * 25)
-    sub = thread([CHEAP] * 25 + [REWRITE], agent="a1", start=0.5)
+    sub = thread([CHEAP] * 25 + [REWRITE] + [CHEAP] * 10, agent="a1", start=0.5)
     found = spikes(main + sub)
     assert [(s.kind, s.agent_id) for s in found] == [(SpikeKind.SINGLE_REQUEST, "a1")]
 
@@ -102,8 +106,10 @@ def test_slope_change_from_pace() -> None:
 def test_slope_negatives() -> None:
     # a steady thread
     assert spikes(thread([DEAR] * 60)) == []
-    # a rise that does not last: 3 expensive turns, then back
-    assert spikes(thread([CHEAP] * 30 + [DEAR] * 3 + [CHEAP] * 20)) == []
+    # a rise that does not last: 3 turns at 4x (under the single ratio), then back;
+    # the window's mean is 1.9x and its excess $2.25, both over the thresholds
+    base, high = {"cache_read": 1_250_000}, {"cache_read": 5_000_000}  # $0.25, $1.00
+    assert spikes(thread([base] * 30 + [high] * 3 + [base] * 20)) == []
     # a lasting rise under the dollar floor
     tiny_a, tiny_b = {"cache_read": 50_000}, {"cache_read": 150_000}
     assert spikes(thread([tiny_a] * 30 + [tiny_b] * 20)) == []
@@ -121,8 +127,8 @@ def test_single_request_is_not_also_a_slope_change() -> None:
 
 
 def test_window_session_filter_and_order() -> None:
-    s1 = thread([CHEAP] * 25 + [REWRITE], session="s1")
-    s2 = thread([CHEAP] * 20 + [REWRITE], session="s2", start=0.25)
+    s1 = thread([CHEAP] * 25 + [REWRITE] + [CHEAP] * 10, session="s1")
+    s2 = thread([CHEAP] * 20 + [REWRITE] + [CHEAP] * 10, session="s2", start=0.25)
     found = spikes(s1 + s2)
     assert [s.session_id for s in found] == ["s2", "s1"]  # time order
     ix = FakeIndex(reqs=s1 + s2)
@@ -149,3 +155,62 @@ def test_a_lasting_big_step_is_one_slope_change() -> None:
     found = spikes(reqs)
     assert [s.kind for s in found] == [SpikeKind.SLOPE_CHANGE]
     assert found[0].start == reqs[30].timestamp
+
+
+def by_cost(costs: list[float]) -> list[dict[str, int]]:
+    """Usages costing `costs` USD each (output tokens at $20/M on opus-5-5)."""
+    return [{"output": round(c / 20e-6)} for c in costs]
+
+
+def test_a_single_inside_a_slope_is_counted_once() -> None:
+    reqs = thread(by_cost([0.05] * 30 + [0.2] * 5 + [2.4] + [0.2] * 14))
+    found = spikes(reqs)
+    assert sorted(s.kind for s in found) == [SpikeKind.SINGLE_REQUEST, SpikeKind.SLOPE_CHANGE]
+    single = next(s for s in found if s.kind is SpikeKind.SINGLE_REQUEST)
+    slope = next(s for s in found if s.kind is SpikeKind.SLOPE_CHANGE)
+    assert single.message_ids[0] in slope.message_ids
+    # together they account for the span's cost above the old rate, once
+    old_rate = 0.05 * len(slope.message_ids)
+    assert abs(single.excess_usd + slope.excess_usd - (slope.cost_usd - old_rate)) < 1e-6
+
+
+def test_slope_spans_do_not_overlap() -> None:
+    import random
+
+    rng = random.Random(7)
+    for _ in range(30):
+        costs: list[float] = []
+        while len(costs) < 300:
+            level = rng.choice([0.02, 0.05, 0.1, 0.3, 0.8])
+            costs += [level * rng.uniform(0.7, 1.3) for _ in range(rng.randint(3, 40))]
+            if rng.random() < 0.1:
+                costs.append(3.0)
+        found = spikes(thread(by_cost(costs)))
+        for kind in SpikeKind:
+            same = [s for s in found if s.kind is kind]
+            ids = [m for s in same for m in s.message_ids]
+            assert len(ids) == len(set(ids))
+            for a, b in itertools.pairwise(same):
+                assert a.end <= b.start
+
+
+def test_zero_baseline_starts_at_the_change() -> None:
+    reqs = thread(by_cost([0.0] * 30 + [0.2] * 20))
+    found = spikes(reqs)
+    assert [s.kind for s in found] == [SpikeKind.SLOPE_CHANGE]
+    assert found[0].start == reqs[30].timestamp
+
+
+def test_look_ahead_reads_past_until() -> None:
+    reqs = thread([CHEAP] * 25 + [REWRITE] + [CHEAP] * 10)
+    ix = FakeIndex(reqs=reqs)
+    until = reqs[26].timestamp  # the rewrite is the last request before `until`
+    got = find_spikes(ix, TABLE, WINDOW[0], until)
+    assert [s.message_ids for s in got] == [(reqs[25].message_id,)]
+    # a spike starting at `until` belongs to the next window
+    assert find_spikes(ix, TABLE, WINDOW[0], reqs[25].timestamp) == []
+    # a slope change whose window runs past `until` starts where the rate changed
+    step = thread([CHEAP] * 30 + [DEAR] * 20, session="s2")
+    ix = FakeIndex(reqs=step)
+    got = find_spikes(ix, TABLE, WINDOW[0], step[31].timestamp)
+    assert [s.start for s in got] == [step[30].timestamp]

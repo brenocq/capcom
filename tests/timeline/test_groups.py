@@ -16,8 +16,8 @@ from capcom.timeline.groups import (
     folder_name,
     is_temporary,
 )
-from capcom.types import AgentInfo, GroupBy, Request, SessionInfo
-from tests.cost.fakes import FakeIndex, req
+from capcom.types import AgentInfo, Event, EventKind, GroupBy, Request, SessionInfo
+from tests.cost.fakes import T0, FakeIndex, req
 
 TABLE = load_prices()
 OPENCLAW_ROOT = Path("/home/user/.openclaw")
@@ -102,3 +102,27 @@ def test_category_splits_the_cost() -> None:
         "web": cost.web,
     }
     assert abs(sum(got.values()) - cost.total) < 1e-12
+
+
+def test_agent_type_falls_back_to_the_spawning_call() -> None:
+    spawn = Event(
+        EventKind.SPAWN,
+        "s1",
+        None,
+        T0,
+        "k1",
+        {"tool_use_id": "tu_9", "agent_type": "builder", "description": "x"},
+    )
+    other_session = Event(
+        EventKind.SPAWN, "s2", None, T0, "k2", {"tool_use_id": "tu_8", "agent_type": "scout"}
+    )
+    ix = FakeIndex(
+        agent_infos=[
+            AgentInfo("a1", "s1", tool_use_id="tu_9"),
+            AgentInfo("a2", "s1", tool_use_id="tu_8"),
+        ],
+        evs=[spawn, other_session],
+    )
+    g = grouper(ix)
+    assert key(req(agent="a1"), GroupBy.AGENT, g) == ("builder", "builder")
+    assert key(req(agent="a2"), GroupBy.AGENT, g)[0] == "unknown"  # another session's call

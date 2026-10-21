@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta, timezone
+from itertools import pairwise
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from capcom.cost.model import price
 from capcom.cost.prices import load_prices
 from capcom.timeline import cumulative, per_step
-from capcom.timeline.series import step_times
+from capcom.timeline.series import OTHER, step_times
 from capcom.types import AgentInfo, GroupBy, Series
 from tests.cost.fakes import T0, FakeIndex, at, req
 
@@ -55,7 +57,7 @@ def test_step_times_start_at_since_and_cover_until() -> None:
         step_times(T0, T0 + HOUR, timedelta(0))
 
 
-def test_local_midnight_since_is_kept() -> None:
+def test_local_midnight_since_becomes_utc() -> None:
     tz = timezone(timedelta(hours=-3))
     since = datetime(2026, 10, 20, 0, 0, tzinfo=tz)
     series = per_step(
@@ -63,8 +65,47 @@ def test_local_midnight_since_is_kept() -> None:
     )
     assert series
     for s in series:
-        assert s.times == (since, since + timedelta(days=1))
-        assert s.times[0].utcoffset() == since.utcoffset()
+        assert s.times == (since, since + timedelta(days=1))  # the same instants
+        assert all(t.tzinfo is UTC for t in s.times)
+
+
+def test_steps_stay_equal_across_daylight_saving() -> None:
+    berlin = ZoneInfo("Europe/Berlin")  # clocks go back on 2026-10-25
+    since = datetime(2026, 10, 24, 0, 0, tzinfo=berlin)
+    late = datetime(2026, 10, 25, 23, 30, tzinfo=berlin)  # 22:30 UTC
+    ix = FakeIndex(reqs=[req(when=late.astimezone(UTC), output=1000)])
+    day = timedelta(days=1)
+    (s,) = per_step(ix, TABLE, since, since + 3 * day, GroupBy.SESSION, day, OC)
+    # 73 hours of local time: four 24-hour UTC steps
+    assert len(s.times) == 4
+    assert all(b - a == day for a, b in pairwise(s.times))
+    k = next(i for i, v in enumerate(s.values) if v)
+    assert s.times[k] <= late < s.times[k] + day
+
+
+def test_top_folds_the_rest_into_other() -> None:
+    ix = sample()
+    full = per_step(ix, TABLE, T0, T0 + 3 * HOUR, GroupBy.PROJECT, HOUR, OC)
+    top = per_step(ix, TABLE, T0, T0 + 3 * HOUR, GroupBy.PROJECT, HOUR, OC, top=1)
+    assert [s.key for s in top] == [full[0].key, OTHER]
+    assert top[0] == full[0]
+    rest = [sum(v) for v in zip(*(s.values for s in full[1:]), strict=True)]
+    assert close(top[1].values, tuple(rest))
+    cum = cumulative(ix, TABLE, T0, T0 + 3 * HOUR, GroupBy.PROJECT, HOUR, OC, top=1)
+    assert abs(sum(c.values[-1] for c in cum) - sum(sum(s.values) for s in full)) < 1e-9
+    # top at or above the member count: nothing folded
+    assert per_step(ix, TABLE, T0, T0 + 3 * HOUR, GroupBy.PROJECT, HOUR, OC, top=3) == full
+    with pytest.raises(ValueError):
+        per_step(ix, TABLE, T0, T0 + 3 * HOUR, GroupBy.PROJECT, HOUR, OC, top=0)
+
+
+def test_long_fine_series_share_float_objects() -> None:
+    ix = FakeIndex(reqs=[req(when=at(1), output=1000)])
+    (c,) = cumulative(
+        ix, TABLE, T0, T0 + timedelta(days=30), GroupBy.SESSION, timedelta(minutes=5), OC
+    )
+    assert len(c.values) == 30 * 288
+    assert len({id(v) for v in c.values}) == 1
 
 
 def test_per_step_buckets_and_groups_by_project() -> None:

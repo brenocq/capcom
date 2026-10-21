@@ -27,6 +27,9 @@ def build(tmp_path: Path) -> tuple[Config, list[str]]:
     for k in range(25):
         ids.append(s.assistant(Reply(at(60 * k), cache_read=250_000, output=10, records=2)))
     ids.append(s.assistant(Reply(at(60 * 25), cache_write_1h=300_000, output=10)))
+    rewrite = ids[-1]
+    for k in range(26, 36):
+        ids.append(s.assistant(Reply(at(60 * k), cache_read=250_000, output=10)))
     sub = s.subagent("scout", "look around")
     sub.assistant(Reply(at(90), model="claude-haiku-4-5-20251001", output=1_000))
     sub.close()
@@ -40,7 +43,7 @@ def build(tmp_path: Path) -> tuple[Config, list[str]]:
     claw.close()
     s.close()
     run_scan(config, quiet=True)
-    return config, ids
+    return config, [*ids, rewrite]
 
 
 def test_series_and_spikes_from_the_store(tmp_path: Path) -> None:

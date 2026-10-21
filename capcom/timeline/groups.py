@@ -7,8 +7,9 @@ same key and label everywhere:
 - PROJECT: the project folder, with every folder under /tmp grouped as "temporary"
   and every folder under the OpenClaw state dir grouped as "openclaw";
 - MODEL: the canonical price-table id (`<synthetic>` placeholders are left out);
-- AGENT: "main" for main threads, else the subagent's agent type ("unknown" when
-  its meta.json gave none);
+- AGENT: "main" for main threads, else the subagent's agent type: from its
+  meta.json, else from the parent's Agent call it names (its SPAWN event), else
+  "unknown";
 - SESSION: the session id, labeled with its title or the id's first 8 characters.
 """
 
@@ -21,7 +22,7 @@ from pathlib import Path
 
 from capcom.config import load_config
 from capcom.cost.prices import canonical, is_placeholder
-from capcom.types import CostBreakdown, GroupBy, Index, PriceTable, Request
+from capcom.types import CostBreakdown, EventKind, GroupBy, Index, PriceTable, Request
 
 TEMPORARY = "temporary"
 OPENCLAW = "openclaw"
@@ -74,9 +75,20 @@ class Grouper:
         if openclaw_root is None:
             openclaw_root = load_config().openclaw_root
         titles = {s.session_id: s.title for s in index.sessions() if s.title}
-        agent_types = {
-            (a.session_id, a.agent_id): a.agent_type for a in index.agents() if a.agent_type
-        }
+        agent_types: dict[tuple[str, str], str] = {}
+        untyped: dict[tuple[str, str], tuple[str, str]] = {}  # tool_use_id -> agent
+        for a in index.agents():
+            if a.agent_type:
+                agent_types[(a.session_id, a.agent_id)] = a.agent_type
+            elif a.tool_use_id:
+                untyped[(a.session_id, a.tool_use_id)] = (a.session_id, a.agent_id)
+        if untyped:
+            # no type in the meta.json: the parent's Agent call names the type it spawned
+            for e in index.events(kinds=frozenset({EventKind.SPAWN})):
+                agent = untyped.get((e.session_id, str(e.attrs.get("tool_use_id"))))
+                kind = e.attrs.get("agent_type")
+                if agent is not None and isinstance(kind, str) and kind:
+                    agent_types[agent] = kind
         return cls(table, titles, agent_types, folder_name(openclaw_root))
 
     def project(self, project_dir: str) -> tuple[str, str]:
