@@ -20,9 +20,9 @@ optional field (with a default) or a new type is fine.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
@@ -436,4 +436,184 @@ class Index(Protocol):
 
     def last_cost_states(self) -> Iterator[CostState]:
         """The last cost-state of each session that has one."""
+        ...
+
+
+# --------------------------------------------------------------------------- timeline
+
+
+class GroupBy(StrEnum):
+    """How a chart splits spend into series."""
+
+    CATEGORY = "category"  # uncached input, cache read, cache write, output, web
+    PROJECT = "project"  # project_dir (temporary /tmp folders and OpenClaw grouped)
+    MODEL = "model"  # canonical price-table model id
+    AGENT = "agent"  # "main" for main threads, else AgentInfo.agent_type
+    SESSION = "session"
+
+
+@dataclass(frozen=True, slots=True)
+class Series:
+    """One line of a chart: a value at each time step (USD unless the producer says
+    otherwise). `times` are the step starts, aware UTC, equally spaced."""
+
+    key: str  # stable id of the group member (category name, project dir, model, ...)
+    label: str  # display label
+    times: tuple[datetime, ...]
+    values: tuple[float, ...]  # same length as times
+
+
+class SpikeKind(StrEnum):
+    SINGLE_REQUEST = "single_request"  # one request far above its recent median
+    SLOPE_CHANGE = "slope_change"  # the spend rate rose and stayed up
+
+
+@dataclass(frozen=True, slots=True)
+class Spike:
+    """A jump in spend, in one session (`session_id` set) or machine-wide (None)."""
+
+    kind: SpikeKind
+    start: datetime
+    end: datetime  # exclusive
+    cost_usd: float  # spent in [start, end) within the scope
+    baseline_usd: float  # what the baseline rate would have spent over the same span
+    session_id: str | None = None
+    agent_id: str | None = None
+    message_ids: tuple[str, ...] = ()  # the requests that make it up, in time order
+
+    @property
+    def excess_usd(self) -> float:
+        return max(0.0, self.cost_usd - self.baseline_usd)
+
+
+# --------------------------------------------------------------------------- explain
+
+
+class CauseKind(StrEnum):
+    """The causes in design.md, "Causes (explain)"."""
+
+    IDLE_REWRITE = "idle_rewrite"  # cache rewritten after a pause past its lifetime
+    COMPACTION = "compaction"  # cache rewritten after a compaction (or one ran late)
+    MODEL_SWITCH = "model_switch"
+    TOOL_SET_CHANGE = "tool_set_change"  # tools, connectors or skills changed mid-session
+    LARGE_TOOL_RESULT = "large_tool_result"  # written once, reread by later turns
+    CONTEXT_GROWTH = "context_growth"
+    FAN_OUT = "fan_out"  # a burst of subagent spawns
+    LONG_REPORT = "long_report"  # a long subagent report reread by the parent
+    THINKING_HEAVY = "thinking_heavy"
+    POLLING = "polling"  # the same tool call repeated in a row
+    UNEXPLAINED = "unexplained"
+
+
+class Confidence(StrEnum):
+    CLEAR = "clear"
+    LIKELY = "likely"
+    UNEXPLAINED = "unexplained"
+
+
+@dataclass(frozen=True, slots=True)
+class Evidence:
+    """One fact from the logs behind an explanation or a finding.
+
+    `label` is a short sentence generated only from allowed fields (counts, times,
+    sizes, models, tool names, file paths, agent types), never conversation text.
+    The ids point back to the record so a page can link to it."""
+
+    label: str
+    session_id: str | None = None
+    agent_id: str | None = None
+    timestamp: datetime | None = None
+    message_id: str | None = None
+    event_key: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Explanation:
+    """A spike matched to a cause. Several explanations may share one spike; their
+    `excess_usd` never add up to more than the spike's excess."""
+
+    spike: Spike
+    cause: CauseKind
+    confidence: Confidence
+    excess_usd: float  # the part of the spike's excess this cause accounts for
+    title: str  # short generated headline, e.g. "Cache rebuilt after 74 minutes idle"
+    evidence: tuple[Evidence, ...] = ()
+    advice: str = ""
+
+
+# --------------------------------------------------------------------------- checks
+
+
+@dataclass(frozen=True, slots=True)
+class Finding:
+    """A setup warning drawn from real usage (design.md, "Setup checks")."""
+
+    kind: str  # stable id, e.g. "claudeai_connectors_unused"
+    title: str
+    scope: str  # what it applies to: a project dir, an agent type, or "all"
+    summary: str  # one or two generated sentences with the numbers
+    saving_usd_per_week: float  # estimated, at the window's pace
+    advice: str
+    change: str | None = None  # text to paste: a settings snippet, frontmatter, a line
+    evidence: tuple[Evidence, ...] = ()
+    metrics: Mapping[str, AttrValue] = field(default_factory=dict, hash=False)
+
+
+# --------------------------------------------------------------------------- module entry points
+#
+# Each analysis module exposes these functions at package level (capcom.timeline,
+# capcom.explain, capcom.checks); the report module and the CLI call them only.
+# `since` inclusive, `until` exclusive, both aware datetimes.
+
+
+class TimelineModule(Protocol):
+    def cumulative(
+        self,
+        index: Index,
+        table: PriceTable,
+        since: datetime,
+        until: datetime,
+        by: GroupBy,
+        step: timedelta,
+    ) -> list[Series]:
+        """Cumulative USD per group member, largest final value first."""
+        ...
+
+    def per_step(
+        self,
+        index: Index,
+        table: PriceTable,
+        since: datetime,
+        until: datetime,
+        by: GroupBy,
+        step: timedelta,
+    ) -> list[Series]:
+        """USD spent in each step per group member (bars, heatmaps)."""
+        ...
+
+    def find_spikes(
+        self,
+        index: Index,
+        table: PriceTable,
+        since: datetime,
+        until: datetime,
+        session_id: str | None = None,
+    ) -> list[Spike]:
+        """Spikes in the window, per session (or in one session), time order."""
+        ...
+
+
+class ExplainModule(Protocol):
+    def explain(
+        self, index: Index, table: PriceTable, spikes: Sequence[Spike]
+    ) -> list[Explanation]:
+        """One or more explanations per spike; UNEXPLAINED when no rule fits."""
+        ...
+
+
+class ChecksModule(Protocol):
+    def run_checks(
+        self, index: Index, table: PriceTable, since: datetime, until: datetime
+    ) -> list[Finding]:
+        """Findings ranked by saving_usd_per_week, largest first."""
         ...
