@@ -38,11 +38,11 @@ poll starts a new one), stops after 120 s (the poll gets `504 {"error": "timeout
 and runs at low priority once no page polled it for 2.5 s. `status` and `live` are
 always answered at once.
 
-At most 3 jobs compute at once. A warmer thread computes each page's usual views
-(the default view of every page, then their range tabs, the page last asked for
-first) after startup and whenever the index changes, at low priority: its jobs pause
-while a page's job runs, it rests as long as each reply took, and it stops after
-30 minutes without a page request.
+At most 3 jobs compute at once. A warmer thread computes the views pages asked for
+in the last 30 minutes (newest first) and then every page's default view, after
+startup and whenever the index changes, at low priority: its jobs pause while a
+page's job runs, it rests three times as long as each reply took (about a quarter
+of a core at most), and it stops after 30 minutes without a page request.
 
 The server keeps the index fresh itself: an incremental scan (`run_scan`, quiet) at
 start and then a minute after each scan ends, in one background thread; a lock keeps

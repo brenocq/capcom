@@ -246,6 +246,9 @@ def _limits_stamp(state_dir: Path | None) -> tuple[int, int]:
     return (st.st_size, st.st_mtime_ns)
 
 
+# the endpoints whose replies read the usage samples (their limits cards)
+SAMPLED = frozenset({"limits", "overview"})
+
 # the query parameters each endpoint reads: the cache key holds only these
 PARAMS: dict[str, tuple[str, ...]] = {
     "overview": (),
@@ -330,8 +333,10 @@ class Scanner:
             self._thread.join(timeout)
 
 
-# The views the warmer computes ahead of the clicks: each page's default request
-# first, then its other range tabs, with the query the page sends.
+# The views the warmer may compute ahead of the clicks, with the query the page
+# sends: each page's default request first. Only the defaults and the views a page
+# opened lately are warmed (`Warmer.order`); the other tabs are listed for tests
+# and for a warmer given more room.
 WARM_VIEWS: dict[str, list[dict[str, str]]] = {
     "overview": [{}],
     "spikes": [{"days": d} for d in ("14", "1", "7", "30", "90")],
@@ -341,17 +346,19 @@ WARM_VIEWS: dict[str, list[dict[str, str]]] = {
     "limits": [{"days": d} for d in ("14", "7", "30", "90")],
 }
 WARM_IDLE = 1800.0  # seconds without a page request after which the warmer rests
-WARM_REST = 1.0  # after each reply, rest this many times as long as it took
+WARM_REST = 3.0  # after each reply, rest this many times as long as it took (~1/4 core)
+WARM_RECENT = 1800.0  # a view a page opened this many seconds ago is still warmed
 
 
 class Warmer:
     """One low-priority thread that fills the cache with the pages' usual views
     after startup and whenever the index's generation (or the date) changes: the
-    views of the page last asked for first, then every page's default view, then
-    the other range tabs. Its jobs run as background jobs (`capcom.report.jobs`),
+    views a page asked for in the last `recent` seconds, newest first, then every
+    page's default view. Its jobs run as background jobs (`capcom.report.jobs`),
     so a page's request never waits for it; a new generation stops its job and
-    starts the round over. It rests between replies (`rest`) and stops warming
-    when no page asked for anything in `idle` seconds."""
+    starts the round over. It rests `rest` times as long as each reply took, so
+    it keeps about 1 / (1 + rest) of a core busy at most, and stops warming when
+    no page asked for anything in `idle` seconds."""
 
     def __init__(
         self,
@@ -360,39 +367,47 @@ class Warmer:
         rest: float = WARM_REST,
         idle: float = WARM_IDLE,
         tick: float = 2.0,
+        recent: float = WARM_RECENT,
     ) -> None:
         self.site = site
         self.views = WARM_VIEWS if views is None else views
         self.rest = rest
         self.idle = idle
         self.tick = tick
+        self.recent = recent
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="capcom-warm", daemon=True)
-        self._focus: tuple[str, dict[str, str]] | None = None
+        # the views pages asked for: (name, sorted query) -> when, newest last
+        self._opened: dict[tuple[str, tuple[tuple[str, str], ...]], float] = {}
         self._seen = time.monotonic()
         self._warm: tuple[Any, ...] | None = None  # the (generation, date) last warmed
         self.computed = 0  # replies the warmer computed
 
     def saw(self, name: str, query: dict[str, str]) -> None:
-        """A page asked for `name`: its views come first in the next round."""
-        self._seen = time.monotonic()
+        """A page asked for `name` with `query`: that view is warmed first for the
+        next `recent` seconds."""
+        now = time.monotonic()
+        self._seen = now
         if name in self.views:
-            self._focus = (name, dict(query))
+            tag = (name, tuple(sorted(query.items())))
+            self._opened.pop(tag, None)
+            self._opened[tag] = now
+            for old, when in list(self._opened.items()):
+                if now - when > self.recent:
+                    del self._opened[old]
 
     def order(self) -> list[tuple[str, dict[str, str]]]:
-        first: list[tuple[str, dict[str, str]]] = []
-        if self._focus is not None:
-            name, query = self._focus
-            first = [(name, query), *((name, v) for v in self.views[name])]
-        defaults = [(n, vs[0]) for n, vs in self.views.items() if vs]
-        rest = [(n, v) for n, vs in self.views.items() for v in vs]
+        """The views to keep warm: the ones opened lately, newest first, then each
+        page's default view."""
+        now = time.monotonic()
+        opened = [tag for tag, when in reversed(self._opened.items()) if now - when <= self.recent]
+        defaults = [(n, tuple(sorted(vs[0].items()))) for n, vs in self.views.items() if vs]
         out: list[tuple[str, dict[str, str]]] = []
         seen: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
-        for name, query in [*first, *defaults, *rest]:
-            tag = (name, tuple(sorted(query.items())))
+        for tag in [*opened, *defaults]:
             if tag not in seen:
                 seen.add(tag)
-                out.append((name, query))
+                out.append((tag[0], dict(tag[1])))
         return out
 
     def warm_round(self) -> bool:
@@ -642,12 +657,17 @@ def cache_key(
     site: Site, name: str, parts: list[str], query: dict[str, str], now: datetime
 ) -> tuple[Any, ...]:
     """The cache's and the jobs' key of a request: the index generation, the local
-    date, the endpoint, its path argument and the query parameters it reads."""
+    date, the endpoint, its path argument and the query parameters it reads. The
+    usage samples, which the recorder writes without a scan (every status line
+    refresh), count only for the replies that read them (`SAMPLED`): in the
+    generation they would turn every page's cached reply stale whenever a session
+    is open."""
     assert site.cache is not None
     gen = generation(site.index_path, site.cache.watch(site.index_path))
-    gen += _limits_stamp(site.state_dir)  # the recorder writes without a scan
     today = now.astimezone(site.tz).date().isoformat()  # the windows start at midnight
-    args = tuple((k, query[k]) for k in PARAMS.get(name, ()) if k in query)
+    args: tuple[Any, ...] = tuple((k, query[k]) for k in PARAMS.get(name, ()) if k in query)
+    if name in SAMPLED:
+        args += (("samples", _limits_stamp(site.state_dir)),)
     return (gen, today, name, tuple(parts[1:]), args)
 
 

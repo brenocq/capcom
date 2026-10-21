@@ -269,6 +269,7 @@ def test_warmer_fills_the_cache_and_skips_when_warm(index_path: Path) -> None:
     site = _site(index_path, gate)
     views = {"spikes": [{"days": "14"}, {"days": "7"}], "limits": [{"days": "14"}]}
     warmer = Warmer(site, views=views, rest=0)
+    warmer.saw("spikes", {"days": "7"})
     assert warmer.warm_round()
     assert warmer.computed == 3
     assert site.cache is not None
@@ -278,17 +279,31 @@ def test_warmer_fills_the_cache_and_skips_when_warm(index_path: Path) -> None:
     assert warmer.warm_round() and warmer.computed == 3  # nothing changed: nothing to do
 
 
-def test_warmer_starts_with_the_page_last_asked_for() -> None:
+def test_warmer_warms_the_views_opened_lately_then_the_defaults() -> None:
     site = Site(Path("/nonexistent"), TABLE, FAKE)
     views = {"a": [{"days": "14"}], "b": [{"days": "14"}, {"days": "7"}, {"days": "30"}]}
-    warmer = Warmer(site, views=views)
+    warmer = Warmer(site, views=views, recent=60)
+    assert warmer.order() == [("a", {"days": "14"}), ("b", {"days": "14"})]  # no other tabs
     warmer.saw("b", {"days": "30"})
+    warmer.saw("a", {"days": "7"})
+    warmer.saw("session", {})  # not a warmed page
     assert warmer.order() == [
+        ("a", {"days": "7"}),
         ("b", {"days": "30"}),
-        ("b", {"days": "14"}),
-        ("b", {"days": "7"}),
         ("a", {"days": "14"}),
+        ("b", {"days": "14"}),
     ]
+    warmer.saw("b", {"days": "30"})  # opened again: newest first
+    assert warmer.order()[0] == ("b", {"days": "30"})
+
+
+def test_warmer_forgets_views_not_opened_lately() -> None:
+    site = Site(Path("/nonexistent"), TABLE, FAKE)
+    warmer = Warmer(site, views={"a": [{"days": "14"}]}, recent=60)
+    warmer.saw("a", {"days": "30"})
+    tag = ("a", (("days", "30"),))
+    warmer._opened[tag] -= 61  # opened a minute and a second ago
+    assert warmer.order() == [("a", {"days": "14"})]
 
 
 def test_cache_keeps_a_stale_stand_in_per_view() -> None:
@@ -299,3 +314,18 @@ def test_cache_keeps_a_stale_stand_in_per_view() -> None:
     assert cache.get(("g1", "d", "spikes", (), ()), 0) is None
     assert cache.stale(("g2", "d", "spikes", (), ())) == b"old"  # retired, but kept
     assert cache.stale(("g2", "d", "sessions", (), ())) is None
+
+
+def test_usage_samples_turn_only_the_limits_reply_stale(index_path: Path, tmp_path: Path) -> None:
+    from capcom.limits.model import samples_path
+
+    site = _site(index_path, Gate(), state_dir=tmp_path)
+    samples = samples_path(tmp_path)
+    samples.write_text("{}\n")
+    names = ("spikes", "spend", "limits", "overview")
+    before = {n: cache_key(site, n, [n], {"days": "14"}, NOW) for n in names}
+    samples.write_text("{}\n{}\n")  # the recorder adds a sample
+    after = {n: cache_key(site, n, [n], {"days": "14"}, NOW) for n in names}
+    assert after["spikes"] == before["spikes"] and after["spend"] == before["spend"]
+    assert after["limits"] != before["limits"] and after["overview"] != before["overview"]
+    assert after["limits"][0] == after["spikes"][0]  # one generation for every page
