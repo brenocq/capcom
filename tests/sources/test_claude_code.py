@@ -814,3 +814,6 @@ def test_cost_state_next_timestamp(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(claude_code, "MAX_BATCH_LINES", 2)
     split = of(parse(log), CostState)
     assert split[0].next_timestamp is None and split[1].next_timestamp == at(9)
+    # A batch's first decoded time, in file order: what the store fills a
+    # batch-ending cost-state from.
+    assert [b.first_timestamp for b in batches] == [at(10)]

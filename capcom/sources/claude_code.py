@@ -337,6 +337,7 @@ class _BatchState:
     # Cost-states waiting for the first timestamped record after them (their
     # next_timestamp); released in file order when it comes, or at the batch's end.
     held_costs: list[CostState] = field(default_factory=list)
+    first_timestamp: datetime | None = None  # the first decoded record time, file order
     lines: int = 0
     bytes: int = 0
     skipped: int = 0
@@ -397,7 +398,13 @@ class _Parser:
                     last_seen=b.last_seen,
                 )
             b.records.append(info)
-        batch = Batch(records=b.records, end_offset=end_offset, lines=b.lines, skipped=b.skipped)
+        batch = Batch(
+            records=b.records,
+            end_offset=end_offset,
+            lines=b.lines,
+            skipped=b.skipped,
+            first_timestamp=b.first_timestamp,
+        )
         self.batch = _BatchState()
         return batch
 
@@ -467,6 +474,8 @@ class _Parser:
         t = _ts(rec.get("timestamp"))
         if t is not None:
             self.last_ts = t
+            if b.first_timestamp is None:
+                b.first_timestamp = t
             if b.held_costs:
                 # Only records the adapter decodes count as "the next record": a line
                 # the prefilter skips (a type capcom does not use) is never parsed, so
