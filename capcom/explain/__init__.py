@@ -8,13 +8,17 @@ likely, then by dollars) and take
 their share of the spike's excess until it is used up, so the shares never add up
 to more than the spike's excess. A cause worth less than a tenth of the spike does
 not explain it; when no cause is left the spike is UNEXPLAINED, naming what was
-checked and the closest candidate. When the causes found cover less than half the
-spike, the rest is reported as UNEXPLAINED too.
+checked and the closest candidate. Whatever excess the causes found leave is
+reported as UNEXPLAINED too, so a spike's explanations add up to its excess: only a
+tiny rest (under TINY_REST_USD and under TINY_REST_SHARE of the spike) is folded,
+silently, into the largest cause's share, so that no line of a few cents shows.
+A spike is matched when at least one of its explanations is not UNEXPLAINED.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 
 from capcom.explain import fmt
 from capcom.explain.data import SessionCache
@@ -34,7 +38,8 @@ from capcom.types import (
 __all__ = ["CAUSE_LABELS", "CONFIDENCE_LABELS", "explain"]
 
 KEEP_SHARE = 0.10  # a cause must account for this share of the spike's excess
-REMAINDER_SHARE = 0.50  # an uncovered rest above this share is reported as unexplained
+TINY_REST_USD = 0.05  # an uncovered rest under both of these is folded into a cause
+TINY_REST_SHARE = 0.02
 _RANK = {Confidence.CLEAR: 0, Confidence.LIKELY: 1, Confidence.UNEXPLAINED: 2}
 _REWRITE_CAUSES = frozenset(
     {
@@ -97,7 +102,12 @@ def _explain_one(view: SpikeView) -> list[Explanation]:
                 summary,
             )
         )
-    if total > 0 and left > REMAINDER_SHARE * total:
+    if left <= 1e-9:
+        return out
+    if left < TINY_REST_USD and left < TINY_REST_SHARE * total:
+        k = max(range(len(out)), key=lambda i: out[i].excess_usd)
+        out[k] = replace(out[k], excess_usd=out[k].excess_usd + left)
+    else:
         out.append(
             Explanation(
                 spike,
@@ -117,7 +127,12 @@ def _explain_one(view: SpikeView) -> list[Explanation]:
                 _NOTHING_TO_CHANGE,
                 f"The causes above account for {fmt.usd(total - left)} of the "
                 f"{fmt.usd(total)} above the usual pace; no rule fits the other "
-                f"{fmt.usd(left)}.",
+                f"{fmt.usd(left)}."
+                + (
+                    " It includes the new subagents' own work, apart from their prefixes."
+                    if any(e.cause is CauseKind.FAN_OUT for e in out)
+                    else ""
+                ),
             )
         )
     return out

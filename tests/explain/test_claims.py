@@ -12,7 +12,7 @@ from capcom.explain import explain
 from capcom.explain.fmt import duration
 from capcom.explain.rules import Pricer
 from capcom.types import CauseKind, EventKind, Explanation, Spike, SpikeKind
-from tests.explain.helpers import LONG, TABLE, World, at, check_claims, cost, spike
+from tests.explain.helpers import LONG, TABLE, World, at, check_claims, prefix, spike
 
 
 def run(w: World, s: Spike) -> list[Explanation]:
@@ -110,7 +110,7 @@ def test_fan_out_counts_only_the_burst() -> None:
     lone = w.req(21, agent="b", cache_write_5m=30_000)
     reqs += [late, lone]
     by = causes(run(w, spike(reqs, kind=SpikeKind.SLOPE_CHANGE)))
-    assert by[CauseKind.FAN_OUT] == pytest.approx(sum(cost(r) for r in reqs[1:5]))
+    assert by[CauseKind.FAN_OUT] == pytest.approx(sum(prefix(r) for r in reqs[1:5]))
 
 
 # --------------------------------------------------------------------------- one claim each

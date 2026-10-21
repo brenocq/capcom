@@ -49,6 +49,8 @@ LARGE_RESULT_TOKENS = 20_000  # a tool result this big is "large" (rule 5)
 LONG_REPORT_TOKENS = 10_000  # an Agent report this big is "long" (rule 8)
 RESULT_LOOKBACK = timedelta(hours=1)  # results that may still weigh on a spike
 LATE_COMPACTION_TOKENS = 400_000  # a compaction from above this ran late (rule 2)
+TRIM_MIN_TOKENS = 20_000  # a prompt that shrank this much, and by TRIM_SHARE, was trimmed
+TRIM_SHARE = 0.05
 COMPACTION_REACH = timedelta(minutes=10)  # a compaction just after the spike ends it
 TOOL_WAIT_REACH = timedelta(minutes=1)  # a tool result this close before a rewrite ends the pause
 GROWTH_MIN_CONTEXT = 100_000  # context growth only matters at this size (rule 6)
@@ -351,6 +353,7 @@ class Rewrite:
     waited_on: str | None = None  # the tool call that ran through the pause, if any
     ttl_change: tuple[str, str] | None = None  # cacheControl ttl before and after
     shape_change: bool = False  # the tool list or prompt (shapeHash) changed too
+    trimmed: bool = False  # the prompt shrank with no compaction record (a COMPACTION)
 
 
 def rewritten_tokens(r: Request, prev: Request | None) -> int:
@@ -541,6 +544,26 @@ def classify(rw: Rewrite) -> None:
         rw.evidence.append(wrote)
         return
 
+    # a prompt that shrank with no compact_boundary: something cut the context early
+    # on (Claude Code drops old tool results without logging a compaction), so the
+    # cache is rebuilt from the cut on
+    drop = p.usage.context - r.usage.context
+    if drop >= TRIM_MIN_TOKENS and drop >= TRIM_SHARE * p.usage.context:
+        rw.reason, rw.confidence, rw.trimmed = CauseKind.COMPACTION, Confidence.LIKELY, True
+        rw.evidence = [
+            _ev(
+                f"The prompt went from {fmt.approx(p.usage.context)} to "
+                f"{fmt.approx(r.usage.context)} tokens between the requests at "
+                f"{fmt.clock(p.timestamp)} and {fmt.clock(r.timestamp)}, with no "
+                "compact_boundary between them",
+                m,
+                r,
+            ),
+            _ev(f"Only the first {fmt.approx(r.usage.cache_read)} were read from the cache", m, r),
+            wrote,
+        ]
+        return
+
     if expired:
         _idle(rw, Confidence.LIKELY, how, wrote)
         return
@@ -674,15 +697,20 @@ _REWRITE_ADVICE = {
         "Compact or hand off before the context grows large."
     ),
 }
+_TRIM_ADVICE = (
+    "Trimming the context (old tool results dropped, no compaction logged) rewrites the "
+    "cache from the cut on, and costs most on a large context. Compact or hand off "
+    "before the context grows large."
+)
 
 
 def rewrite_candidates(view: SpikeView) -> list[Candidate]:
-    by_reason: dict[CauseKind, list[Rewrite]] = {}
+    by_reason: dict[tuple[CauseKind, bool], list[Rewrite]] = {}
     for rw in view.rewrites:
         if rw.reason is not CauseKind.UNEXPLAINED:
-            by_reason.setdefault(rw.reason, []).append(rw)
+            by_reason.setdefault((rw.reason, rw.trimmed), []).append(rw)
     out = []
-    for reason, group in by_reason.items():
+    for (reason, trimmed), group in by_reason.items():
         excess = sum(rw.excess for rw in group)
         top = max(group, key=lambda rw: rw.excess)
         k = len(group)
@@ -735,6 +763,11 @@ def rewrite_candidates(view: SpikeView) -> list[Candidate]:
         elif reason is CauseKind.TOOL_SET_CHANGE:
             title = "Tool or prompt change rewrote the cache" + (f" {k} times" if k > 1 else "")
             advice = _REWRITE_ADVICE[reason]
+        elif trimmed:
+            title = "Context trimmed without a compaction record, cache rebuilt" + (
+                f" {k} times" if k > 1 else ""
+            )
+            advice = _TRIM_ADVICE
         else:
             title = "Cache rewritten after a compaction" + (f" {k} times" if k > 1 else "")
             advice = _REWRITE_ADVICE[CauseKind.COMPACTION]
@@ -774,6 +807,13 @@ def _rewrite_summary(reason: CauseKind, group: list[Rewrite], excess: float) -> 
             if len(group) == 1
             else f"came after pauses past the cache lifetime (the longest {fmt.duration(lg.gap)}"
             f"{while_})"
+        )
+    elif reason is CauseKind.COMPACTION and top.trimmed:
+        why = (
+            f"came after the prompt shrank from {fmt.approx(top.previous.usage.context)} to "
+            f"{fmt.approx(top.request.usage.context)} tokens with no compaction record"
+            if len(group) == 1
+            else "came after the prompt shrank with no compaction record"
         )
     elif reason is CauseKind.COMPACTION:
         why = "followed a compaction"
@@ -1103,7 +1143,7 @@ def context_growth(view: SpikeView) -> list[Candidate]:
             )
         )
         evidence.append(_ev(f"{fmt.approx(reads)} cache reads in the window", m0))
-    if not any(rw.reason is CauseKind.COMPACTION for rw in view.rewrites):
+    if not any(rw.reason is CauseKind.COMPACTION and not rw.trimmed for rw in view.rewrites):
         evidence.append(_ev("No compaction in the window", grown[0][0]))
     conf = Confidence.CLEAR if ratio >= GROWTH_CLEAR_RATIO else Confidence.LIKELY
     turns = sum(len(g[0].requests) for g in grown)
@@ -1183,6 +1223,70 @@ def _spawned(sess: SessionData, spawns: list[tuple[Thread, Event]]) -> dict[str,
     return agents
 
 
+# What fan-out adds is each new agent's prefix: the system prompt, tools and task its
+# first request writes to a cache (or sends uncached). The agents' later turns are
+# their own work, which the parent would have done in its own context, rereading a
+# context at least as large: they are left to the other rules (idle rewrites, context
+# growth...) and, when none claims them, are not counted as excess of fan-out. The
+# prefix's rereads are not charged either, for the same reason.
+_LOOKUP_ADVICE = (
+    "Most of these agents made two tool calls or fewer: do such lookups in the parent "
+    "and batch related questions into one agent."
+)
+_PREFIX_ADVICE = (
+    "Each agent writes its own prefix (system prompt and tools) before its first turn: "
+    "give these agents a narrower tool list so the prefix is smaller, and run fewer of "
+    "them at once."
+)
+_WORKFLOW_ADVICE = (
+    "A workflow starts its agents in parallel without an Agent call: check how many it "
+    "runs at once, and give its agents a narrower tool list so each prefix is smaller."
+)
+
+
+def _claim_prefixes(view: SpikeView, members: Sequence[Member]) -> tuple[float, int, float]:
+    """Claim each member agent's prefix (the cache writes and uncached input of its
+    thread's first request, when that request is in the spike) as FAN_OUT; return the
+    dollars and tokens claimed, and what the members' requests in the spike cost."""
+    usd = 0.0
+    tokens = 0
+    for m in members:
+        first = m.thread.requests[0] if m.thread.requests else None
+        for r in m.requests:
+            if r is not first:
+                continue
+            left = view.ledger.left(r)
+            got = view.ledger.claim(
+                r,
+                Usage(
+                    input=left.input,
+                    cache_write_5m=left.cache_write_5m,
+                    cache_write_1h=left.cache_write_1h,
+                ),
+                CauseKind.FAN_OUT,
+            )
+            usd += view.pricer.value(r, got)
+            tokens += got.input + got.cache_write
+    spent = sum(view.pricer.cost(r) for m in members for r in m.requests)
+    return usd, tokens, spent
+
+
+def _fan_out_advice(small: int, agents: int, workflow: bool) -> str:
+    """Lookups in the parent only when most agents made two tool calls or fewer;
+    otherwise the prefix size and how many run at once."""
+    if small * 2 > agents:
+        return f"{_LOOKUP_ADVICE} {_WORKFLOW_ADVICE}" if workflow else _LOOKUP_ADVICE
+    return _WORKFLOW_ADVICE if workflow else _PREFIX_ADVICE
+
+
+def _fan_out_summary(lead: str, tokens: int, excess: float, spent: float) -> str:
+    return (
+        f"{lead} Each wrote its own prefix to a cache: {fmt.approx(tokens)} tokens in all, "
+        f"which cost {fmt.usd(excess)}. Their requests in the spike cost {fmt.usd(spent)} "
+        "in all; the rest is the agents' own work, not counted as fan-out."
+    )
+
+
 def fan_out(view: SpikeView) -> list[Candidate]:
     if view.spike.scope == "session":
         return session_fan_out(view)
@@ -1202,15 +1306,7 @@ def fan_out(view: SpikeView) -> list[Candidate]:
         t_first, t_last = spawns[0][1].timestamp, spawns[-1][1].timestamp
         agents = _spawned(sess, spawns)
         members = [m for m in view.members if m.session is sess and m.thread.agent_id in agents]
-        # a spike of one agent rose against that agent's own pace: of its requests the
-        # fan-out explains only the first, the one that wrote its prefix
-        own = view.spike.agent_id is not None
-        excess = sum(
-            view.ledger.take(r, view.ledger.left(r), CauseKind.FAN_OUT)
-            for m in members
-            for r in m.requests
-            if not own or r is m.thread.requests[0]
-        )
+        excess, tokens, spent = _claim_prefixes(view, members)
         if excess <= 0:
             continue
         m0 = next((m for m in view.members if m.session is sess), members[0])
@@ -1255,12 +1351,15 @@ def fan_out(view: SpikeView) -> list[Candidate]:
                 excess,
                 f"{n} subagents {when}",
                 _cap(evidence),
-                "Do one-command lookups in the parent and batch related questions into one "
-                "agent. Give scouts a narrower tool list so their prefix is smaller.",
-                f"{n} Agent calls {when} from {fmt.hm(t_first)} ({kinds}) started "
-                f"{len(members)} subagent{'s' if len(members) != 1 else ''} active in the "
-                f"spike. Each wrote its own prefix to a cache, and "
-                f"{'their' if not own else 'its first'} requests here cost {fmt.usd(excess)}.",
+                _fan_out_advice(small, len(agents), False),
+                _fan_out_summary(
+                    f"{n} Agent calls {when} from {fmt.hm(t_first)} ({kinds}) started "
+                    f"{len(members)} subagent{'s' if len(members) != 1 else ''} active in the "
+                    "spike.",
+                    tokens,
+                    excess,
+                    spent,
+                ),
             )
         )
     return out
@@ -1314,7 +1413,7 @@ def _origin(sess: SessionData, agent: str, spawns: dict[str, Event]) -> str:
 
 def session_fan_out(view: SpikeView) -> list[Candidate]:
     """Fan-out on a session spike: FAN_OUT_MIN or more new threads within FAN_OUT_BURST.
-    It claims what the rules before it left of those threads' requests in the span."""
+    It claims the prefixes of those threads (`_claim_prefixes`)."""
     out = []
     spike = view.spike
     sessions = {m.session.session_id: m.session for m in view.members}
@@ -1325,11 +1424,7 @@ def session_fan_out(view: SpikeView) -> list[Candidate]:
         agents = [a for _, a in new]
         wanted = set(agents)
         members = [m for m in view.members if m.session is sess and m.thread.agent_id in wanted]
-        excess = sum(
-            view.ledger.take(r, view.ledger.left(r), CauseKind.FAN_OUT)
-            for m in members
-            for r in m.requests
-        )
+        excess, tokens, spent = _claim_prefixes(view, members)
         if excess <= 0 or not members:
             continue
         t_first, t_last = new[0][0], new[-1][0]
@@ -1371,17 +1466,7 @@ def session_fan_out(view: SpikeView) -> list[Candidate]:
             _ev(f"{small} of them made two tool calls or fewer", m0),
         ]
         conf = Confidence.CLEAR if excess >= 0.5 * view.cost else Confidence.LIKELY
-        if origins.most_common(1)[0][0] == "workflow":
-            advice = (
-                "A workflow starts its agents in parallel without an Agent call: check how "
-                "many it runs at once, and give its agents a narrower tool list so each "
-                "prefix is smaller."
-            )
-        else:
-            advice = (
-                "Do one-command lookups in the parent and batch related questions into one "
-                "agent. Give scouts a narrower tool list so their prefix is smaller."
-            )
+        advice = _fan_out_advice(small, n, origins.most_common(1)[0][0] == "workflow")
         kinds = ", ".join(f"{v} {k}" for k, v in types.most_common(3))
         out.append(
             Candidate(
@@ -1391,9 +1476,12 @@ def session_fan_out(view: SpikeView) -> list[Candidate]:
                 f"{n} new subagents {when}",
                 _cap(evidence),
                 advice,
-                f"{n} subagents ({kinds}) started {when} from {fmt.hm(t_first)}, {how}. "
-                f"Each wrote its own prefix to a cache, and their requests in the spike "
-                f"cost {fmt.usd(excess)}.",
+                _fan_out_summary(
+                    f"{n} subagents ({kinds}) started {when} from {fmt.hm(t_first)}, {how}.",
+                    tokens,
+                    excess,
+                    spent,
+                ),
             )
         )
     return out

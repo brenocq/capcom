@@ -77,8 +77,11 @@ def test_parsed_logs_explain(index: SqliteIndex) -> None:
     assert any(
         "Read of /home/user/proj/big.json returned about 100k" in e.label for e in first.evidence
     )
-    last = out[-1]
-    assert last.spike is idle and last.cause is CauseKind.IDLE_REWRITE
+    mine = [e for e in out if e.spike is idle]
+    last = mine[0]
+    assert last.cause is CauseKind.IDLE_REWRITE
     assert last.confidence is Confidence.CLEAR
     assert any("cacheControl ttl 1h" in e.label for e in last.evidence)
-    assert last.excess_usd <= idle.excess_usd
+    # the output and the new tokens are no rule's: they show as the unexplained rest
+    assert [e.cause for e in mine[1:]] == [CauseKind.UNEXPLAINED]
+    assert sum(e.excess_usd for e in mine) == pytest.approx(idle.excess_usd)
