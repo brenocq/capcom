@@ -387,7 +387,7 @@ def test_agent_tools_never_used_get_a_tools_line(tmp_path: Path) -> None:
     f = only(_checks(index(reqs, agents=agents), [folder]), "agent_tools_unused")
     assert f.scope == "coder"
     assert f.change == "tools: Read, Bash"  # in the file's order
-    assert str(folder / "coder.md") in f.advice
+    assert f"frontmatter of {folder / 'coder.md'} (between its --- lines)" in f.advice
     # three tools without a listing: the default 600 tokens each, 120 requests
     assert f.saving_usd_per_week == pytest.approx(3 * 600 * 120 * READ_RATE)
     assert f.metrics["tools_given"] == 5 and f.metrics["tools_called"] == 2
@@ -417,6 +417,7 @@ def test_few_spawns_without_a_tools_line_get_advice_but_no_line(tmp_path: Path) 
     f = only(_checks(index(reqs, evs, agents), [folder]), "agent_tools_unused")
     assert f.change is None
     assert "thin sample" in f.advice
+    assert f"{folder / 'coder.md'} has no tools: line in its frontmatter" in f.advice
     assert f.saving_usd_per_week == pytest.approx(1_000 * 120 * READ_RATE)
 
 
@@ -522,7 +523,70 @@ def test_the_tools_line_keeps_servers_patterns_and_the_agent_tool(tmp_path: Path
     assert f.metrics["tools_given"] == 6 and f.metrics["tools_called"] == 4
 
 
+def test_the_deferred_tool_placeholder_is_not_a_tool_given(tmp_path: Path) -> None:
+    folder = _definition(tmp_path, "model: opus")
+    reqs, agents = _coder_runs(("Read",), spawns=10)
+    evs = _listing(("Read", "Write", "DeferredToolPlaceholder"), spawns=10)
+    f = only(_checks(index(reqs, evs, agents), [folder]), "agent_tools_unused")
+    assert [e.label for e in f.evidence] == ["never called: Write"]
+    assert f.metrics["tools_given"] == 2
+    assert f.change is not None and "DeferredToolPlaceholder" not in f.change
+
+
+def test_a_called_mcp_tool_keeps_its_whole_server(tmp_path: Path) -> None:
+    folder = _definition(tmp_path, "model: opus")
+    reqs, agents = _coder_runs(("Read", "mcp__gh__get_issue"), spawns=10)
+    evs = _listing(("Read", "Write", "mcp__gh__get_issue", "mcp__gh__list_prs"), spawns=10)
+    f = only(_checks(index(reqs, evs, agents), [folder]), "agent_tools_unused")
+    assert f.change is not None and f.change.splitlines()[-1] == "tools: Read, mcp__gh"
+    assert [e.label for e in f.evidence] == ["never called: Write"]
+    # the listing's 2,000 tool tokens over four names: Write alone is priced
+    assert f.saving_usd_per_week == pytest.approx(500 * 400 * READ_RATE)
+
+
+def test_a_project_definition_wins_over_the_user_one_for_its_sessions(tmp_path: Path) -> None:
+    repo = tmp_path / "proj"
+    main = repo / ".claude" / "agents"
+    tree = repo / ".worktrees" / "b" / ".claude" / "agents"
+    user = tmp_path / "home" / ".claude" / "agents"
+    for folder, tools in ((main, "Read, Write"), (tree, "Read, Edit"), (user, "Read, Grep")):
+        folder.mkdir(parents=True)
+        (folder / "coder.md").write_text(f"---\nname: coder\ntools: {tools}\n---\n")
+    # sessions of a worktree of the repository, and of another project
+    reqs, agents = _coder_runs(("Read",))
+    reqs += [replace(r, cwd=str(repo / ".worktrees" / "b")) for r in run(2)]
+    more, more_agents = _coder_runs(("Read",), session="s7", project="-home-user-other")
+    idx = index(reqs + more, agents=agents + more_agents)
+    found = run_checks(
+        idx, TABLE, SINCE, UNTIL, agent_dirs=[tree, main, user], claude_root=user.parent
+    )
+    by_file = {
+        f.advice.split("frontmatter of ")[1].split(" ")[0]: f
+        for f in found
+        if f.kind == "agent_tools_unused"
+    }
+    assert set(by_file) == {str(main / "coder.md"), str(user / "coder.md")}
+    assert by_file[str(main / "coder.md")].evidence[0].label == "never called: Write"
+    assert by_file[str(user / "coder.md")].evidence[0].label == "never called: Grep"
+    assert all(f.metrics["spawns"] == 3 for f in by_file.values())
+
+
 # --------------------------------------------------------------------------- overlaps
+
+
+def test_agent_tools_unused_overlaps_every_context_kind(tmp_path: Path) -> None:
+    from capcom.checks.rules import _CONTEXT, overlaps
+    from tests.checks.test_usage import _tool_wait
+
+    assert set(_CONTEXT) <= set(overlaps("agent_tools_unused"))
+    folder = _definition(tmp_path, "tools: Read, Bash, Write")
+    reqs, agents = _coder_runs(("Read",))
+    wait, evs, wait_agents = _tool_wait(12, agent_id="w1")
+    found = _checks(index(reqs + wait, evs, agents + wait_agents), [folder])
+    coder = only(found, "agent_tools_unused")
+    expiry = only(found, "subagent_cache_expiry")
+    assert "subagent_cache_expiry" in coder.metrics["overlaps"]
+    assert "agent_tools_unused" in expiry.metrics["overlaps"]
 
 
 def test_findings_name_the_kinds_they_may_overlap_with() -> None:

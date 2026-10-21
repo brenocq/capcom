@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
-from capcom.checks.agents import find_definitions
+from capcom.checks.agents import find_all_definitions
 from capcom.checks.facts import collect
 from capcom.checks.rules import all_findings
 from capcom.types import Finding, Index, PriceTable
@@ -54,7 +54,7 @@ def run_checks(
         cwds = sorted({c for p in facts.project_cwd for c in facts.project_cwd[p]})
         agent_dirs = default_agent_dirs(cwds, claude_root)
     user_dir = claude_root / "agents"
-    return all_findings(facts, find_definitions(agent_dirs), openclaw_root, user_dir)
+    return all_findings(facts, find_all_definitions(agent_dirs), openclaw_root, user_dir)
 
 
 __all__ = ["run_checks"]

@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -445,6 +445,9 @@ def _agent_threads(facts: Facts) -> dict[str, list[Thread]]:
     return out
 
 
+# Names in listings that stand for tools loaded later, not tools an agent can call.
+PLACEHOLDER_TOOLS = frozenset({"DeferredToolPlaceholder"})
+
 _PLAIN_TOOL = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
@@ -460,6 +463,12 @@ def _entry_matches(entry: str, tool: str) -> bool:
     if e == t:
         return True
     return e.startswith("mcp__") and len(e.split("__")) == 2 and t.startswith(e + "__")
+
+
+def _server_entry(tool: str) -> str | None:
+    """`mcp__<server>` for an MCP tool name (`mcp__<server>__<tool>`), else None."""
+    parts = tool.split("__")
+    return "__".join(parts[:2]) if len(parts) > 2 and parts[0] == "mcp" else None
 
 
 def _entry_used(entry: str, called: set[str]) -> bool | None:
@@ -497,14 +506,55 @@ def _definition_projects(
         return None
     if folder in {user_dir, Path.home() / ".claude" / "agents"}:
         return None
-    cwd = folder.parent.parent
-    found = {p for p, cwds in facts.project_cwd.items() if any(Path(c) == cwd for c in cwds)}
+    root = _repo_root(folder.parent.parent)
+    trees = root / ".worktrees"
+    found = {
+        p
+        for p, cwds in facts.project_cwd.items()
+        if any(Path(c) == root or Path(c).is_relative_to(trees) for c in cwds)
+    }
     return found or None
+
+
+def _repo_root(cwd: Path) -> Path:
+    """The main checkout of a worktree under `<repo>/.worktrees/`; else `cwd`."""
+    parts = cwd.parts
+    return Path(*parts[: parts.index(".worktrees")]) if ".worktrees" in parts else cwd
+
+
+def _scoped(
+    facts: Facts,
+    defs: AgentDefinition | Sequence[AgentDefinition],
+    user_dir: Path | None,
+) -> list[tuple[AgentDefinition, set[str] | None, set[str]]]:
+    """(definition, the projects it governs or None for all, projects to leave out)
+    for one agent type: each repository's project-level definition (its main
+    checkout's copy before a worktree's) governs that repository's projects and
+    worktrees; the first other definition (user level) governs the rest."""
+    defs = [defs] if isinstance(defs, AgentDefinition) else list(defs)
+    by_root: dict[Path, tuple[AgentDefinition, set[str]]] = {}
+    rest: list[AgentDefinition] = []
+    for d in defs:
+        projects = _definition_projects(facts, d, user_dir)
+        if projects is None:
+            rest.append(d)
+            continue
+        cwd = d.path.parent.parent.parent
+        root = _repo_root(cwd)
+        if root not in by_root or (cwd == root and by_root[root][0].path.parents[2] != root):
+            by_root[root] = (d, projects)
+    out: list[tuple[AgentDefinition, set[str] | None, set[str]]] = [
+        (d, projects, set()) for d, projects in by_root.values()
+    ]
+    claimed = set().union(*(projects for _, projects in by_root.values()))
+    if rest:
+        out.append((rest[0], None, claimed))
+    return out
 
 
 def agent_tools_unused(
     facts: Facts,
-    definitions: Mapping[str, AgentDefinition],
+    definitions: Mapping[str, AgentDefinition | Sequence[AgentDefinition]],
     openclaw_root: Path | None = None,
     user_dir: Path | None = None,
 ) -> list[Finding]:
@@ -516,7 +566,9 @@ def agent_tools_unused(
 
     Only the spawns the definition governs in Claude Code projects count: a
     project-level definition's own project, or (user level) every project but the
-    OpenClaw workspaces under `openclaw_root`, whose tools are OpenClaw's.
+    OpenClaw workspaces under `openclaw_root`, whose tools are OpenClaw's. A type
+    defined in several folders is read per project: a repository's own definition
+    for its sessions and its worktrees', the user-level one for the rest.
 
     An agent type with no definition file (a plugin's agent, or one Claude Code
     makes itself, such as its workflow agent) is skipped: there is no file to change.
@@ -529,20 +581,33 @@ def agent_tools_unused(
     for kind, all_threads in _agent_threads(facts).items():
         if kind in BUILT_IN_AGENTS or kind.startswith("(") or len(all_threads) < MIN_AGENTS:
             continue
-        definition = definitions.get(kind)
-        if definition is None:
+        defs = definitions.get(kind)
+        if not defs:
             continue
         infos = [facts.agents.get(t.agent_id or "") for t in all_threads]
         if any(i is not None and i.is_built_in for i in infos):
             continue
-        scope = _definition_projects(facts, definition, user_dir)
+        out.extend(_tools_unused_for(facts, kind, all_threads, defs, openclaw_root, user_dir))
+    return out
+
+
+def _tools_unused_for(
+    facts: Facts,
+    kind: str,
+    all_threads: list[Thread],
+    defs: AgentDefinition | Sequence[AgentDefinition],
+    openclaw_root: Path | None,
+    user_dir: Path | None,
+) -> list[Finding]:
+    out: list[Finding] = []
+    for definition, scope, claimed in _scoped(facts, defs, user_dir):
         threads = [
             t
             for t in all_threads
             if (
                 t.project in scope
                 if scope is not None
-                else not _is_openclaw(facts, t.project, openclaw_root)
+                else t.project not in claimed and not _is_openclaw(facts, t.project, openclaw_root)
             )
         ]
         if len(threads) < MIN_AGENTS:
@@ -570,9 +635,11 @@ def agent_tools_unused(
             unused = [e for e in given if used[e] is False]
             keep = [e for e in given if used[e] is not False]
         else:
-            given = sorted(sized)
-            unused = [n for n in given if not any(_entry_matches(n, c) for c in called)]
-            keep = sorted(n for n in given if any(_entry_matches(n, c) for c in called))
+            given = sorted(n for n in sized if n not in PLACEHOLDER_TOOLS)
+            keep = sorted(
+                {_server_entry(n) or n for n in given if any(_entry_matches(n, c) for c in called)}
+            )
+            unused = [n for n in given if not any(_entry_matches(k, n) for k in keep)]
             dropped = sorted(
                 c for c in called_anywhere if not any(_entry_matches(n, c) for n in keep)
             )
@@ -587,11 +654,15 @@ def agent_tools_unused(
             usd += sum(priced) if priced else estimate * rate_sum
         line = f"tools: {', '.join(keep)}"
         if not restricts:
-            advice = f"In {definition.path}, list only the tools it uses:"
+            advice = (
+                f"In the frontmatter of {definition.path} (between its --- lines), "
+                "replace the tools: line with one listing only the tools it uses:"
+            )
             change: str | None = line
         else:
             advice = (
-                f"{definition.path} has no tools: line, so {kind} inherits every tool "
+                f"{definition.path} has no tools: line in its frontmatter, so {kind} "
+                "inherits every tool "
                 f"({len(given)} in its listings). Adding one restricts it to the {len(keep)} "
                 "it called: a tool a later task needs would then be missing until added "
                 "back."
@@ -602,7 +673,10 @@ def agent_tools_unused(
                     "other projects' sessions or missing from its listings."
                 )
             if spawns >= MIN_RESTRICT_SPAWNS:
-                advice += " The line, if you accept that:"
+                advice += (
+                    f" The line, if you accept that, goes in the frontmatter of "
+                    f"{definition.path} (between its --- lines):"
+                )
                 change = (
                     f"# adds a tools: line: the {kind} agent then has only these "
                     f"{len(keep)} tools; today it inherits all {len(given)}\n{line}"
@@ -1021,7 +1095,9 @@ def subagent_cache_expiry(facts: Facts) -> list[Finding]:
         advice=(
             "Run long commands (builds, test suites, wait loops) in the background and "
             "poll their output in short steps, or split the work so a subagent doesn't "
-            "wait on a long command: a subagent's cache lasts 5 minutes."
+            "wait on a long command: a subagent's cache lasts 5 minutes. A command "
+            "waiting on a permission prompt looks the same here (the logs record no "
+            "run time): allow it in the agent's settings, or approve the command sooner."
         ),
     )
     grouped: dict[str, list[Rewrite]] = defaultdict(list)
@@ -1149,7 +1225,7 @@ def images_in_tool_results(facts: Facts) -> list[Finding]:
 
 def all_findings(
     facts: Facts,
-    definitions: Mapping[str, AgentDefinition],
+    definitions: Mapping[str, AgentDefinition | Sequence[AgentDefinition]],
     openclaw_root: Path | None = None,
     user_dir: Path | None = None,
 ) -> list[Finding]:
