@@ -112,6 +112,41 @@ export const CATEGORY_LABELS = {
 export const CATEGORY_ORDER = ['cache_read', 'cache_write', 'output', 'input'];
 export const categoryColor = (key) => SERIES[Math.max(0, CATEGORY_ORDER.indexOf(key))];
 
+// Colors that follow the entity (a project, a model, an agent type), never its rank:
+// each key hashes to a preferred palette slot; keys that collide take the next free
+// slot, in key order, so the same set of keys always gets the same colors. Past the
+// palette's size the rest share the gray. "(other)" is always gray.
+export function entityColors(keys) {
+  const out = new Map(), used = new Set();
+  const named = [...new Set(keys)].filter((k) => k !== '(other)').sort();
+  for (const k of named) {
+    let hsh = 0;
+    for (let i = 0; i < k.length; i++) hsh = (hsh * 31 + k.charCodeAt(i)) >>> 0;
+    let slot = hsh % SERIES.length, tries = 0;
+    while (used.has(slot) && tries < SERIES.length) { slot = (slot + 1) % SERIES.length; tries++; }
+    if (used.has(slot)) { out.set(k, OTHER_COLOR); continue; }
+    used.add(slot);
+    out.set(k, SERIES[slot]);
+  }
+  out.set('(other)', OTHER_COLOR);
+  return out;
+}
+
+// The "Split by" choice shared by Spend and Overview: the URL's ?group= first, then
+// the last one picked (kept in localStorage), else by category.
+export const GROUPS = [['category', 'Category'], ['project', 'Project'], ['model', 'Model'], ['agent', 'Agent type']];
+export function pickedGroup(query) {
+  const ok = (g) => GROUPS.some(([v]) => v === g);
+  const q = query.get('group');
+  if (ok(q)) return q;
+  let saved = null;
+  try { saved = localStorage.getItem('capcom-group'); } catch (e) { /* storage off */ }
+  return ok(saved) ? saved : 'category';
+}
+export function rememberGroup(g) {
+  try { localStorage.setItem('capcom-group', g); } catch (e) { /* storage off */ }
+}
+
 // ------------------------------------------------------------------ API
 
 const memo = new Map();
@@ -146,33 +181,146 @@ export function api(path, fresh = false) {
 
 // ------------------------------------------------------------------ tooltip
 
-const tip = () => document.getElementById('tip');
+// One shared tooltip (#tip in index.html). With a mouse it follows the pointer;
+// on keyboard focus it is anchored to the mark; a tap shows it and a tap elsewhere
+// hides it; Escape closes it. rows: [{label, value, color, note}], all text
+// (inserted as text nodes); a color is a swatch beside the label, never the text's.
 
-// rows: [{label, value, color}], title: string
-export function showTip(event, title, rows) {
-  const el = tip();
-  el.replaceChildren(
-    title ? h('div.t', null, title) : null,
-    ...rows.map((r) => h('div.r', null,
-      h('span', null, r.color ? h('i', { style: `background:${r.color}` }) : null, r.label),
-      h('span', null, r.value))),
-  );
-  el.hidden = false;
-  const pad = 14, w = el.offsetWidth, hgt = el.offsetHeight;
-  let x = event.clientX + pad, y = event.clientY + pad;
-  if (x + w > window.innerWidth - 4) x = event.clientX - w - pad;
-  if (y + hgt > window.innerHeight - 4) y = event.clientY - hgt - pad;
-  el.style.left = Math.max(4, x) + 'px';
-  el.style.top = Math.max(4, y) + 'px';
+const tip = () => document.getElementById('tip');
+let tipOwner = null;
+
+// Where the tooltip's top-left corner goes beside the point (x, y): below and to the
+// right by `pad`, flipped to the other side at the viewport's right or bottom edge,
+// and clamped inside it either way.
+export function placeTip(x, y, w, hgt, vw, vh, pad = 14) {
+  let left = x + pad, top = y + pad;
+  const flipX = left + w > vw - 4, flipY = top + hgt > vh - 4;
+  if (flipX) left = x - w - pad;
+  if (flipY) top = y - hgt - pad;
+  return { left: clamp(left, 4, vw - w - 4), top: clamp(top, 4, vh - hgt - 4), flipX, flipY };
 }
 
-export function hideTip() { tip().hidden = true; }
+// Anchored to a box (a focused mark): centered above it, below when there is no room.
+export function placeTipAt(rect, w, hgt, vw, vh, gap = 8) {
+  const above = rect.top - hgt - gap;
+  const flipY = above < 4;
+  const top = flipY ? rect.bottom + gap : above;
+  const left = rect.left + rect.width / 2 - w / 2;
+  return { left: clamp(left, 4, vw - w - 4), top: clamp(top, 4, vh - hgt - 4), flipX: false, flipY };
+}
 
-// Attach a simple tooltip to an element.
-export function tipOn(el, title, rows) {
-  el.addEventListener('mousemove', (e) => showTip(e, title, typeof rows === 'function' ? rows() : rows));
-  el.addEventListener('mouseleave', hideTip);
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(v, Math.max(lo, hi))); }
+
+// The tooltip's text on one line: the accessible name of a mark that has one.
+export function tipText(title, rows) {
+  const parts = (rows || []).map((r) => [r.label, r.value].filter((x) => x !== undefined && x !== null && x !== '').join(' ')
+    + (r.note ? (r.label || r.value ? ', ' : '') + r.note : ''));
+  return [title, parts.filter(Boolean).join('; ')].filter(Boolean).join(': ');
+}
+
+function fillTip(title, rows) {
+  const el = tip();
+  el.replaceChildren(...[
+    title ? h('div.t', null, title) : null,
+    ...rows.filter((r) => r.label || r.value).map((r) => h('div.r', null,
+      h('span', null, r.color ? h('i', { style: `background:${r.color}` }) : null, r.label || ''),
+      h('b', null, r.value ?? ''))),
+    ...rows.filter((r) => r.note).map((r) => h('div.n', null, r.note)),
+  ].filter(Boolean));
+  el.hidden = false;
   return el;
+}
+
+function put(el, pos) {
+  el.style.left = pos.left + 'px';
+  el.style.top = pos.top + 'px';
+}
+
+// At the pointer of `event` (mousemove, pointermove).
+export function showTip(event, title, rows) {
+  const el = fillTip(title, rows);
+  put(el, placeTip(event.clientX, event.clientY, el.offsetWidth, el.offsetHeight, window.innerWidth, window.innerHeight));
+}
+
+// Anchored to an element (keyboard focus, a tap).
+export function showTipAt(anchor, title, rows) {
+  const el = fillTip(title, rows);
+  put(el, placeTipAt(anchor.getBoundingClientRect(), el.offsetWidth, el.offsetHeight, window.innerWidth, window.innerHeight));
+}
+
+export function hideTip() {
+  const el = tip();
+  if (el) el.hidden = true;
+  tipOwner = null;
+}
+
+let tipGlobal = false;
+function tipGlobals() {
+  if (tipGlobal || typeof document.addEventListener !== 'function') return;
+  tipGlobal = true;
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideTip(); });
+  // a tap elsewhere hides a tapped tooltip
+  document.addEventListener('pointerdown', (e) => { if (tipOwner && !(tipOwner.contains && tipOwner.contains(e.target))) hideTip(); });
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    window.addEventListener('capcom-route', hideTip);
+    // an anchored tooltip moves with its mark (a focused mark scrolled into view)
+    window.addEventListener('scroll', () => {
+      const el = tip();
+      if (tipOwner && el && !el.hidden) put(el, placeTipAt(tipOwner.getBoundingClientRect(), el.offsetWidth, el.offsetHeight, window.innerWidth, window.innerHeight));
+    }, { passive: true, capture: true });
+  }
+}
+
+// Give a mark its tooltip: on hover (following the pointer), on keyboard focus and
+// on a tap (anchored to it). Unless `opts.focus` is false the mark joins the tab
+// order with the same text as its accessible name (`opts.aria` overrides it, for a
+// link or a button that says what it does). `rows` may be a function, read on show.
+export function tipOn(el, title, rows, opts = {}) {
+  tipGlobals();
+  const get = () => (typeof rows === 'function' ? rows() : rows);
+  if (opts.focus !== false) {
+    if (!opts.native) el.setAttribute('tabindex', '0');
+    el.setAttribute('aria-label', opts.aria || tipText(title, get()));
+  }
+  if (el.classList) el.classList.add('mk');
+  el.addEventListener('pointermove', (e) => {
+    if (e.pointerType === 'touch') return;
+    tipOwner = null;
+    showTip(e, title, get());
+  });
+  el.addEventListener('pointerleave', (e) => { if (e.pointerType !== 'touch' && !tipOwner) hideTip(); });
+  el.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'touch') return;
+    showTipAt(el, title, get());
+    tipOwner = el;
+  });
+  el.addEventListener('focus', () => {
+    // a mouse click focuses too: keep the pointer's tooltip then
+    if (el.matches && !el.matches(':focus-visible')) return;
+    showTipAt(el, title, get());
+    tipOwner = el;
+  });
+  el.addEventListener('blur', () => { if (tipOwner === el) hideTip(); });
+  return el;
+}
+
+// A bar split into colored parts, each with its details on hover, focus or tap.
+// parts: [{color, share (0..1 of the bar), title, rows}]; the parts sit 2 px apart
+// on the surface, and hovering one dims the others.
+export function segBar(parts, opts = {}) {
+  return h('div.stackbar.hl' + (opts.tall ? '.tall' : ''), { role: 'group', 'aria-label': opts.aria || null },
+    parts.filter((p) => p.share > 0).map((p) => tipOn(
+      h('span', { style: `flex:${p.share.toFixed(5)} 1 0px;background:${p.color}` }), p.title, p.rows)));
+}
+
+// A table of the numbers a chart shows, behind a "Show as a table" toggle, so
+// nothing is only on hover. head: [text], rows: [[cell text]]; cells after the
+// first are right-aligned numbers.
+export function tableToggle(head, rows, label = 'Show as a table') {
+  return h('details.astable', null, h('summary', { text: label }),
+    h('div.scroll', null, h('table.data.small', null,
+      h('thead', null, h('tr', null, head.map((x, i) => h('th', { class: i ? 'num' : null, text: x })))),
+      h('tbody', null, rows.map((r) => h('tr', null, r.map((x, i) => h('td', { class: i ? 'num' : null, text: x }))))))));
 }
 
 // ------------------------------------------------------------------ page parts
@@ -204,14 +352,27 @@ export function legend(items, total) {
     items.map((it) => h('span', null, h('i', { style: `background:${it.color}` }), it.label, ' ', h('em', null, it.value))));
 }
 
+// Bars, one per row: the label and the amount stay in sight; the row's note
+// (its count, its typical day), its share and its folder are on hover and focus.
 export function barList(rows, valueOf, noteOf) {
   if (!rows.length) return empty(null, 'Nothing in this window.');
   const max = Math.max(...rows.map(valueOf), 1e-9);
-  return h('div.blist', null, rows.map((r, i) => h('div.bitem', null,
-    h('div.top', null,
-      h('span', { title: r.path ? `${r.label}: ${r.path}` : r.label }, r.label, ' ', h('span.est', null, noteOf ? noteOf(r) : '')),
-      h('span.mono', null, usd(valueOf(r)))),
-    h('div.track', null, h('div', { style: `width:${(valueOf(r) / max * 100).toFixed(1)}%;background:${SERIES[i] || OTHER_COLOR}` })))));
+  const sum = rows.reduce((a, r) => a + valueOf(r), 0);
+  const colors = entityColors(rows.map((r) => r.key ?? r.label));
+  return h('div.blist.hl', null, rows.map((r) => {
+    const color = r.rest ? OTHER_COLOR : colors.get(r.key ?? r.label);
+    const v = valueOf(r);
+    const note = noteOf ? noteOf(r) : '';
+    const tipRows = [
+      { label: 'Cost', value: usd(v), color },
+      sum > 0 && rows.length > 1 ? { label: 'Share of these', value: pct(v / sum) } : null,
+      note ? { note } : null,
+      r.path && r.path !== r.label ? { note: r.path } : null,
+    ].filter(Boolean);
+    return tipOn(h('div.bitem', null,
+      h('div.top', null, h('span', { text: r.label }), h('span.mono', null, usd(v))),
+      h('div.track', null, h('div', { style: `width:${(v / max * 100).toFixed(1)}%;background:${color}` }))), r.label, tipRows);
+  }));
 }
 
 export function sessionHref(id) { return '/session/' + encodeURIComponent(id); }

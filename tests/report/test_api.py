@@ -92,6 +92,20 @@ def test_overview_without_timeline(stub_client: Client) -> None:
     assert close(data["today"]["totals"]["usd"], usd(TODAY))
 
 
+@pytest.mark.parametrize("group", ["project", "model", "agent"])
+def test_overview_splits_today_by_group(client: Client, group: str) -> None:
+    status, data, _ = client.get(f"/api/overview?group={group}")
+    assert status == 200
+    assert data["group"] == group
+    cum = data["cumulative_today"]
+    assert len(cum["members"]) <= 6
+    assert cum["total"][-1] == pytest.approx(usd(TODAY), abs=1e-5)
+    # the rest of the page does not depend on the split
+    assert close(data["today"]["totals"]["usd"], usd(TODAY))
+    assert client.get("/api/overview")[1]["group"] == "category"
+    assert client.get("/api/overview?group=nope")[0] == 400
+
+
 @pytest.mark.parametrize("group", ["category", "project", "model", "agent", "session"])
 def test_spend_groups(client: Client, group: str) -> None:
     status, data, _ = client.get(f"/api/spend?days=14&group={group}")

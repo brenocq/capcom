@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -116,3 +117,62 @@ def test_band_chart_draws_the_total_and_each_series_from_zero() -> None:
     # not stacked: the smaller series stays below the larger one, and the total
     # (5 then 9) lies above both
     assert all(t < x < y for t, x, y in zip(total[1:], a[1:], b[1:], strict=True))
+
+
+def _node(body: str) -> Any:
+    out = subprocess.run(
+        ["node", "--input-type=module", "-e", FAKE_DOM + body],
+        cwd=STATIC,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    return json.loads(out.stdout)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_the_end_label_keeps_clear_of_the_markers_and_the_now_label() -> None:
+    got = _node("""
+const m = await import('./charts.js');
+const box = { left: -44, top: -24, right: 804, bottom: 304 };
+const size = { w: 40, h: 16 };
+const pt = { x: 780, y: 20 };
+// nothing in the way: above the end, to its left
+const free = m.placeEndLabel(pt, size, [], box);
+// a spike marker just above-left of the end and the "now" label above it
+const marker = { left: 730, top: -8, right: 756, bottom: 18 };
+const now = { left: 770, top: -22, right: 795, bottom: -8 };
+const busy = m.placeEndLabel(pt, size, [marker, now], box);
+const x = pt.x + busy.dx, y = pt.y + busy.dy;
+const r = { left: x, top: y, right: x + 40, bottom: y + 16 };
+const hit = [marker, now].some((o) =>
+  r.left < o.right && r.right > o.left && r.top < o.bottom && r.bottom > o.top);
+const inside = r.left >= box.left && r.right <= box.right
+  && r.top >= box.top && r.bottom <= box.bottom;
+// everything blocked: the least overlapping place, still inside
+const wall = { left: 0, top: -24, right: 800, bottom: 300 };
+const stuck = m.placeEndLabel(pt, size, [wall], box);
+console.log(JSON.stringify({ free, hit, inside, stuck }));
+""")
+    assert got["free"] == {"dx": -46, "dy": -22}
+    assert not got["hit"] and got["inside"]
+    assert set(got["stuck"]) == {"dx", "dy"}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_colors_follow_the_entity_not_its_rank() -> None:
+    got = _node("""
+const m = await import('./lib.js');
+const a = m.entityColors(['capcom', 'improved', 'toy-brain', '(other)']);
+const b = m.entityColors(['toy-brain', '(other)', 'improved', 'capcom']);
+const many = m.entityColors(['a', 'b', 'c', 'd', 'e', 'f', 'g']);
+console.log(JSON.stringify({ a: [...a], b: Object.fromEntries(b),
+  distinct: new Set([...a.values()]).size, many: [...many.values()] }));
+""")
+    a = dict(got["a"])
+    assert a == got["b"]
+    assert a["(other)"] == "var(--gray)"
+    assert got["distinct"] == 4
+    # six palette colors for the first six keys, the seventh shares the gray
+    assert len(set(got["many"][:6])) == 6 and got["many"][6] == "var(--gray)"
