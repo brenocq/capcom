@@ -232,7 +232,7 @@ counts every matching session, temporary folders included (`temporary` of them).
  calibration: {claude_code_usd, capcom_usd, spread, comparable, reasons, reason_labels,
                part: {since, until, first, last, process, processes, whole_session, text},
                session_usd, outside_usd, output_above_usd, output_range, unlogged_usd,
-               unlogged_text, rest_usd, note} | null,
+               unlogged_text, logged_more_usd, logged_more_text, rest_usd, note} | null,
  requests: {t, agent, context, usd, output, cache_write, estimated},   # columns, time order
  thinned: {requests, kept, spikes} | null,
  main: {first, last, requests, usd, tool_calls, peak_context} | null,
@@ -264,15 +264,18 @@ that wrote one, step by step (a resumed process carries the totals on, and the g
 of `totalDuration` dates its step): `part` is the stretch of the session they compare,
 from the first step's start (`since`) to the last step's end (`until`, null while
 open), with its first and last request; `process` is the number of steps compared
-and `processes` adds one per stretch of requests outside every step (a process that
-wrote no cost-state, or has not yet), so it is a lower bound. `whole_session` is false
+and `processes` adds one per gap between steps (or before the first, after the last)
+that holds requests, each counted as one process that wrote no cost-state (or has
+not yet). `whole_session` is false
 when the session has requests outside the steps. `capcom_usd` is the compared part;
 `session_usd` is every request, as `totals.usd`; `outside_usd` the spend in no step
 (capcom right, never a mismatch). `output_above_usd` is cost-state's output above
 capcom's estimate, priced, where capcom estimated output, and `output_range` says
 "≥ $X, up to $Y" (null when there is none); `unlogged_usd` prices cost-state's other
 tokens above the log's (calls the log does not record), `unlogged_text` names them,
-and `rest_usd` is what is left unexplained. `note` says all of it in a few short
+`logged_more_usd` / `logged_more_text` the log's tokens above cost-state's, priced
+the same way (all three inferred from token counts), and `rest_usd` is what is left
+unexplained. `note` says all of it in a few short
 sentences, else null. `capcom calibrate` prints the same part per session (`--days`, `--project`). A session whose replies are all placeholders has
 0 active seconds. A session is
 `running` when it wrote within the last 10 minutes.

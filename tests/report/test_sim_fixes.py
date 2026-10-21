@@ -29,7 +29,6 @@ from capcom.types import (
     Explanation,
     Finding,
     Index,
-    ModelUsage,
     PriceTable,
     SessionInfo,
     Spike,
@@ -44,6 +43,7 @@ from tests.report.conftest import (
     _log,
     _put,
     build_index,
+    model_usage,
     real_spikes,
     req,
     usd,
@@ -318,8 +318,10 @@ def resumed(tmp_path_factory: pytest.TempPathFactory) -> Path:
     second = [req("rs", NOW - timedelta(hours=h), GAMMA, output=100_000) for h in (3, 2, 1)]
     p1 = int((NOW - timedelta(days=2, hours=4)).timestamp() * 1000)
     p2 = int((NOW - timedelta(hours=4)).timestamp() * 1000)
-    m = {"claude-opus-5-5": ModelUsage(cost_usd=usd(second))}
-    cs1 = CostState("rs", 50, usd(first), m, p1, None, first[-1].timestamp, second[0].timestamp)
+    m = model_usage(second)
+    cs1 = CostState(
+        "rs", 50, usd(first), model_usage(first), p1, None, first[-1].timestamp, second[0].timestamp
+    )
     cs2 = CostState("rs", 99, usd(second), m, p2, None, second[-1].timestamp, None)
     info = SessionInfo("rs", GAMMA, cwd="/home/user/gamma", title="Two runs")
     _put(ix, _log(GAMMA, "rs"), [info, *first, cs1, *second, cs2])
@@ -374,7 +376,7 @@ def test_requests_after_the_last_cost_state(tmp_path: Path) -> None:
     early = [req("on", NOW - timedelta(days=12, hours=h), GAMMA, output=50_000) for h in (3, 2)]
     late = [req("on", NOW - timedelta(hours=1), GAMMA, output=80_000)]
     start = int((NOW - timedelta(days=12, hours=4)).timestamp() * 1000)
-    m = {"claude-opus-5-5": ModelUsage(cost_usd=usd(early))}
+    m = model_usage(early)
     cs = CostState("on", 50, usd(early), m, start, None, early[-1].timestamp, late[0].timestamp)
     _put(
         ix,
@@ -430,7 +432,7 @@ def test_a_process_before_the_first_cost_state_counts(tmp_path: Path) -> None:
     old = [req("pre", NOW - timedelta(days=3), GAMMA, output=40_000)]
     new = [req("pre", NOW - timedelta(hours=h), GAMMA, output=60_000) for h in (3, 2)]
     start = int((NOW - timedelta(hours=4)).timestamp() * 1000)
-    m = {"claude-opus-5-5": ModelUsage(cost_usd=usd(new))}
+    m = model_usage(new)
     cs = CostState("pre", 50, usd(new), m, start, None, new[-1].timestamp, None)
     info = SessionInfo("pre", GAMMA, cwd="/home/user/gamma", last_seen=new[-1].timestamp)
     _put(ix, _log(GAMMA, "pre"), [info, *old, *new, cs])

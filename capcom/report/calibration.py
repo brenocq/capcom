@@ -17,7 +17,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, tzinfo
+from datetime import UTC, datetime, tzinfo
 from typing import Any, TextIO
 
 from capcom.config import Config
@@ -83,14 +83,23 @@ class Part:
 def part_of(index: Index, cs: CostState, table: PriceTable) -> Part:
     """Where `cs`'s steps sit in its session (one pass over its requests).
 
-    Processes are counted from the steps, plus one per stretch of requests outside
-    every step (a process that wrote no cost-state). Such a process between two
-    steps that logged nothing leaves no trace, so `processes` is a lower bound."""
+    Processes are the steps plus one per gap between them (and before the first,
+    after the last) that holds requests: each such stretch is counted as one process
+    that wrote no cost-state."""
     st = session_steps(index, cs)
     since = st[0].since if st else None
     until = st[-1].until if st else None
-    total, earlier, later, gaps, outside_run = 0.0, False, False, False, False
-    runs = 0
+    # The steps' union as sorted, disjoint spans; a request outside them lies in gap
+    # k, the number of spans that end at or before it (0: before the first).
+    lo, hi = datetime.min.replace(tzinfo=UTC), datetime.max.replace(tzinfo=UTC)
+    spans: list[list[datetime]] = []
+    for a, b in sorted((s.since or lo, s.until or hi) for s in st):
+        if spans and a <= spans[-1][1]:
+            spans[-1][1] = max(spans[-1][1], b)
+        else:
+            spans.append([a, b])
+    total = 0.0
+    held: set[int] = set()
     first = last = None
     for r in index.requests(session_id=cs.session_id):
         if is_placeholder(r.model):
@@ -99,19 +108,14 @@ def part_of(index: Index, cs: CostState, table: PriceTable) -> Part:
         if any(s.holds(r.timestamp) for s in st):
             first = first or r.timestamp
             last = r.timestamp
-            outside_run = False
             continue
-        if not outside_run:
-            runs += 1
-            outside_run = True
-        if first is None:
-            earlier = True
-        elif until is not None and r.timestamp >= until:
-            later = True
-        else:
-            gaps = True
+        held.add(sum(1 for _, end in spans if end <= r.timestamp))
+    earlier = 0 in held
+    later = bool(spans) and len(spans) in held
+    gaps = any(0 < k < len(spans) for k in held)
     process = len(st) or None
-    return Part(since, until, first, last, process, len(st) + runs, earlier, total, later, gaps)
+    processes = len(st) + len(held)
+    return Part(since, until, first, last, process, processes, earlier, total, later, gaps)
 
 
 def _when(t: datetime | None, tz: tzinfo | None) -> str:
@@ -149,16 +153,29 @@ def output_range(c: Calibration) -> str | None:
     return f"≥ {usd(c.capcom_usd)}, up to {usd(c.capcom_usd + c.output_above_usd)}"
 
 
+def _mostly(parts: Mapping[str, Mapping[str, float]]) -> str:
+    _, model, cat = max((v, m, k) for m, by in parts.items() for k, v in by.items())
+    return f"mostly {CATEGORY_WORDS.get(cat, cat)} on {model_label(model)}"
+
+
 def unlogged_text(c: Calibration) -> str | None:
-    """'calls Claude Code counted that the log doesn't record: $N (mostly cache
-    reads on Opus 5.5)'."""
+    """'by token counts, Claude Code saw about $N in calls the log doesn't record
+    (mostly cache reads on Opus 5.5)'."""
     if c.unlogged_usd < SAME_USD:
         return None
-    items = [(usd_, m, cat) for m, parts in c.unlogged.items() for cat, usd_ in parts.items()]
-    _, model, cat = max(items)
     return (
-        f"calls Claude Code counted that the log doesn't record: {usd(c.unlogged_usd)} "
-        f"(mostly {CATEGORY_WORDS.get(cat, cat)} on {model_label(model)})"
+        f"by token counts, Claude Code saw about {usd(c.unlogged_usd)} in calls the log "
+        f"doesn't record ({_mostly(c.unlogged)})"
+    )
+
+
+def logged_more_text(c: Calibration) -> str | None:
+    """'the log counts about $N more than Claude Code's estimate (mostly ...)'."""
+    if c.logged_more_usd < SAME_USD:
+        return None
+    return (
+        f"the log counts about {usd(c.logged_more_usd)} more than Claude Code's estimate "
+        f"({_mostly(c.logged_more)})"
     )
 
 
@@ -181,13 +198,16 @@ def difference_note(c: Calibration, p: Part, tz: tzinfo | None = None) -> str | 
     rng = output_range(c)
     if rng:
         out.append(
-            f"capcom's total for it is {rng}: Claude Code counted more output than "
-            "capcom's estimate, and the log has no true count."
+            f"capcom's total for it is {rng}: by token counts, Claude Code saw about "
+            f"{usd(c.output_above_usd)} more output than capcom's estimate, and the log "
+            "has no true count."
         )
     calls = unlogged_text(c)
-    if calls:
-        out.append(calls[0].upper() + calls[1:] + ".")
-    if (rng or calls) and abs(c.rest_usd) >= SAME_USD:
+    more = logged_more_text(c)
+    for text in (calls, more):
+        if text:
+            out.append(text[0].upper() + text[1:] + ".")
+    if (rng or calls or more) and abs(c.rest_usd) >= SAME_USD:
         out.append(f"The rest, {_signed(c.rest_usd)}, is unexplained.")
     return " ".join(out) or None
 
@@ -221,6 +241,8 @@ def calibration_json(
         "output_range": output_range(c),
         "unlogged_usd": round(c.unlogged_usd, 6),
         "unlogged_text": unlogged_text(c),
+        "logged_more_usd": round(c.logged_more_usd, 6),
+        "logged_more_text": logged_more_text(c),
         "rest_usd": round(c.rest_usd, 6),
         "note": difference_note(c, p, tz),
     }
@@ -282,10 +304,12 @@ def rest_summary(checks: list[Calibration]) -> str:
     a = sum(c.outside_usd for c in rest)
     b = sum(c.output_above_usd for c in rest)
     cc = sum(c.unlogged_usd for c in rest)
+    e = sum(c.logged_more_usd for c in rest)
     d = sum(c.rest_usd for c in rest)
     line = (
-        f"on the rest: {usd(a)} in processes with no cost-state, {usd(b)} of output above "
-        f"capcom's estimate, {usd(cc)} in calls the log doesn't show, {_signed(d)} unexplained"
+        f"on the rest: {usd(a)} in processes with no cost-state; by token counts, about "
+        f"{usd(b)} of output above capcom's estimate, {usd(cc)} in calls the log doesn't "
+        f"show and {usd(e)} the log counts more; {_signed(d)} unexplained"
     )
     more = sum(c.outside_usd for c in checks if c.comparable)
     if more >= SAME_USD:
