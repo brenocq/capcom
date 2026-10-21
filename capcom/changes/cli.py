@@ -210,7 +210,10 @@ def _value(result: ChangeResult, v: float | None) -> str:
 
 
 def _usd(v: float | None) -> str:
-    return "-" if v is None else f"${v:,.2f}" if v >= 0 else f"-${-v:,.2f}"
+    if v is None:
+        return "-"
+    v = round(v, 2) + 0.0  # no "-$0.00"
+    return f"${v:,.2f}" if v >= 0 else f"-${-v:,.2f}"
 
 
 def format_list(results: Sequence[ChangeResult], ctx: _Context) -> str:

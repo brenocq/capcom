@@ -132,3 +132,20 @@ def test_idle_rewrites_are_measured_on_their_own() -> None:
     other = _measure({**before(40, 3), **after(40, 0)}, kind="idle")
     assert other.verdict is Verdict.NO_DATA or other.before == 0
     assert PROJECT
+
+
+def test_a_thin_before_week_is_charted_but_left_out_of_the_range() -> None:
+    weeks = {}
+    for k, (n, e) in zip((4, 3, 2, 1), ((4, 1), (40, 3), (40, 2), (40, 3)), strict=True):
+        start = A - timedelta(days=7 * k)
+        weeks |= span(start, start + timedelta(days=7), n, e)
+    r = _measure({**weeks, **after(40, 3)})
+    assert r.weeks[0].value == pytest.approx(1 / 6 * 1000)  # 42 requests that week
+    assert r.before_range == (pytest.approx(2 / 44 * 1000), pytest.approx(3 / 46 * 1000))
+
+
+def test_a_rewrite_new_since_the_date_is_worse_and_priced_from_the_after_weeks() -> None:
+    r = _measure({**before(40, 0), **after(40, 3)})
+    assert r.verdict is Verdict.WORSE
+    assert r.before == 0
+    assert r.measured_usd_per_week is not None and r.measured_usd_per_week < 0

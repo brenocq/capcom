@@ -13,11 +13,14 @@ Verdict, on rates only, so a busier or quieter week does not count:
 - too early: under 7 days since the date, or fewer requests in scope than
   max(200, 20 % of a usual before week's);
 - working / no effect / worse: the after rate below / inside / above the range
-  of the full before weeks (lowest to highest).
+  of the full before weeks (lowest to highest). A usual week is the median
+  requests of the full before weeks; a full week under 20 % of it is charted but
+  left out of the range, its rate resting on too few requests.
 
 Measured saving per week = (before - after) / scale x the after window's base per
 week (requests, or runs) x the unit value (measures.py: what one counted unit was
-worth in the before window). Given for working and worse (negative), not for no
+worth in the before window, or in the after one when the before window counted
+none). Given for working and worse (negative), not for no
 effect, whose difference is within the usual weekly swing.
 """
 
@@ -148,7 +151,11 @@ def measure(
     b, a = m.value(before), m.value(after)
     rpw_b = before.requests / before_weeks if before_weeks else 0.0
     rpw_a = after.requests / after_weeks if after_weeks else 0.0
-    values = full_values or any_values
+    # a full week with a fraction of the usual workload swings on a few requests:
+    # charted, but left out of the range
+    usual = median(full_requests) if full_requests else 0.0
+    steady = [v for v, n in zip(full_values, full_requests, strict=True) if n >= MIN_SHARE * usual]
+    values = steady or full_values or any_values
     rng = (min(values), max(values)) if values else None
     evidence = tuple(
         (label, f(before, before_weeks), f(after, after_weeks) if after.requests else "-")
@@ -184,7 +191,7 @@ def measure(
                 f"{BEFORE_WEEKS} weeks before {mark.applied_on}."
             ),
         )
-    usual = median(full_requests) if full_requests else rpw_b
+    usual = usual or rpw_b
     needed = max(MIN_REQUESTS, math.ceil(MIN_SHARE * usual))
     if after_days < MIN_DAYS or after.requests < needed:
         due: date | None = mark.applied_on + timedelta(days=1 + MIN_DAYS)
@@ -218,7 +225,9 @@ def measure(
         verdict = Verdict.WORSE
     else:
         verdict = Verdict.NO_EFFECT
-    unit = before.usd / before.count if before.count else 0.0
+    # what one counted unit was worth before; after, when none was counted before
+    priced = before if before.count else after
+    unit = priced.usd / priced.count if priced.count else 0.0
     base_pw = after.base / after_weeks if after_weeks else 0.0
     saving = (b - a) / m.scale * base_pw * unit if verdict is not Verdict.NO_EFFECT else None
     span = f"{_fmt(m, lo)} to {_fmt(m, hi)}" if lo != hi else _fmt(m, lo)
@@ -233,7 +242,7 @@ def measure(
         f"before weeks' range ({span}), over {after.requests:,} requests in scope"
     )
     if saving is not None:
-        reason += f"; about ${abs(saving):,.2f}/week {'saved' if saving >= 0 else 'more'}."
+        reason += f"; about ${abs(saving):,.2f}/week {'saved' if saving >= 0 else 'more spent'}."
     else:
         reason += ": no clear effect."
     return replace(base, measured_usd_per_week=saving, verdict=verdict, reason=reason)
