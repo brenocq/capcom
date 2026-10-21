@@ -3,10 +3,12 @@
     python .github/scripts/demo/data.py <work-dir>
 
 Fills <work-dir>/claude with synthetic.py's two weeks, then runs capcom with
-CLAUDE_CONFIG_DIR, XDG_CACHE_HOME and OPENCLAW_STATE_DIR inside <work-dir> (never
-the real ~/.claude, ~/.openclaw or ~/.cache/capcom) and HOME set to the made-up
-/home/dev, so project paths read ~/code/<name>. It scans, then asks a `capcom
-serve` on 127.0.0.1 for what the website shows (the same JSON API) and keeps it in
+CLAUDE_CONFIG_DIR, XDG_CACHE_HOME, XDG_STATE_HOME and OPENCLAW_STATE_DIR inside
+<work-dir> (never the real ~/.claude, ~/.openclaw, ~/.cache/capcom or
+~/.local/state/capcom) and HOME set to the made-up /home/dev, so project paths
+read ~/code/<name>. It scans, has limits.py play the status-line recorder over the
+same weeks (so the usage windows have samples), then asks a `capcom serve` on
+127.0.0.1 for what the website shows (the same JSON API) and keeps it in
 <work-dir>/data.json, with `capcom calibrate`'s table. The banner, the cards and
 the demo all draw from that file or that server.
 """
@@ -29,6 +31,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import limits
 import synthetic
 
 FAKE_HOME = "/home/dev"
@@ -42,6 +45,7 @@ def sandbox_env(work: Path) -> dict[str, str]:
     env.update(
         CLAUDE_CONFIG_DIR=str(work / "claude"),
         XDG_CACHE_HOME=str(work / "cache"),
+        XDG_STATE_HOME=str(work / "state"),
         OPENCLAW_STATE_DIR=str(work / "openclaw"),
         HOME=FAKE_HOME,
     )
@@ -100,7 +104,8 @@ def calibration(text: str) -> list[dict[str, Any]]:
     """`capcom calibrate`'s rows: cost-state against capcom, per session."""
     rows = []
     for line in text.splitlines():
-        m = re.match(r"(.+?)\s+\$([\d,.]+)\s+\$([\d,.]+)\s+([+-]?[\d.]+)%\s+(\S+)$", line)
+        # session, project, title, cost-state, capcom, spread, [what it compares,] scope
+        m = re.match(r"(.+?)\s+\$([\d,.]+)\s+\$([\d,.]+)\s+([+-]?[\d.]+)%\s+(?:.*\s)?(\S+)$", line)
         if m:
             rows.append(
                 {
@@ -116,7 +121,7 @@ def calibration(text: str) -> list[dict[str, Any]]:
 
 def build(work: Path, now: datetime | None = None) -> dict[str, Any]:
     work.mkdir(parents=True, exist_ok=True)
-    for d in ("cache", "openclaw"):
+    for d in ("cache", "openclaw", "state"):
         (work / d).mkdir(exist_ok=True)
     now = now or datetime.now(UTC)
     if not (work / "claude" / "projects").exists():
@@ -128,6 +133,8 @@ def build(work: Path, now: datetime | None = None) -> dict[str, Any]:
     data: dict[str, Any] = {"facts": facts}
     data["calibrate"] = calibration(capcom(work, "calibrate"))
     with serve(work) as base:
+        limits.write(work, lambda q: get(base, q), now)
+        data["limits"] = get(base, "/api/limits?days=14")
         data["overview"] = get(base, "/api/overview")
         for group in ("project", "model", "category", "agent"):
             data[f"spend_{group}"] = get(base, f"/api/spend?days=14&group={group}")

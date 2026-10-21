@@ -11,28 +11,43 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://github.com/brenocq/capcom/raw/assets/demo-dark.webp">
-    <img alt="capcom's website in a browser window, in six steps. Spend jumped: two weeks of spend by project, the total climbing, then rising steeply on one day. Who spent it: split by agent type, the coder subagents made the jump. Why: the jump's spike marker opens its cause, a cache that expired 9 times while Bash ran. Where: the session's page, a 10-minute pause and the full cache rewrite after it. Is it a habit: Checks ranks the same cause first for the project, with what it costs a week. Fix it: a settings change is copied." src="https://github.com/brenocq/capcom/raw/assets/demo-light.webp" width="992">
+    <img alt="capcom's website in a browser window, in six steps. Spend jumped: two weeks of spend by project, the total climbing, then rising steeply on one day. Who spent it: split by agent type, the coder subagents made the jump. Why: the jump's spike marker opens its cause, a cache that expired 12 times while Bash ran. Where: the session's page, a 9-minute pause and the full cache rewrite after it. Is it a habit: Checks, by kind, puts the same cause first with what it would save a week, and opens it. Fix it: a settings change that turns off servers never called is copied." src="https://github.com/brenocq/capcom/raw/assets/demo-light.webp" width="992">
   </picture>
 </p>
 
-capcom reads the logs Claude Code keeps on your machine and shows where your
-tokens and dollars go: every session and subagent on one timeline, why the
-spend jumped when it did, and which habits of your setup cost the most, with
-the change to make.
+capcom reads the logs Claude Code keeps on your machine (and OpenClaw's, if you
+use it) and shows where your tokens and dollars go: what changed and when, every
+session and subagent on one timeline, why the spend jumped, which habits of your
+setup cost the most with the change to make, and where your usage limits will be
+at their reset.
 
 ## Install
 
-You need Python 3.12 or newer, and Claude Code's logs (it writes them under
-`~/.claude/projects` as you use it).
-
 ```
 uv tool install git+https://github.com/brenocq/capcom
-capcom serve --open
 ```
 
-`capcom serve` reads the logs into an index in `~/.cache/capcom` (about half a
-minute the first time, then only what is new) and opens the website on
-`http://127.0.0.1:8787`.
+Or `pipx install git+https://github.com/brenocq/capcom`; from a clone,
+`uv tool install --editable .`. You need Python 3.12 or newer (3.14 also reads
+OpenClaw's compressed rows), and Claude Code's logs, which it writes under
+`~/.claude/projects` as you use it. Then:
+
+```
+capcom scan
+capcom serve --open
+capcom checks
+```
+
+`capcom scan` reads the logs into an index in `~/.cache/capcom` (about half a
+minute the first time, then only what is new), `capcom serve --open` opens the
+website on `http://127.0.0.1:8787`, and `capcom checks` lists the setup habits
+that cost you the most, with the change to make.
+
+> [!TIP]
+> For your 5-hour and weekly limits, run `capcom limits --install` once. It shows
+> the change to Claude Code's status line and makes it when you say yes; your
+> status line looks the same (with none, you get a short one). `capcom limits`
+> and the Limits page then forecast each window at its reset.
 
 ## What you get
 
@@ -42,7 +57,11 @@ minute the first time, then only what is new) and opens the website on
 </p>
 <p align="center">
   <img alt="Fan-out: a session's main thread runs along a timeline while fourteen subagent lanes burst in below it, with what the burst cost." src="https://github.com/brenocq/capcom/raw/assets/feature-fan-out.svg" width="49%">
-  <img alt="Checks: a weekly saving counting up, then the settings change for unused MCP servers appearing line by line and being copied." src="https://github.com/brenocq/capcom/raw/assets/feature-checks.svg" width="49%">
+  <img alt="Checks: a weekly saving counting up, then one row per kind of habit with what it would save a week, each bar split by the projects it spans; overlapping kinds are counted once and a judgement call is kept apart." src="https://github.com/brenocq/capcom/raw/assets/feature-checks.svg" width="49%">
+</p>
+<p align="center">
+  <img alt="Limits: the weekly usage rising and dropping to zero at its reset, then a forecast fan from now to the next reset that reaches past 100 percent; beside it, rings for the 5-hour and weekly windows with where each stands now and where it lands at its reset." src="https://github.com/brenocq/capcom/raw/assets/feature-limits.svg" width="49%">
+  <img alt="OpenClaw: Claude Code's logs and OpenClaw's feed three lanes of one timeline: your own sessions, OpenClaw's sessions through Claude Code, and OpenClaw's calls straight to a model provider." src="https://github.com/brenocq/capcom/raw/assets/feature-openclaw.svg" width="49%">
 </p>
 <p align="center">
   <img alt="Trust: capcom's total next to Claude Code's own, and each session's difference landing inside a band of 2 percent." src="https://github.com/brenocq/capcom/raw/assets/feature-trust.svg" width="49%">
@@ -55,12 +74,13 @@ minute the first time, then only what is new) and opens the website on
 | --- | --- |
 | `capcom serve` | The website on 127.0.0.1 (`--open` opens it); rescans the logs in the background. |
 | `capcom scan` | Reads new log lines into the index. |
-| `capcom top` | Totals by project, session, agent type, model or day (`--by`). |
-| `capcom spikes` | Spend spikes and their causes. |
-| `capcom checks` | Setup habits, ranked by what they cost a week, with the change to make. |
+| `capcom top` | What changed, then totals by project, session, agent type, model or day (`--by`). |
+| `capcom spikes` | What changed, then each spend spike with its cause. |
+| `capcom checks` | Setup habits by kind, ranked by what they would save a week, with the change to make. |
+| `capcom limits` | The 5-hour and weekly windows: now, at reset, and what spent them (`--install` starts recording). |
 | `capcom calibrate` | capcom's totals against Claude Code's own, session by session. |
 
-The commands that read a window take `--days` (14 by default; 0 for all).
+`top`, `spikes` and `checks` read the last 14 days (`--days`; 0 for all).
 
 ## FAQ
 
@@ -84,7 +104,8 @@ It opens Claude Code's logs read-only, never reads credentials, writes only its
 own files (the index in `~/.cache/capcom`, and the usage-limit samples in
 `~/.local/state/capcom`), and serves the website on 127.0.0.1 only. The one
 change it makes to Claude Code's own files is the status line entry
-`capcom limits --install` shows you, and only once you say yes.
+`capcom limits --install` shows you, and only once you say yes (it saves a copy
+of the file first, and `--uninstall` takes the entry out).
 
 </details>
 
@@ -95,10 +116,26 @@ change it makes to Claude Code's own files is the status line entry
 From what Claude Code already logs for every request: tokens by kind, the cache
 lifetime, timestamps, tool calls and the size of their results, compactions,
 model switches and subagent spawns. A spike is a request or a stretch far above
-that thread's own recent pace. Rules then claim the dollars they can explain
-(a cache that expired while you were away, a compaction, a model switch, a
-large tool result, a burst of subagents, a growing context, and a few more),
-and whatever no rule explains is shown as unexplained rather than guessed.
+that thread's own recent pace. Rules then claim the dollars they can explain (a
+cache that expired while someone waited, a compaction, a model switch, a large
+tool result, a burst of subagents, a growing context, and a few more), and
+whatever no rule explains is shown as unexplained rather than guessed. An expired
+cache is named by who was waiting, since the fix differs: you, away from the
+session; an agent, on its own long tool call; or a finished subagent, on its
+lead.
+
+</details>
+
+<details>
+<summary><b>How are the savings counted?</b></summary>
+<br>
+
+Each saving is what the change would have saved at this window's pace, net of
+the cost of starting fresh where the advice means a new session or agent, and
+an upper bound ("up to"). The total counts each dollar once: where two findings
+may claim the same dollars, only the larger is added. Changes that trade some
+quality for money, such as a cheaper model for an agent, are judgement calls:
+listed apart, and not in the total.
 
 </details>
 
@@ -129,22 +166,30 @@ save a week.
 </details>
 
 <details>
-<summary><b>OpenClaw?</b></summary>
+<summary><b>Does it read OpenClaw?</b></summary>
 <br>
 
-OpenClaw's work that runs through Claude Code lands in Claude Code's logs, so
-capcom counts it, grouped as `openclaw` projects (it finds OpenClaw in
-`~/.openclaw`, or `$OPENCLAW_STATE_DIR`). Calls OpenClaw makes straight to a
-provider are not in those logs and are not counted yet.
+Yes, read-only. OpenClaw's work that runs through Claude Code lands in Claude
+Code's logs, so capcom counts it there, grouped as `openclaw` projects. The calls
+OpenClaw makes straight to a model provider are in its own agent databases under
+`~/.openclaw` (or `$OPENCLAW_STATE_DIR`); capcom reads those as the project
+`openclaw (direct)`. Some of their rows are compressed and need Python 3.14:
+with an older Python they are skipped, and read on the first scan under 3.14.
 
 </details>
 
 <details>
-<summary><b>What about the 5-hour and weekly limits?</b></summary>
+<summary><b>How does it know my usage limits?</b></summary>
 <br>
 
-Coming. Claude Code's logs don't record them; its status line does, so capcom
-will record them from there and forecast where each will be at its reset.
+Claude Code's logs don't record them; its status line receives them on every
+refresh (on Pro and Max plans). `capcom limits --install` puts capcom's recorder
+in front of your status line command: the recorder passes its input on to your
+command unchanged and keeps a sample each time a window rises. It works with any
+status line, or none. From those samples and your own requests, capcom fits what
+a percent of each window costs and forecasts where each will be at its reset,
+with an 80 % range. Usage from other machines or claude.ai counts toward the
+limits but is not in the logs, so it shows up as fit error.
 
 </details>
 

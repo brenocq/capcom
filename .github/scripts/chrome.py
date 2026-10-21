@@ -3,7 +3,7 @@
 Chrome runs with --remote-debugging-pipe: commands go to it as NUL-terminated
 JSON on fd 3 and replies come back on fd 4, so no port is opened and no
 websocket library is needed. It runs in a memory-capped systemd scope when
-systemd-run is there (MemoryMax=2G, no swap), with a throwaway profile and its
+systemd-run is there (MemoryMax=2G or $CHROME_MEMORY_MAX, no swap), with a throwaway profile and its
 background networking off: the only pages it loads are local.
 
     with Chrome(990, 620) as c:
@@ -64,7 +64,7 @@ class Chrome:
                 "--scope",
                 "--quiet",
                 "-p",
-                "MemoryMax=2G",
+                f"MemoryMax={os.environ.get('CHROME_MEMORY_MAX', '2G')}",
                 "-p",
                 "MemorySwapMax=0",
                 *cmd,
