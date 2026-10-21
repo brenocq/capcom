@@ -34,13 +34,14 @@ ratio of windows runs on that series. Two minutes smooths the interleaving of
 threads while a burst of subagents running for ten minutes still fills a window.
 A session span must spend in at least `session_threads` threads; the thread spikes
 inside it are counted against it, so it is dropped when they explain most of its
-excess, and otherwise their excess is added to its baseline.
+excess, and otherwise their excess is added to its baseline. As in a thread's
+slope, each thread's outliers count at their baseline in the session's rates.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import accumulate, pairwise
@@ -236,9 +237,18 @@ def slope_spikes(
 def thread_spikes(
     session_id: str, agent_id: str | None, turns: list[Turn], p: SpikeParams = DEFAULT
 ) -> list[Spike]:
+    return _thread(session_id, agent_id, turns, p)[0]
+
+
+def _thread(
+    session_id: str, agent_id: str | None, turns: list[Turn], p: SpikeParams
+) -> tuple[list[Spike], dict[str, float]]:
+    """The thread's spikes, and its outliers mapped to their baseline cost (the
+    median they were judged against), which is what they count for in rates."""
     found = outliers(turns, p)
     singles = single_spikes(session_id, agent_id, turns, found, p)
-    return singles + slope_spikes(session_id, agent_id, turns, found, singles, p)
+    level = {turns[i].message_id: med for i, (med, _) in found.items()}
+    return singles + slope_spikes(session_id, agent_id, turns, found, singles, p), level
 
 
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -249,42 +259,51 @@ class Bucket:
     """One step of a session's series: the requests of all its threads in one
     bucket of wall time (positions in the session's time-ordered turns)."""
 
-    cost: float = 0.0
+    cost: float = 0.0  # outliers at their baseline cost (see session_buckets)
     lo: int = 0  # first turn
     hi: int = 0  # past the last turn (lo == hi: an empty bucket inside a short pause)
 
 
-def session_buckets(turns: list[Turn], p: SpikeParams = DEFAULT) -> list[Bucket]:
-    """The session's spend per `session_bucket` of wall time, aligned to the epoch.
-    Empty buckets count while the session pauses for up to `idle_cap` (threads that
-    wait on each other); a longer pause is cut out, as an idle hour is not an hour
-    of work."""
+def session_buckets(
+    turns: list[Turn], p: SpikeParams = DEFAULT, level: Mapping[str, float] | None = None
+) -> list[Bucket]:
+    """The session's spend per `session_bucket` of wall time, aligned to the epoch,
+    with each request in `level` (its thread's outliers) at the cost given there, so
+    one expensive request does not lift a whole baseline. A pause between requests
+    of up to `idle_cap` keeps its empty buckets (threads that wait on each other);
+    a longer one is cut out, as an idle hour is not an hour of work."""
+    level = level or {}
     out: list[Bucket] = []
-    idle = int(p.idle_cap / p.session_bucket)
     last: int | None = None
     for i, t in enumerate(turns):
         k = (t.timestamp - EPOCH) // p.session_bucket
         if k != last:
-            if last is not None:
-                out.extend(Bucket(0.0, i, i) for _ in range(min(k - last - 1, idle)))
+            if last is not None and t.timestamp - turns[i - 1].timestamp <= p.idle_cap:
+                out.extend(Bucket(0.0, i, i) for _ in range(k - last - 1))
             out.append(Bucket(0.0, i, i))
             last = k
-        out[-1].cost += t.usd
+        out[-1].cost += level.get(t.message_id, t.usd)
         out[-1].hi = i + 1
     return out
 
 
 def session_spikes(
-    session_id: str, turns: list[Turn], threads: Sequence[Spike], p: SpikeParams = DEFAULT
+    session_id: str,
+    turns: list[Turn],
+    threads: Sequence[Spike],
+    p: SpikeParams = DEFAULT,
+    level: Mapping[str, float] | None = None,
 ) -> list[Spike]:
     """Slope changes of a whole session: its threads' spend summed per bucket of
     wall time, so a burst of new subagents (which have no history of their own)
     shows. `turns` are all the session's requests in time order, `threads` its
-    thread spikes. A span is dropped when it spends in fewer than `session_threads`
-    threads or when the thread spikes inside it explain `session_explained` of its
-    excess; otherwise their excess (the share of each inside the span) is added to
-    the baseline, so each dollar of excess is counted once."""
-    buckets = session_buckets(turns, p)
+    thread spikes and `level` their outliers' baseline costs, at which they count in
+    the rates (the span's cost is what was spent). A span is dropped when it spends
+    in fewer than `session_threads` threads or when the thread spikes inside it
+    explain `session_explained` of its excess; otherwise their excess (the share of
+    each inside the span) is added to the baseline, so each dollar of excess is
+    counted once."""
+    buckets = session_buckets(turns, p, level)
     cost = [x.cost for x in buckets]
     units = [1.0] * len(buckets)
     b, w = p.session_baseline, p.session_window
@@ -300,6 +319,8 @@ def session_spikes(
         spent = sum(t.usd for t in span)
         old = base * (hi - lo)
         explained = 0.0
+        # A thread spike counts by its share of cost inside the span: exact for a
+        # single request, approximate for a slope whose excess is uneven over turns.
         for s in threads:
             inside = [turns[j].usd for m in s.message_ids if a <= (j := where[m]) < z]
             if inside and s.cost_usd > 0:
@@ -344,10 +365,13 @@ def find_spikes(
         sessions[req.session_id].append(turn)
         threads[(req.session_id, req.agent_id)].append(turn)
     found: dict[str, list[Spike]] = defaultdict(list)
+    level: dict[str, dict[str, float]] = defaultdict(dict)
     for (sid, aid), turns in threads.items():
-        found[sid].extend(thread_spikes(sid, aid, turns, params))
+        spikes, outlying = _thread(sid, aid, turns, params)
+        found[sid].extend(spikes)
+        level[sid].update(outlying)
     for sid, turns in sessions.items():
-        found[sid].extend(session_spikes(sid, turns, found[sid], params))
+        found[sid].extend(session_spikes(sid, turns, found[sid], params, level[sid]))
     out = [s for spikes in found.values() for s in spikes if since <= s.start < until]
     out.sort(key=lambda s: (s.start, s.session_id or "", s.scope, s.agent_id or "", s.kind))
     return out

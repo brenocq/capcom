@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from capcom.cost.model import price
 from capcom.cost.prices import load_prices
 from capcom.timeline import find_spikes
+from capcom.timeline.spikes import SpikeParams, Turn, session_buckets
 from capcom.types import Request, Spike, SpikeKind
 from tests.cost.fakes import FakeIndex, at, req
 
@@ -27,18 +28,24 @@ def run(
     return [req(agent=agent, when=at(start + k * every), **usage) for k in range(n)]
 
 
-def fan_out(at_min: float = 40, spawns: int = 5) -> list[Request]:
+def fan_out(at_min: float = 40, spawns: int = 5, main_from: float = 0) -> list[Request]:
     """A main thread at $0.05 a minute, then `spawns` subagents at once, each at
     $0.10 a minute for 12 minutes."""
-    main = run(None, 0, 80)
+    main = run(None, main_from, 80)
     subs = [r for k in range(spawns) for r in run(f"a{k}", at_min + 0.1 * k, 12, every=0.5)]
     return main + subs
 
 
 def spikes(
-    reqs: list[Request], since: datetime = WINDOW[0], until: datetime = WINDOW[1]
+    reqs: list[Request],
+    since: datetime = WINDOW[0],
+    until: datetime = WINDOW[1],
+    params: SpikeParams | None = None,
 ) -> list[Spike]:
-    return find_spikes(FakeIndex(reqs=reqs), TABLE, since, until)
+    ix = FakeIndex(reqs=reqs)
+    if params is None:
+        return find_spikes(ix, TABLE, since, until)
+    return find_spikes(ix, TABLE, since, until, params=params)
 
 
 def by_scope(found: list[Spike], scope: str) -> list[Spike]:
@@ -129,3 +136,37 @@ def test_session_look_ahead_reads_past_until() -> None:
     assert by_scope(spikes(reqs, until=s.start), "session") == []
     got = by_scope(spikes(reqs, since=s.start), "session")
     assert [g.start for g in got] == [s.start]
+
+
+def test_a_rewrite_in_the_baseline_does_not_hide_a_fan_out() -> None:
+    # one main-thread cache rewrite before the burst counts at its thread's median
+    # in the session's rates, so it does not lift the baseline over the burst
+    for tokens in (1_000_000, 2_000_000, 4_000_000):  # $8, $16, $32
+        reqs = fan_out()
+        k = next(i for i, r in enumerate(reqs) if r.agent_id is None and r.timestamp == at(30))
+        reqs[k] = req(when=at(30), cache_write_1h=tokens)
+        found = spikes(reqs)
+        assert [s.message_ids for s in by_scope(found, "thread")] == [(reqs[k].message_id,)]
+        [s] = by_scope(found, "session")
+        assert at(39) < s.start <= at(40.1)
+        assert s.baseline_usd < 1.5  # the old rate: about $0.10 a bucket
+
+
+def test_a_fan_out_under_the_dollar_floor_is_not_a_spike() -> None:
+    # two subagents: 5x the rate, but $2 above the old one over the window
+    assert spikes(fan_out(spawns=2)) == []
+
+
+def test_a_short_baseline_is_enough() -> None:
+    # a fan-out 7 minutes into a session: a 3-bucket baseline is all it has
+    reqs = fan_out(at_min=7)
+    assert len(by_scope(spikes(reqs), "session")) == 1
+    assert by_scope(spikes(reqs, params=SpikeParams(session_min_baseline=10)), "session") == []
+
+
+def test_long_pauses_are_cut_out() -> None:
+    # a pause up to idle_cap keeps its empty 2-minute buckets; a longer one is cut
+    reqs = [*run(None, 0, 1), *run(None, 4.5, 1), *run(None, 60, 1)]
+    turns = [Turn(r.timestamp, r.message_id, 0.05, r.agent_id) for r in reqs]
+    buckets = session_buckets(turns)
+    assert [b.hi - b.lo for b in buckets] == [1, 0, 1, 1]
