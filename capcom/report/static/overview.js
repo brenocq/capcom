@@ -2,7 +2,7 @@
 
 import {
   h, s, api, usd, tokens, pct, seg, legend, empty, setQuery, longDate, barList, hm,
-  outputUsd, estimateNote, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor,
+  outputUsd, estimateNote, lowerMark, LOWER_TITLE, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor,
 } from './lib.js';
 import { bandChart, sparkline } from './charts.js';
 import { pendingBlock } from './sessions.js';
@@ -37,14 +37,20 @@ export async function renderOverview(main, r) {
   main.append(h('div.grid', { style: '--min:440px' }, limitCard('5-hour window'), limitCard('Weekly limit')));
 
   // KPI cards
-  const avg = d.previous_7_days.daily_average_usd;
+  // today so far against the previous 7 days up to the same time of day; the week
+  // over the days elapsed (6 full ones and today so far)
+  const prev = d.previous_7_days;
+  const avg = prev.same_hour_average_usd;
   let costNote = 'Not billed on your plan.';
   if (range === 'today' && avg > 0) {
     const diff = t.usd / avg - 1;
-    costNote = `${pct(Math.abs(diff))} ${diff >= 0 ? 'above' : 'below'} your previous 7-day average of ${usd(avg)} a day. Not billed on your plan.`;
+    costNote = `${pct(Math.abs(diff))} ${diff >= 0 ? 'above' : 'below'} the ${usd(avg)} you spent by ${prev.same_hour} on an average day of the previous 7. Not billed on your plan.`;
   } else if (range === '7d') {
-    costNote = `${usd(t.usd / 7)} a day on average. Not billed on your plan.`;
+    const days = d.week.elapsed_days || 7;
+    costNote = `${usd(t.usd / days)} a day on average, over ${days.toFixed(1)} days (6 full days and today so far). Not billed on your plan.`;
   }
+  const lower = estimateNote(t);
+  const lowerNote = lower ? h('span.note', { title: LOWER_TITLE, text: 'A lower bound: part of the output is estimated from content length.' }) : null;
   const spark = d.spending_now.spark;
   const cats = t.categories;
   const readShare = t.tokens ? cats.cache_read.tokens / t.tokens : 0;
@@ -52,15 +58,15 @@ export async function renderOverview(main, r) {
   const when = range === 'today' ? 'today' : 'in 7 days';
   main.append(h('div.grid', { style: '--min:220px' },
     h('section.card.tight', null, h('span.label', { text: range === 'today' ? 'API-equivalent cost today' : 'API-equivalent cost, 7 days' }),
-      h('span.big', { text: usd(t.usd) }), h('span.note', { text: costNote })),
+      h('span.big', { text: lowerMark(t) + usd(t.usd), title: lower ? LOWER_TITLE : null }), h('span.note', { text: costNote }), lowerNote),
     h('section.card.tight', null, h('span.label', { text: 'Spending now' }),
       h('div', { style: 'display:flex;align-items:flex-end;justify-content:space-between;gap:12px' },
         h('span.big', null, usd(d.spending_now.usd_last_hour), h('small', { text: ' in the last hour' })),
         spark && spark.values.some((v) => v > 0) ? sparkline(spark.values) : null),
       h('span.note', { text: spark ? 'Last two hours shown, in 5-minute steps.' : 'The sparkline arrives with the timeline module.' })),
-    h('section.card.tight', null, h('span.label', { text: `Tokens ${when}` }), h('span.big', { text: tokens(t.tokens) }),
+    h('section.card.tight', null, h('span.label', { text: `Tokens ${when}` }), h('span.big', { text: lowerMark(t) + tokens(t.tokens), title: lower ? LOWER_TITLE : null }),
       h('div.stackbar', { 'aria-hidden': 'true' }, CATEGORY_ORDER.map((k) => (cats[k].tokens ? h('span', { style: `width:${(cats[k].tokens / t.tokens * 100).toFixed(2)}%;background:${categoryColor(k)}` }) : null))),
-      h('span.note', { text: t.tokens ? `${pct(readShare)} are cache reads: the same context, reread every turn.` : 'No requests yet.' })),
+      h('span.note', { text: t.tokens ? `${pct(readShare)} are cache reads: the same context, reread every turn.` : 'No requests yet.' }), lowerNote && lowerNote.cloneNode(true)),
     h('section.card.tight', null, h('span.label', { text: `Subagents ${when}` }), h('span.big', { text: String(sub.count) }),
       h('span.note', { text: sub.count ? `They cost ${usd(sub.usd)} of ${usd(t.usd)}. ${sub.two_tool_calls_or_fewer} made two tool calls or fewer.` : 'No subagents ran.' }))));
 
@@ -72,7 +78,7 @@ export async function renderOverview(main, r) {
   let picked = pickSpikes(d.spikes_today, now.getTime() - 864e5, now.getTime());
   if (c && c.times.length && c.total[c.total.length - 1] > 0) {
     const members = c.members.map((m, i) => ({ ...m, label: memberLabel(m, 'category'), color: memberColor(m, i, 'category'), values: c.values[i] }));
-    head.append(legend(members.map((m) => ({ label: m.label, color: m.color, value: (m.key === 'output' ? outputUsd(d.today.totals) : usd(m.final)) })), usd(d.today.totals.usd)));
+    head.append(legend(members.map((m) => ({ label: m.label, color: m.color, value: (m.key === 'output' ? outputUsd(d.today.totals) : usd(m.final)) })), lowerMark(d.today.totals) + usd(d.today.totals.usd)));
     // start the axis at the first hour with spend; end at the next full hour after now
     const first = c.total.findIndex((v) => v > 0);
     const start = new Date(c.times[Math.max(0, first - 1)] - c.step_s * 1000); start.setMinutes(0, 0, 0);

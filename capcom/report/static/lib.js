@@ -91,16 +91,17 @@ export function stamp(d) {
 // "2026-10-21" as a local date
 export const localDate = (iso) => { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d); };
 
-// The output cost, with "~" when part of it is estimated, and the share.
+// Estimated output undercounts (thinking is not in the log), so any total that
+// includes it is a lower bound: shown with "≥" and said in a note.
+export const LOWER_TITLE = 'At least this much: part of the output is estimated from content length, which undercounts it';
+export function lowerMark(totals) { return totals.estimated_output.requests ? '≥ ' : ''; }
 export function outputUsd(totals) {
-  const est = totals.estimated_output;
-  const v = usd(totals.categories.output.usd);
-  return est.requests ? '~' + v : v;
+  return lowerMark(totals) + usd(totals.categories.output.usd);
 }
 export function estimateNote(totals) {
   const est = totals.estimated_output;
   if (!est.requests) return null;
-  return `~ ${pct(est.share, est.share < 0.1 ? 1 : 0)} of output tokens estimated from content length (${est.requests} request${est.requests === 1 ? "" : "s"})`;
+  return `Output and the totals that include it are lower bounds (≥): ${pct(est.share, est.share < 0.1 ? 1 : 0)} of output tokens estimated from content length (${est.requests} request${est.requests === 1 ? "" : "s"})`;
 }
 
 export const SERIES = ['var(--s1)', 'var(--s2)', 'var(--s3)', 'var(--s4)', 'var(--s5)', 'var(--s6)'];
@@ -206,7 +207,7 @@ export function barList(rows, valueOf, noteOf) {
   const max = Math.max(...rows.map(valueOf), 1e-9);
   return h('div.blist', null, rows.map((r, i) => h('div.bitem', null,
     h('div.top', null,
-      h('span', { title: r.label }, r.label, ' ', h('span.est', null, noteOf ? noteOf(r) : '')),
+      h('span', { title: r.path ? `${r.label}: ${r.path}` : r.label }, r.label, ' ', h('span.est', null, noteOf ? noteOf(r) : '')),
       h('span.mono', null, usd(valueOf(r)))),
     h('div.track', null, h('div', { style: `width:${(valueOf(r) / max * 100).toFixed(1)}%;background:${SERIES[i] || OTHER_COLOR}` })))));
 }

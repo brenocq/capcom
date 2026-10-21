@@ -5,6 +5,14 @@
 header is not `127.0.0.1` or `localhost` gets 403 (DNS rebinding). Each request opens
 the index read-only and closes it before answering.
 
+Replies are cached per scan generation: the key holds the size and modification time
+of `index.sqlite` and its `-wal`, the background scanner's count of finished scans,
+the local date, the endpoint and its query, so the first call after a scan computes
+again and a repeat call is answered from memory. Entries live at most 5 minutes (some
+numbers, such as "the last hour", move with the clock alone) and the cache holds at
+most 32 MB of encoded replies, least recently used out first. `status` and `live` are
+never cached; errors are never cached.
+
 The server keeps the index fresh itself: an incremental scan (`run_scan`, quiet) at
 start and then a minute after each scan ends, in one background thread; a lock keeps
 two scans from overlapping, and `--no-scan` turns it off. The handlers never write.
@@ -21,6 +29,12 @@ Conventions:
 - Placeholder replies (`<synthetic>` models) are left out, as in `capcom top`.
 - Payloads carry titles, project folders, paths, model, tool and agent names, counts,
   times and dollars; never prompt, reply or spawn-description text.
+- Session titles are Claude Code's own generated titles (the `ai-title` record it
+  derives from the conversation). capcom shows them as labels and stores nothing
+  else of the conversation.
+- Estimated output undercounts (content length misses thinking), so output and any
+  total that includes it is a lower bound when `estimated_output.requests` > 0; the
+  pages show it with "≥".
 
 ## Errors
 
@@ -48,14 +62,15 @@ missing or old. Static files are under `/static/`.
 ```
 {requests, usd, tokens,
  categories: {cache_read|cache_write|output|input: {tokens, usd}},   # output includes web tools
- estimated_output: {requests, tokens, share},   # share of output tokens that are estimates ("~")
+ estimated_output: {requests, tokens, share},   # share of output tokens that are estimates ("≥")
  inexact_price_requests}
 ```
 
 **Group**: Totals plus `key`, `label`, `count` (sessions for projects, models and the
-main thread; spawned agents for an agent type).
+main thread; spawned agents for an agent type); project groups add `path`, the full
+folder (`~` for home) for a tooltip.
 
-**Session row**: `session_id, title, project, project_dir, temporary, git_branch,
+**Session row**: `session_id, title, project, project_path, project_dir, temporary, git_branch,
 subagents, active_seconds, first, last, peak_context, cache_read_share, usd, requests,
 estimated_output`. `temporary` is true for a folder under /tmp. Active time sums the gaps under 5 minutes between consecutive
 requests of the session.
@@ -78,12 +93,18 @@ there is none; `explained` is false while `capcom.explain` is not available.
 `unavailable` lists the analysis modules that are not built yet; the parts that need
 them are `null`.
 
-**Projects**: a project is labeled by the last part of a working folder seen in it.
-The OpenClaw state dir is `openclaw`. Every folder under /tmp is temporary: Claude
-Code's scratchpads (`/tmp/claude-<uid>/<project folder>/<session id>/...`) are
-grouped as `temporary (<project>)`, other temporary folders as `(temporary)`; never by
-the cwd's last part. The chart series (`capcom.timeline`) group all temporary folders
-as one member, labeled `temporary folders`.
+**Projects**: one display rule, `capcom.timeline.groups.ProjectNames`, shared with
+`capcom top --by project`. A project folder's path is a session's cwd, or the ancestor
+of that cwd whose folder form is the project folder (a session that moved into a
+subfolder still names its repo); the label is that path's last part, the full path
+when two folders share it, and the folder name itself when no cwd explains it. The
+OpenClaw state dir is `openclaw` and the folders under it `openclaw (<path under
+it>)`, e.g. `openclaw (workspace)`, each its own row. Every folder under /tmp is
+temporary: Claude Code's scratchpads (`/tmp/claude-<uid>/<project folder>/<session
+id>/...`) are grouped as `temporary (<project label>)`, other temporary folders as
+`(temporary)`. The chart series (`capcom.timeline`) group all temporary folders as one
+member, labeled `temporary folders`, and all OpenClaw folders as one, labeled
+`openclaw (all folders)`.
 
 ## Endpoints
 
@@ -97,8 +118,9 @@ true while serve's first scan has not finished: totals may be partial until then
 
 ```
 {now, running_sessions,
- today: Block, week: Block + {days: 7},
- previous_7_days: {since, daily_average_usd},   # the 7 days before today
+ today: Block, week: Block + {days: 7, full_days: 6, elapsed_days},
+ previous_7_days: {since, daily_average_usd,     # the 7 days before today
+                   same_hour_average_usd, same_hour},
  spending_now: {usd_last_hour, spark: {step_s, times, values} | null},
  cumulative_today: Cumulative (by category, 5-minute steps) | null,
  limits: {available: false, message},           # no limit data until milestone 5
@@ -107,7 +129,11 @@ Block = {since, totals, sessions, by_project: [Group], by_agent: [Group],
          by_model: [Group], subagents: {count, usd, two_tool_calls_or_fewer}}
 ```
 
-`spikes_today: Spikes | null` marks today's chart. `by_agent` keys are `main` for
+`spikes_today: Spikes | null` marks today's chart. Today so far is compared with
+`same_hour_average_usd`: the spend of each of the previous 7 days up to the same local
+time of day (`same_hour`, "HH:MM"), averaged; `daily_average_usd` is over the full
+days. The week holds 6 full days and today so far; its daily average divides by
+`elapsed_days` (about 6.4 in the afternoon), not by 7. `by_agent` keys are `main` for
 main threads, else the agent type; projects as in "Projects" above.
 
 ### `GET /api/spend?days=14&group=category`
@@ -143,7 +169,7 @@ numbers, missing values last).
 ### `GET /api/session/<session_id>`
 
 ```
-{session: {session_id, title, project, project_dir, cwd, git_branch, version,
+{session: {session_id, title, project, project_path, project_dir, cwd, git_branch, version,
            entrypoint, first_seen, last_seen, running, models, efforts},
  totals, active_seconds,
  calibration: {claude_code_usd, capcom_usd, spread, comparable, reasons,
@@ -217,8 +243,8 @@ the spike's requests cost above it, adding up to its excess.
 
 ```
 {days, since, until, overlapping,
- total: {usd_per_week, findings, all} | null,
- findings: [{n, kind, title, scope, scope_label, summary, saving_usd_per_week, advice, change,
+ total: {usd_per_week, findings, of, all, text} | null,
+ findings: [{n, kind, title, scope, scope_label, scope_path, summary, saving_usd_per_week, advice, change,
              evidence: [Evidence], metrics, overlaps: [kind], counted, visual}]}
 ```
 
@@ -226,8 +252,10 @@ Findings come ranked by weekly saving; `scope_label` names a project scope as in
 "Projects" (other scopes, an agent type or `all`, as they are). Some savings count the same dollars
 (`overlaps`, from `metrics["overlaps"]`; `overlapping` says whether any do), so they
 are never added up: `total` sums only the findings with `counted` true, picked largest
-first, each one that overlaps none picked before it (`all` says whether that is every
-finding); null when there are none. `visual` is a small chart from the metrics, or
+first, each one that overlaps none picked before it (`of` counts every finding, `all`
+says whether that is every finding); null when there are none. `text` is the sentence
+`capcom checks` prints too, e.g. "up to $46.00/week across 4 findings that don't
+overlap (of 5; overlapping savings are counted once)". `visual` is a small chart from the metrics, or
 null:
 `{type: "squares" | "split", label, verb, total, filled}` (tools or skills loaded
 against those used, or sessions that loaded claude.ai connectors against those that

@@ -7,16 +7,16 @@ estimated output flagged with its share).
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, tzinfo
+from pathlib import Path
 from typing import Any
 
 from capcom.cost.model import price
 from capcom.cost.prices import is_placeholder, normalize
-from capcom.cost.top import TEMPORARY, project_label
-from capcom.timeline.groups import MAIN_THREAD, OPENCLAW, is_temporary
-from capcom.types import AgentInfo, CostBreakdown, PriceTable, Request, SessionInfo
+from capcom.timeline.groups import MAIN_THREAD, ProjectNames, is_temporary
+from capcom.types import AgentInfo, CostBreakdown, Finding, PriceTable, Request, SessionInfo
 
 # A gap between two requests of a session at least this long is a pause; shorter
 # gaps count as active time.
@@ -110,6 +110,7 @@ class Group:
     label: str
     tally: Tally = field(default_factory=Tally)
     members: set[str] = field(default_factory=set)  # sessions or agents counted in it
+    path: str | None = None  # a project's full folder, for a tooltip
 
     def add(self, req: Request, cost: CostBreakdown, member: str) -> None:
         self.tally.add(req, cost)
@@ -117,6 +118,8 @@ class Group:
 
     def to_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {"key": self.key, "label": self.label, "count": len(self.members)}
+        if self.path is not None:
+            out["path"] = self.path
         out.update(self.tally.to_json())
         return out
 
@@ -135,44 +138,18 @@ class SessionRow:
     active_seconds: float = 0.0
 
 
-def project_key(project_dir: str, openclaw_dir: str = "") -> str:
-    """The project group of a folder: "openclaw" for the OpenClaw state dir (in folder
-    form), the shared temporary key for any folder under /tmp ("temporary (<project
-    folder>)" when the scratchpad names the project it was made for, else
-    "(temporary)"; capcom.timeline.groups.is_temporary decides what is temporary),
-    else the folder itself."""
-    if openclaw_dir and (project_dir == openclaw_dir or project_dir.startswith(openclaw_dir + "-")):
-        return OPENCLAW
-    if is_temporary(project_dir):
-        label = project_label(project_dir)
-        return label if label.startswith("temporary (") else TEMPORARY
-    return project_dir
+def project_names(
+    sessions: Iterable[SessionInfo], openclaw_root: Path | None = None
+) -> ProjectNames:
+    """The display rule for project folders (capcom.timeline.groups.ProjectNames),
+    from the cwds of `sessions`; `capcom top` names projects the same way."""
+    return ProjectNames.build(sessions, openclaw_root)
 
 
-def project_names(sessions: Iterable[SessionInfo]) -> dict[str, str]:
-    """A display name per project folder: the last part of a cwd seen in it (the
-    folder name alone loses the slashes). Temporary folders get none: they are
-    named after the project they were made for (`project_display`)."""
-    names: dict[str, str] = {}
-    for s in sessions:
-        if s.project_dir in names or is_temporary(s.project_dir):
-            continue
-        if s.cwd:
-            names[s.project_dir] = s.cwd.rstrip("/").rsplit("/", 1)[-1] or s.cwd
-    return names
-
-
-def project_display(project_dir: str, names: Mapping[str, str], openclaw_dir: str = "") -> str:
-    """The label of a folder's project group: "temporary (<project>)" for scratch
-    folders, with the project named as everywhere else, "(temporary)", "openclaw",
-    or the project's name."""
-    key = project_key(project_dir, openclaw_dir)
-    if key.startswith("temporary ("):
-        inner = key[len("temporary (") : -1]
-        return f"temporary ({names.get(inner) or inner})"
-    if key in (TEMPORARY, OPENCLAW):
-        return key
-    return names.get(project_dir) or project_dir
+def project_display(project_dir: str, names: ProjectNames) -> str:
+    """The label of a folder's table row: the repo folder's name, "openclaw" or
+    "openclaw (<sub>)", "temporary (<project>)" or "(temporary)"."""
+    return names.label(names.key(project_dir))
 
 
 class Window:
@@ -184,11 +161,9 @@ class Window:
         table: PriceTable,
         infos: Mapping[str, SessionInfo],
         agents: Mapping[str, AgentInfo],
-        names: Mapping[str, str],
-        openclaw_dir: str = "",
+        names: ProjectNames,
     ) -> None:
         self.table = table
-        self.openclaw_dir = openclaw_dir
         self.infos = infos
         self.agents = agents
         self.names = names
@@ -206,9 +181,12 @@ class Window:
             return None  # not a model call (the rule `capcom top` uses)
         cost = price(req, self.table)
         self.total.add(req, cost)
-        pkey = project_key(req.project_dir, self.openclaw_dir)
-        label = project_display(req.project_dir, self.names, self.openclaw_dir)
-        self._group(self.by_project, pkey, label).add(req, cost, req.session_id)
+        pkey = self.names.key(req.project_dir)
+        group = self.by_project.get(pkey)
+        if group is None:
+            group = self.by_project[pkey] = Group(pkey, self.names.label(pkey))
+            group.path = self.names.path(pkey)
+        group.add(req, cost, req.session_id)
         if req.agent_id is None:
             akey, member = MAIN_THREAD, req.session_id
         else:
@@ -266,25 +244,22 @@ class Window:
 
     def session_rows(self, tz: tzinfo | None) -> list[dict[str, Any]]:
         rows = sorted(self.sessions.values(), key=lambda r: (-r.tally.usd, r.session_id))
-        return [
-            session_json(r, self.infos.get(r.session_id), self.names, tz, self.openclaw_dir)
-            for r in rows
-        ]
+        return [session_json(r, self.infos.get(r.session_id), self.names, tz) for r in rows]
 
 
 def session_json(
     row: SessionRow,
     info: SessionInfo | None,
-    names: Mapping[str, str],
+    names: ProjectNames,
     tz: tzinfo | None,
-    openclaw_dir: str = "",
 ) -> dict[str, Any]:
     t = row.tally
     tokens = t.tokens
     return {
         "session_id": row.session_id,
         "title": info.title if info else None,
-        "project": project_display(row.project_dir, names, openclaw_dir),
+        "project": project_display(row.project_dir, names),
+        "project_path": names.path(row.project_dir),
         "project_dir": row.project_dir,
         "temporary": is_temporary(row.project_dir),
         "git_branch": info.git_branch if info else None,
@@ -297,4 +272,55 @@ def session_json(
         "usd": round(t.usd, 6),
         "requests": t.requests,
         "estimated_output": t.estimated_requests > 0,
+    }
+
+
+# --------------------------------------------------------------------------- checks
+
+
+def finding_overlaps(f: Finding) -> tuple[str, ...]:
+    """The finding kinds whose dollars `f`'s saving may share (metrics["overlaps"])."""
+    raw = f.metrics.get("overlaps")
+    if isinstance(raw, str):
+        return (raw,)
+    return tuple(raw) if isinstance(raw, tuple | list) else ()
+
+
+def counted_findings(findings: Sequence[Finding], dirs: Collection[str]) -> list[bool]:
+    """Which findings a total may add: largest first, each that counts dollars none
+    counted so far does. Two project folders (in `dirs`) are apart; a scope of "all"
+    or an agent type may cover any folder."""
+
+    def same_place(a: str, b: str) -> bool:
+        return a == b or a not in dirs or b not in dirs
+
+    kept: list[tuple[str, str]] = []  # (kind, scope) of the findings counted so far
+    counted: list[bool] = []
+    for f in findings:
+        over = finding_overlaps(f)
+        ok = not any(k in over and same_place(sc, f.scope) for k, sc in kept)
+        if ok:
+            kept.append((f.kind, f.scope))
+        counted.append(ok)
+    return counted
+
+
+def savings_total(findings: Sequence[Finding], dirs: Collection[str]) -> dict[str, Any] | None:
+    """The weekly saving over the findings that don't overlap, with the sentence the
+    website and `capcom checks` both print; None without findings."""
+    if not findings:
+        return None
+    flags = counted_findings(findings, dirs)
+    picked = [f for f, ok in zip(findings, flags, strict=True) if ok]
+    usd = sum(f.saving_usd_per_week for f in picked)
+    n = len(picked)
+    text = f"up to ${usd:,.2f}/week across {n} finding{'' if n == 1 else 's'} that don't overlap"
+    if n < len(findings):
+        text += f" (of {len(findings)}; overlapping savings are counted once)"
+    return {
+        "usd_per_week": round(usd, 6),
+        "findings": n,
+        "of": len(findings),
+        "all": n == len(findings),
+        "text": text,
     }

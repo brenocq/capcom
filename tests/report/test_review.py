@@ -18,7 +18,7 @@ import pytest
 from capcom.report import api
 from capcom.report.analysis import Analysis
 from capcom.report.server import STATIC, Scanner, Site
-from capcom.report.tally import project_display, project_key
+from capcom.report.tally import project_display, project_names
 from capcom.store.index import open_index
 from capcom.types import SessionInfo
 from tests.report.conftest import (
@@ -152,12 +152,14 @@ def test_updated_follows_the_wal(index_path: Path, tmp_path: Path) -> None:
 
 
 def test_temporary_labels() -> None:
-    names = {ALPHA: "alpha"}
-    assert project_key(SCRATCH) == f"temporary ({ALPHA})"
+    sessions = [SessionInfo("a", ALPHA, cwd="/home/user/alpha")]
+    names = project_names(sessions, Path("/home/user/.openclaw"))
+    assert names.key(SCRATCH) == f"temporary ({ALPHA})"
     assert project_display(SCRATCH, names) == "temporary (alpha)"
     assert project_display("-tmp-x", names) == "(temporary)"
     assert project_display("-tmp", names) == "(temporary)"
-    assert project_display("-home-user--openclaw-ws", names, "-home-user--openclaw") == "openclaw"
+    assert project_display("-home-user--openclaw", names) == "openclaw"
+    assert project_display("-home-user--openclaw-ws", names) == "openclaw (ws)"
     assert project_display(ALPHA, names) == "alpha"
 
 

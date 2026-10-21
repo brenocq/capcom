@@ -1,7 +1,7 @@
 // The sessions table (Spend and the Sessions page), and the block shown for a
 // part whose analysis module is not built yet.
 
-import { h, api, usd, tokens, pct, duration, stamp, seg, empty, setQuery, sessionHref, ApiError } from './lib.js';
+import { h, api, usd, tokens, pct, duration, stamp, seg, empty, setQuery, sessionHref, ApiError, LOWER_TITLE } from './lib.js';
 
 export function sessionsTable(rows, sort, onSort) {
   const th = (key, label, cls) => {
@@ -15,7 +15,7 @@ export function sessionsTable(rows, sort, onSort) {
     h('tbody', null, rows.map((r) => h('tr', null,
       h('td', null, h('a.title', { href: sessionHref(r.session_id) },
         h('span', { text: r.title || 'Untitled session ' + r.session_id.slice(0, 8) }),
-        h('span', { text: r.project + (r.git_branch ? ' · ' + r.git_branch : '') }))),
+        h('span', { text: r.project + (r.git_branch ? ' · ' + r.git_branch : ''), title: r.project_path || null }))),
       h('td.num', { text: String(r.subagents) }),
       h('td.num', { text: r.active_seconds ? duration(r.active_seconds) : '<1 min' }),
       h('td.num', { text: tokens(r.peak_context) }),
@@ -23,7 +23,7 @@ export function sessionsTable(rows, sort, onSort) {
         h('div.track', { style: 'width:80px' }, h('div', { style: `width:${(r.cache_read_share * 100).toFixed(1)}%;background:var(--s1)` })),
         h('span.note', { text: pct(r.cache_read_share) + ' of tokens' }))),
       h('td.num', { text: r.last ? stamp(new Date(r.last)) : '' }),
-      h('td.cost', { text: (r.estimated_output ? '~' : '') + usd(r.usd), title: r.estimated_output ? 'Part of the output is estimated from content length' : null }),
+      h('td.cost', { text: (r.estimated_output ? '≥ ' : '') + usd(r.usd), title: r.estimated_output ? LOWER_TITLE : null }),
     )))));
 }
 

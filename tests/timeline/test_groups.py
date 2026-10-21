@@ -126,3 +126,37 @@ def test_agent_type_falls_back_to_the_spawning_call() -> None:
     g = grouper(ix)
     assert key(req(agent="a1"), GroupBy.AGENT, g) == ("builder", "builder")
     assert key(req(agent="a2"), GroupBy.AGENT, g)[0] == "unknown"  # another session's call
+
+
+# --------------------------------------------------------------------------- project names
+
+
+def test_project_names_rule() -> None:
+    from capcom.timeline.groups import ProjectNames
+    from capcom.types import SessionInfo
+
+    toy = "-home-user-Github-toy-brain"
+    scratch = f"-tmp-claude-1000-{toy}-0f0e0d0c-0b0a-4908-8706-050403020100-scratchpad"
+    sessions = [
+        # moved into a subfolder: still named after the repo folder
+        SessionInfo("a", toy, cwd="/home/user/Github/toy-brain/lewm"),
+        SessionInfo("b", "-home-user--openclaw", cwd="/home/user/.openclaw"),
+        SessionInfo("c", "-home-user--openclaw-workspace", cwd="/home/user/.openclaw/workspace"),
+        SessionInfo("d", "-home-user-x-app", cwd="/home/user/x/app"),
+        SessionInfo("e", "-home-user-y-app", cwd="/home/user/y/app"),
+        SessionInfo("f", "-home-user-odd", cwd="/elsewhere"),  # no cwd explains it
+        SessionInfo("g", scratch, cwd="/tmp/whatever"),
+    ]
+    names = ProjectNames.build(sessions, OPENCLAW_ROOT, home=Path("/home/user"))
+    assert names.label(toy) == "toy-brain"
+    assert names.path(toy) == "~/Github/toy-brain"
+    assert names.label("-home-user--openclaw") == "openclaw"
+    assert names.label("-home-user--openclaw-workspace") == "openclaw (workspace)"
+    assert names.label("-home-user--openclaw-agents-x") == "openclaw (agents-x)"  # no cwd
+    assert names.key("-home-user--openclaw-workspace") == "-home-user--openclaw-workspace"
+    assert names.label("-home-user-x-app") == "~/x/app"  # same last part: by path
+    assert names.label("-home-user-y-app") == "~/y/app"
+    assert names.label("-home-user-odd") == "-home-user-odd"
+    assert names.key(scratch) == f"temporary ({toy})"
+    assert names.label(scratch) == names.label(names.key(scratch)) == "temporary (toy-brain)"
+    assert names.label("-tmp-x") == "(temporary)"

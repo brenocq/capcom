@@ -11,18 +11,31 @@ same key and label everywhere:
   meta.json, else from the parent's Agent call it names (its SPAWN event), else
   "unknown";
 - SESSION: the session id, labeled with its title or the id's first 8 characters.
+
+`ProjectNames` is the one display rule for project folders in tables (the website
+and `capcom top`): the repo folder's own name, "openclaw" or "openclaw (<sub>)" for
+the OpenClaw folders, listed apart, and "temporary (<project>)" or "(temporary)"
+for folders under /tmp.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from capcom.config import load_config
 from capcom.cost.prices import canonical, is_placeholder
-from capcom.types import CostBreakdown, EventKind, GroupBy, Index, PriceTable, Request
+from capcom.types import (
+    CostBreakdown,
+    EventKind,
+    GroupBy,
+    Index,
+    PriceTable,
+    Request,
+    SessionInfo,
+)
 
 TEMPORARY = "temporary"
 OPENCLAW = "openclaw"
@@ -38,7 +51,15 @@ CATEGORIES: tuple[tuple[str, str], ...] = (
     ("web", "Web"),
 )
 
+TEMPORARY_LABEL = "(temporary)"  # the table label of scratch folders naming no project
+OPENCLAW_ALL = "openclaw (all folders)"  # the chart series that merges them
+
 _NOT_ALNUM = re.compile(r"[^A-Za-z0-9]")
+# A folder under /tmp that names the project it was made for: Claude Code's
+# scratchpads, /tmp/claude-<uid>/<project folder>/<session id>/..., hold the
+# project's own folder name (itself starting with "-") before a session id.
+_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_TEMP_OF_PROJECT = re.compile(rf"^-tmp-.+?-(-[^-].*?)-{_UUID}(?:-|$)")
 
 
 def folder_name(path: str | Path) -> str:
@@ -54,6 +75,126 @@ def _under(project_dir: str, prefix: str) -> bool:
 def is_temporary(project_dir: str) -> bool:
     """A folder under /tmp (scratch sessions, forked or copied sessions)."""
     return _under(project_dir, "-tmp")
+
+
+def temporary_project(project_dir: str) -> str | None:
+    """The project folder a scratch folder under /tmp was made for, if its name holds
+    one (Claude Code's scratchpads do)."""
+    if not project_dir.startswith("-tmp-"):
+        return None
+    m = _TEMP_OF_PROJECT.match(project_dir)
+    return m.group(1) if m else None
+
+
+def _home_path(path: str, home: str) -> str:
+    """`path` with the home directory written as "~"."""
+    if home and (path == home or path.startswith(home.rstrip("/") + "/")):
+        return "~" + path[len(home.rstrip("/")) :]
+    return path
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectNames:
+    """Display names of project folders, the same in every table.
+
+    A folder's real path is the cwd of one of its sessions, or the ancestor of that
+    cwd whose folder form is the project folder (a session that moved into a
+    subfolder still names its repo). The label is that path's last part; two
+    folders with the same last part are told apart by their path. OpenClaw folders
+    are "openclaw" (the state dir) and "openclaw (<path under it>)"; folders under
+    /tmp are "temporary (<project label>)" when they name the project they were made
+    for, else "(temporary)". A folder no cwd explains keeps its folder name."""
+
+    paths: Mapping[str, str]  # project folder -> its path, from the cwds seen
+    openclaw_dir: str = ""  # the OpenClaw state dir, in folder form
+    openclaw_root: str = ""
+    home: str = ""
+    labels: Mapping[str, str] | None = None  # filled by `build`
+
+    @classmethod
+    def build(
+        cls,
+        sessions: Iterable[SessionInfo] | Iterable[tuple[str, str | None]],
+        openclaw_root: Path | None = None,
+        home: Path | None = None,
+    ) -> ProjectNames:
+        if openclaw_root is None:
+            openclaw_root = load_config().openclaw_root
+        home_s = str(home if home is not None else Path.home())
+        claw = folder_name(openclaw_root)
+        paths: dict[str, str] = {}
+        for s in sessions:
+            project_dir, cwd = (s.project_dir, s.cwd) if isinstance(s, SessionInfo) else s
+            if project_dir in paths or not cwd:
+                continue
+            if is_temporary(project_dir) and not _under(project_dir, claw):
+                continue
+            p = Path(cwd)
+            for cand in (p, *p.parents):
+                if folder_name(cand) == project_dir:
+                    paths[project_dir] = str(cand)
+                    break
+        base = cls(paths, claw, str(openclaw_root), home_s)
+        labels = {d: base._own_label(d) for d in paths}
+        seen: dict[str, list[str]] = {}
+        for d, label in labels.items():
+            seen.setdefault(label, []).append(d)
+        for dirs in seen.values():
+            if len(dirs) > 1:  # same last part: tell them apart by the path
+                for d in dirs:
+                    labels[d] = _home_path(paths[d], home_s)
+        return cls(paths, base.openclaw_dir, base.openclaw_root, home_s, labels)
+
+    def is_openclaw(self, project_dir: str) -> bool:
+        return bool(self.openclaw_dir) and _under(project_dir, self.openclaw_dir)
+
+    def key(self, project_dir: str) -> str:
+        """The table row of a folder: the folder itself, or one shared key per
+        project for scratch folders ("temporary (<project folder>)", "(temporary)")."""
+        if self.is_openclaw(project_dir) or not is_temporary(project_dir):
+            return project_dir
+        inner = temporary_project(project_dir)
+        return f"temporary ({inner})" if inner else TEMPORARY_LABEL
+
+    def _own_label(self, project_dir: str) -> str:
+        path = self.paths.get(project_dir)
+        if self.is_openclaw(project_dir):
+            if project_dir == self.openclaw_dir:
+                return OPENCLAW
+            sub = project_dir[len(self.openclaw_dir) + 1 :]
+            root = self.openclaw_root.rstrip("/")
+            if path and path.startswith(root + "/"):
+                sub = path[len(root) + 1 :]
+            return f"{OPENCLAW} ({sub})"
+        if path:
+            if path.rstrip("/") == self.home.rstrip("/"):
+                return "~"  # the home folder itself
+            return path.rstrip("/").rsplit("/", 1)[-1] or path
+        return project_dir
+
+    def label(self, project_dir: str) -> str:
+        """The display name of a folder, or of a table key `key` returned."""
+        if project_dir.startswith("temporary (") and project_dir.endswith(")"):
+            return f"temporary ({self.label(project_dir[len('temporary (') : -1])})"
+        if project_dir == TEMPORARY_LABEL:
+            return TEMPORARY_LABEL
+        if is_temporary(project_dir) and not self.is_openclaw(project_dir):
+            return self.label(self.key(project_dir))
+        if self.labels is not None and project_dir in self.labels:
+            return self.labels[project_dir]
+        return self._own_label(project_dir)
+
+    def path(self, project_dir: str) -> str:
+        """The folder's full path for a tooltip or a side column ("~" for home), or
+        the folder name when no cwd explains it; scratch keys name their project's."""
+        if project_dir.startswith("temporary (") and project_dir.endswith(")"):
+            return "/tmp/... for " + self.path(project_dir[len("temporary (") : -1])
+        if project_dir == TEMPORARY_LABEL:
+            return "/tmp"
+        if is_temporary(project_dir) and not self.is_openclaw(project_dir):
+            return self.path(self.key(project_dir))
+        known = self.paths.get(project_dir)
+        return _home_path(known, self.home) if known else project_dir
 
 
 @dataclass(frozen=True, slots=True)

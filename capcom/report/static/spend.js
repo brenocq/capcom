@@ -3,7 +3,7 @@
 
 import {
   h, api, usd, tokens, pct, seg, legend, empty, errorBox, setQuery, monthDay, localDate, dayName, hm,
-  outputUsd, estimateNote, SERIES, OTHER_COLOR, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor,
+  outputUsd, estimateNote, lowerMark, SERIES, OTHER_COLOR, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor,
   spikeText, spikeHref,
 } from './lib.js';
 import { bandChart, dayBars, heatmap, heatScale } from './charts.js';
@@ -100,7 +100,7 @@ export async function renderSpend(main, r) {
   if (d.cumulative && d.cumulative.times.length) {
     const c = d.cumulative;
     const members = c.members.map((m, i) => ({ ...m, label: memberLabel(m, group), color: memberColor(m, i, group), values: c.values[i] }));
-    head.append(legend(members.map((m) => ({ label: m.label, color: m.color, value: usd(m.final, m.final >= 100 ? 0 : 2) })), usd(t.usd, t.usd >= 100 ? 0 : 2)));
+    head.append(legend(members.map((m) => ({ label: m.label, color: m.color, value: (group === 'category' && m.key === 'output' ? lowerMark(t) : '') + usd(m.final, m.final >= 100 ? 0 : 2) })), lowerMark(t) + usd(t.usd, t.usd >= 100 ? 0 : 2)));
     picked = pickSpikes(d.spikes, since.getTime(), until.getTime());
     cum.append(bandChart({ times: c.times, members, total: c.total, start: since.getTime(), end: until.getTime(), height: 340, left: 52, marks: spikeMarks(picked, days) }));
   } else if (d.cumulative) {

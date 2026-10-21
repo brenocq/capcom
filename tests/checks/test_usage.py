@@ -277,6 +277,8 @@ def test_the_view_prints_ranked_findings_with_their_change(tmp_path: Path) -> No
     assert "claude.ai connectors in sessions that never use them" in text
     assert "ENABLE_CLAUDEAI_MCP_SERVERS" in text
     assert "/week" in text
+    # the total the website shows, worded the same way
+    assert "Together: up to $" in text and "that don't overlap" in text
 
 
 def test_the_view_says_so_when_the_index_is_empty(tmp_path: Path) -> None:

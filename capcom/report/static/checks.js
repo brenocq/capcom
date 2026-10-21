@@ -23,13 +23,13 @@ export async function renderChecks(main, r) {
   }
   const t = d.total;
   if (t) {
-    const label = t.all ? (d.findings.length === 1 ? 'The one finding' : `All ${t.findings} together`) : `${t.findings} findings that count separate dollars`;
-    head.insertBefore(h('div.totalbox', null,
-      h('span.label', { text: label }),
+    // the same line as `capcom checks` prints: a total only over findings that count separate dollars
+    head.insertBefore(h('div.totalbox', { title: t.text },
+      h('span.label', { text: totalLabel(t) }),
       h('span.big', null, 'up to ' + usd(t.usd_per_week, 0), h('small', { text: ' a week' }))), head.lastChild);
   }
   if (d.overlapping) {
-    main.append(h('p.notice', { text: 'Some of these savings count the same dollars: a long context and the late compaction that ends it, say. Each saving is an “up to” on its own, and overlapping ones are never added together' + (t && !t.all ? '; the total above counts only findings that do not overlap.' : '.') }));
+    main.append(h('p.notice', { text: 'Some of these savings count the same dollars: a long context and the late compaction that ends it, say. Each saving is an “up to” on its own; the total counts each dollar once, over the findings that do not overlap.' }));
   }
   // the largest in full; the small ones as rows that open to the same content
   const big = d.findings.filter((f, i) => i < FULL && f.saving_usd_per_week >= 1);
@@ -41,7 +41,7 @@ export async function renderChecks(main, r) {
       rest.map((f) => h('details', null,
         h('summary', null,
           h('span.n', { text: String(f.n) }),
-          h('span.mtext', null, h('b', { text: f.title }), f.scope && f.scope !== 'all' ? h('span.note', { text: ' · ' + (f.scope_label || f.scope) }) : null,
+          h('span.mtext', null, h('b', { text: f.title }), f.scope && f.scope !== 'all' ? h('span.note', { text: ' · ' + (f.scope_label || f.scope), title: f.scope_path || null }) : null,
             h('span.note.block', { text: f.summary })),
           h('span.save.small', { text: 'up to ' + usd(f.saving_usd_per_week, 2) + '/wk' })),
         body(f)))));
@@ -50,12 +50,19 @@ export async function renderChecks(main, r) {
 
 const FULL = 8;  // findings shown in full; the rest as rows
 
+// "across 4 findings that don't overlap (of 5)", worded as in `capcom checks`
+export function totalLabel(t) {
+  const n = `${t.findings} finding${t.findings === 1 ? '' : 's'}`;
+  if (t.findings === 1 && t.all) return 'Across the one finding';
+  return `Across ${n} that don't overlap` + (t.all ? '' : ` (of ${t.of})`);
+}
+
 function card(f) {
   const box = h('section.card.check');
   box.append(h('div.chead', null,
     h('span.n', { text: String(f.n) }),
     h('div.ctext', null,
-      h('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;align-items:baseline' }, h('h2', { text: f.title }), f.scope && f.scope !== 'all' ? h('span.chip', { text: f.scope_label || f.scope }) : null),
+      h('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;align-items:baseline' }, h('h2', { text: f.title }), f.scope && f.scope !== 'all' ? h('span.chip', { text: f.scope_label || f.scope, title: f.scope_path || null }) : null),
       h('p.para', { text: f.summary })),
     h('span.save', { title: 'Estimated at this window’s pace' }, h('small', { text: 'up to ' }), usd(f.saving_usd_per_week, f.saving_usd_per_week < 10 ? 2 : 0) + '/wk')));
   box.append(body(f));

@@ -29,12 +29,22 @@ from capcom.report.tally import (
     PAUSE_SECONDS,
     Tally,
     Window,
+    counted_findings,
+    finding_overlaps,
     iso,
     ms,
     project_display,
     project_names,
+    savings_total,
 )
-from capcom.timeline.groups import OPENCLAW, TEMPORARY, folder_name
+from capcom.timeline.groups import (
+    OPENCLAW,
+    OPENCLAW_ALL,
+    TEMPORARY,
+    TEMPORARY_LABEL,
+    ProjectNames,
+    folder_name,
+)
 from capcom.types import (
     AgentInfo,
     CauseKind,
@@ -125,6 +135,12 @@ class Context:
         root = self.openclaw_root or load_config().openclaw_root
         return folder_name(root)
 
+    def names(self, infos: Mapping[str, SessionInfo] | None = None) -> ProjectNames:
+        """The project display rule (capcom.timeline.groups.ProjectNames), from the
+        cwds of every session (a temporary folder names its project)."""
+        sessions = (infos or self.infos()).values()
+        return project_names(sessions, self.openclaw_root or load_config().openclaw_root)
+
     def infos(self) -> dict[str, SessionInfo]:
         return {s.session_id: s for s in self.index.sessions()}
 
@@ -145,10 +161,9 @@ def _int(query: Mapping[str, str], name: str, default: int, lo: int, hi: int) ->
     return value
 
 
-def _window(ctx: Context, names: Mapping[str, str] | None = None) -> Window:
+def _window(ctx: Context, names: ProjectNames | None = None) -> Window:
     infos = ctx.infos()
-    names = names or project_names(infos.values())
-    return Window(ctx.table, infos, ctx.agents(), names, ctx.openclaw_dir)
+    return Window(ctx.table, infos, ctx.agents(), names or ctx.names(infos))
 
 
 # --------------------------------------------------------------------------- series
@@ -167,9 +182,10 @@ def _fold(series: Sequence[Series], keep: Sequence[str]) -> list[tuple[str, str,
     return out
 
 
-def _tidy(series: list[Series], by: GroupBy, names: Mapping[str, str]) -> list[Series]:
+def _tidy(series: list[Series], by: GroupBy, names: ProjectNames) -> list[Series]:
     """Series named like the rest of the site: web tools counted with output (as in
-    every total), projects by the cwd's last part. Largest final value first, with
+    every total), projects by their display name (OpenClaw's folders as one series,
+    labeled so). Largest final value first, with
     "other" last."""
     if by is GroupBy.CATEGORY:
         web = next((s for s in series if s.key == "web"), None)
@@ -185,9 +201,9 @@ def _tidy(series: list[Series], by: GroupBy, names: Mapping[str, str]) -> list[S
                 ]
             series.sort(key=lambda s: (s.key == OTHER, -sum(s.values) if s.values else 0.0))
     elif by is GroupBy.PROJECT:
-        labels = {TEMPORARY: "temporary folders", OPENCLAW: OPENCLAW}
+        labels = {TEMPORARY: "temporary folders", OPENCLAW: OPENCLAW_ALL, OTHER: OTHER}
         series = [
-            Series(s.key, labels.get(s.key) or names.get(s.key) or s.label, s.times, s.values)
+            Series(s.key, labels.get(s.key) or names.label(s.key), s.times, s.values)
             for s in series
         ]
     return series
@@ -293,20 +309,27 @@ def overview(ctx: Context) -> dict[str, Any]:
     prev_since = ctx.midnight(7)
     hour_ago = ctx.now - timedelta(hours=1)
     infos = ctx.infos()
-    names = project_names(infos.values())
+    names = ctx.names(infos)
     week, today = _window(ctx, names), _window(ctx, names)
     prev_usd = 0.0
+    prev_same_hour = 0.0  # the previous 7 days, each up to now's local time of day
+    clock = ctx.local(ctx.now).time()
     last_hour = Tally()
     for req in ctx.index.requests(since=prev_since):
         if req.timestamp < week_since:
             if not is_placeholder(req.model):
-                prev_usd += price(req, ctx.table).total
+                usd = price(req, ctx.table).total
+                prev_usd += usd
+                if ctx.local(req.timestamp).time() < clock:
+                    prev_same_hour += usd
             continue
         cost = week.add(req)
         if cost is None:
             continue
         if req.timestamp < today_since:
             prev_usd += cost.total
+            if ctx.local(req.timestamp).time() < clock:
+                prev_same_hour += cost.total
             continue
         today.add(req)
         if req.timestamp >= hour_ago:
@@ -356,6 +379,7 @@ def overview(ctx: Context) -> dict[str, Any]:
             },
         }
 
+    elapsed = max((ctx.now - week_since).total_seconds(), 1.0)  # 6 full days + today so far
     running = sum(
         1
         for s in infos.values()
@@ -365,8 +389,14 @@ def overview(ctx: Context) -> dict[str, Any]:
         "now": iso(ctx.now, ctx.tz),
         "running_sessions": running,
         "today": block(today, today_since),
-        "week": block(week, week_since) | {"days": 7},
-        "previous_7_days": {"since": iso(prev_since, ctx.tz), "daily_average_usd": prev_usd / 7},
+        "week": block(week, week_since)
+        | {"days": 7, "full_days": 6, "elapsed_days": round(elapsed / 86400, 4)},
+        "previous_7_days": {
+            "since": iso(prev_since, ctx.tz),
+            "daily_average_usd": prev_usd / 7,
+            "same_hour_average_usd": round(prev_same_hour / 7, 6),
+            "same_hour": clock.strftime("%H:%M"),
+        },
         "spending_now": {"usd_last_hour": round(last_hour.usd, 6), "spark": spark_json},
         "cumulative_today": None if cum is None else _cumulative_json(cum, step, ctx.now),
         "spikes_today": marks,
@@ -531,9 +561,8 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
     if info is None and not reqs:
         raise ApiError(404, "not_found", "no such session")
     agent_infos = {a.agent_id: a for a in ctx.index.agents(session_id=session_id)}
-    names = project_names(ctx.index.sessions())  # a temporary folder names its project
-    openclaw = ctx.openclaw_dir
-    w = Window(ctx.table, {info.session_id: info} if info else {}, agent_infos, names, openclaw)
+    names = ctx.names()  # a temporary folder names its project
+    w = Window(ctx.table, {info.session_id: info} if info else {}, agent_infos, names)
 
     agent_order: list[str] = []
     agent_pos: dict[str, int] = {}
@@ -654,7 +683,8 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
         "session": {
             "session_id": session_id,
             "title": info.title if info else None,
-            "project": project_display(project_dir, names, openclaw),
+            "project": project_display(project_dir, names),
+            "project_path": names.path(project_dir),
             "project_dir": project_dir,
             "cwd": info.cwd if info else None,
             "git_branch": info.git_branch if info else None,
@@ -735,7 +765,7 @@ def _thin_keep_ids(found: Sequence[Spike]) -> set[str]:
 
 
 def _session_spikes(
-    ctx: Context, found: Sequence[Spike] | None, info: SessionInfo | None, names: Mapping[str, str]
+    ctx: Context, found: Sequence[Spike] | None, info: SessionInfo | None, names: ProjectNames
 ) -> dict[str, Any] | None:
     """A session's spikes (the MAX_SESSION_SPIKES largest) with their causes; None
     when capcom.timeline is not available, `explained` false when capcom.explain
@@ -837,9 +867,8 @@ def _price_total(ctx: Context, req: Request) -> float:
 def live(ctx: Context) -> dict[str, Any]:
     since = ctx.now - LIVE_WINDOW
     infos = ctx.infos()
-    names = project_names(infos.values())
-    openclaw = ctx.openclaw_dir
-    w = Window(ctx.table, infos, {}, names, openclaw)
+    names = ctx.names(infos)
+    w = Window(ctx.table, infos, {}, names)
     for req in ctx.index.requests(since=since):
         w.add(req)
     ids = set(w.sessions)
@@ -853,7 +882,7 @@ def live(ctx: Context) -> dict[str, Any]:
             {
                 "session_id": sid,
                 "title": info.title if info else None,
-                "project": project_display(project_dir, names, openclaw),
+                "project": project_display(project_dir, names),
                 "agents_active": len(row.agents) if row else 0,
                 "usd_last_10_min": round(usd, 6),
                 "usd_per_hour": round(usd * 3600 / LIVE_WINDOW.total_seconds(), 6),
@@ -944,7 +973,7 @@ def _spike_json(
     causes: Sequence[Explanation] | None,
     infos: Mapping[str, SessionInfo],
     agents: Mapping[str, AgentInfo],
-    names: Mapping[str, str],
+    names: ProjectNames,
 ) -> dict[str, Any]:
     info = infos.get(sp.session_id) if sp.session_id else None
     agent = agents.get(sp.agent_id) if sp.agent_id else None
@@ -958,7 +987,7 @@ def _spike_json(
         "agent_id": sp.agent_id,
         "agent_type": agent.agent_type if agent else None,
         "title": info.title if info else None,
-        "project": project_display(info.project_dir, names, ctx.openclaw_dir) if info else None,
+        "project": project_display(info.project_dir, names) if info else None,
         "requests": len(sp.message_ids),
         "cost_usd": round(sp.cost_usd, 6),
         "baseline_usd": round(sp.baseline_usd, 6),
@@ -1025,7 +1054,7 @@ def spikes(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
         shown += [sp for sp in found if spike_key(sp) == wanted][:1]
     shown.sort(key=lambda sp: (sp.start, sp.session_id or "", sp.agent_id or ""))
     infos = ctx.infos()
-    names = project_names(infos.values())
+    names = ctx.names(infos)
     agents = ctx.agents()
     items = []
     for i, sp in enumerate(shown):
@@ -1068,27 +1097,16 @@ def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     found = ctx.analysis.checks(ctx.index, ctx.table, since, ctx.now)
     kinds = {f.kind for f in found}
     infos = ctx.infos()
-    names = project_names(infos.values())
+    names = ctx.names(infos)
     dirs = {info.project_dir for info in infos.values()}
-
-    def same_place(a: str, b: str) -> bool:
-        # two project folders are apart; "all" or an agent type may cover any folder
-        return a == b or a not in dirs or b not in dirs
-
-    kept: list[tuple[str, str]] = []  # (kind, scope) of the findings counted so far
-    counted: list[bool] = []
-    for f in found:  # largest first: keep each that counts dollars none kept so far does
-        over = _overlaps(f)
-        ok = not any(k in over and same_place(sc, f.scope) for k, sc in kept)
-        if ok:
-            kept.append((f.kind, f.scope))
-        counted.append(ok)
-    overlapping = any(_overlaps(f) for f in found)
+    counted = counted_findings(found, dirs)
+    overlapping = any(finding_overlaps(f) for f in found)
     calls = _subagent_calls(ctx, since) if "one_command_subagents" in kinds else {}
     comps = _compactions(ctx, since) if "late_compactions" in kinds else {}
     rows = []
     for i, f in enumerate(found):
-        label = project_display(f.scope, names, ctx.openclaw_dir) if f.scope in dirs else f.scope
+        named = f.scope in dirs or f.scope.startswith("temporary (") or f.scope == TEMPORARY_LABEL
+        label = project_display(f.scope, names) if named else f.scope
         rows.append(
             {
                 "n": i + 1,
@@ -1096,25 +1114,19 @@ def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
                 "title": f.title,
                 "scope": f.scope,
                 "scope_label": label,
+                "scope_path": names.path(f.scope) if named else None,
                 "summary": f.summary,
                 "saving_usd_per_week": round(f.saving_usd_per_week, 6),
                 "advice": f.advice,
                 "change": f.change,
                 "evidence": [_evidence_json(ev, ctx) for ev in f.evidence],
                 "metrics": {k: _plain(v) for k, v in f.metrics.items()},
-                "overlaps": list(_overlaps(f)),
+                "overlaps": list(finding_overlaps(f)),
                 "counted": counted[i],
                 "visual": _visual(f, calls, comps),
             }
         )
-    total = None
-    if found:
-        picked = [f for f, ok in zip(found, counted, strict=True) if ok]
-        total = {
-            "usd_per_week": round(sum(f.saving_usd_per_week for f in picked), 6),
-            "findings": len(picked),
-            "all": len(picked) == len(found),
-        }
+    total = savings_total(found, dirs)
     return {
         "days": days,
         "since": iso(since, ctx.tz),
@@ -1123,13 +1135,6 @@ def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
         "overlapping": overlapping,
         "total": total,
     }
-
-
-def _overlaps(f: Finding) -> tuple[str, ...]:
-    raw = f.metrics.get("overlaps")
-    if isinstance(raw, str):
-        return (raw,)
-    return tuple(raw) if isinstance(raw, tuple | list) else ()
 
 
 def _subagent_calls(ctx: Context, since: datetime) -> dict[str, list[int]]:

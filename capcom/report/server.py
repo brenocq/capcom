@@ -6,6 +6,11 @@ page cannot reach it through DNS rebinding). Each API request opens the index
 read-only and closes it when done. Pages are static files from `static/`; the API
 is in `api.py` and documented in `API.md`.
 
+API replies are cached per scan generation (`ApiCache`): the key holds the index
+files' sizes and modification times and the scanner's count, so a new scan
+invalidates every entry; entries also expire after a few minutes, since some
+numbers move with the clock alone, and the cache is bounded in bytes.
+
 The index stays fresh through a `Scanner`: an incremental `run_scan` at start and
 then every minute, in one background thread. Only that thread writes the index
 (SQLite's WAL lets the handlers read while it does), and a lock makes sure two scans
@@ -18,11 +23,13 @@ import contextlib
 import importlib
 import io
 import json
+import os
 import sqlite3
 import sys
 import threading
 import traceback
 import webbrowser
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, tzinfo
@@ -67,6 +74,78 @@ NO_INDEX_PAGE = """<!doctype html>
 """
 
 
+CACHE_BYTES = 32 * 1024 * 1024  # encoded replies kept, all endpoints together
+CACHE_TTL = 300.0  # seconds: "today", "last hour" and "running" move with the clock
+UNCACHED = {"status", "live"}  # cheap, and about the current minute
+
+
+class ApiCache:
+    """Encoded API replies by (generation, endpoint, arguments), least recently used
+    first out once they pass `max_bytes`; an entry older than `ttl` seconds of the
+    site's clock is computed again. Thread-safe."""
+
+    def __init__(self, max_bytes: int = CACHE_BYTES, ttl: float = CACHE_TTL) -> None:
+        self.max_bytes = max_bytes
+        self.ttl = ttl
+        self._entries: OrderedDict[tuple[Any, ...], tuple[float, bytes]] = OrderedDict()
+        self._bytes = 0
+        self._lock = threading.Lock()
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: tuple[Any, ...], now: float) -> bytes | None:
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None or now - entry[0] > self.ttl or now < entry[0]:
+                if entry is not None:
+                    self._drop(key)
+                self.misses += 1
+                return None
+            self._entries.move_to_end(key)
+            self.hits += 1
+            return entry[1]
+
+    def put(self, key: tuple[Any, ...], now: float, body: bytes) -> None:
+        if len(body) > self.max_bytes // 4:
+            return  # one reply never crowds out the rest
+        with self._lock:
+            if key in self._entries:
+                self._drop(key)
+            # entries of an older generation are dead: drop them first
+            for old in [k for k in self._entries if k[0] != key[0]]:
+                self._drop(old)
+            self._entries[key] = (now, body)
+            self._bytes += len(body)
+            while self._bytes > self.max_bytes:
+                self._drop(next(iter(self._entries)))
+
+    def _drop(self, key: tuple[Any, ...]) -> None:
+        _, body = self._entries.pop(key)
+        self._bytes -= len(body)
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+
+def generation(index_path: Path, scanner: Scanner | None = None) -> tuple[int, ...]:
+    """A key that changes whenever the index does: the size and modification time of
+    index.sqlite and its WAL (writes land there until a checkpoint), and the
+    scanner's count of finished scans."""
+    out: list[int] = [scanner.scans if scanner is not None else -1]
+    for p in (index_path, index_path.with_name(index_path.name + "-wal")):
+        try:
+            st = os.stat(p)
+        except OSError:
+            st = None
+        # an empty WAL is no write: the first reader creates one, and a checkpoint
+        # that empties it has already changed the main file
+        if st is None or st.st_size == 0:
+            out += [-1, -1]
+        else:
+            out += [st.st_size, st.st_mtime_ns]
+    return tuple(out)
+
+
 @dataclass(slots=True)
 class Site:
     """What a request handler needs: where the index is, the prices, the analysis
@@ -79,6 +158,7 @@ class Site:
     tz: tzinfo | None = None
     openclaw_root: Path | None = None
     scanner: Scanner | None = None
+    cache: ApiCache | None = field(default_factory=ApiCache)  # None: no caching
 
 
 class Scanner:
@@ -277,6 +357,17 @@ class Handler(BaseHTTPRequestHandler):
         if name not in ENDPOINTS or len(parts) != (2 if name == "session" else 1):
             self._error(HTTPStatus.NOT_FOUND, "not_found", "no such endpoint")
             return
+        site = self.site
+        key: tuple[Any, ...] | None = None
+        now = site.clock()
+        if site.cache is not None and name not in UNCACHED:
+            gen = generation(site.index_path, site.scanner)
+            today = now.astimezone(site.tz).date().isoformat()  # the windows start at midnight
+            key = (gen, today, name, tuple(parts[1:]), tuple(sorted(query.items())))
+            hit = site.cache.get(key, now.timestamp())
+            if hit is not None:
+                self._send(HTTPStatus.OK, hit, TYPES[".json"])
+                return
         try:
             index = _open(self.site)
         except IndexMissing as err:
@@ -291,14 +382,17 @@ class Handler(BaseHTTPRequestHandler):
                 index=index,
                 table=self.site.table,
                 analysis=self.site.analysis,
-                now=self.site.clock(),
+                now=now,
                 tz=self.site.tz,
                 index_path=self.site.index_path,
                 openclaw_root=self.site.openclaw_root,
                 scanning=self.site.scanner is not None and self.site.scanner.first_scan,
             )
             payload = ENDPOINTS[name](ctx, parts[1] if len(parts) == 2 else "", query)
-            self._json(HTTPStatus.OK, payload)
+            body = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode()
+            if key is not None and site.cache is not None and not ctx.scanning:
+                site.cache.put(key, now.timestamp(), body)
+            self._send(HTTPStatus.OK, body, TYPES[".json"])
         except api.ApiError as err:
             self._error(err.status, err.code, err.message)
         except Unavailable as err:
