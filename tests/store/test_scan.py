@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -10,7 +12,7 @@ import pytest
 from capcom.config import Config
 from capcom.store.index import SqliteIndex, open_index
 from capcom.store.scan import run_scan
-from capcom.types import ScanStats
+from capcom.types import Batch, LogFile, ScanStats
 from tests.store.fake_source import FakeSource, write_lines
 
 
@@ -210,3 +212,88 @@ def test_default_source_is_the_claude_code_adapter(
     monkeypatch.setitem(sys.modules, "capcom.sources.claude_code", fake)
     write_lines(main_log(config), {"t": "req", "id": "m1", "ts": 1})
     assert run_scan(config, quiet=True).records == 1
+
+
+class FailingSource(FakeSource):
+    """Raises on the files whose name is in `bad`."""
+
+    def __init__(self, bad: set[str]) -> None:
+        super().__init__()
+        self.bad = bad
+
+    def parse(self, log: LogFile, start: int) -> Iterator[Batch]:
+        if log.path.name in self.bad:
+            raise RuntimeError("synthetic parser bug")
+        return super().parse(log, start)
+
+
+def test_failed_file_is_reported_and_the_scan_goes_on(
+    config: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_lines(main_log(config, "s1"), {"t": "req", "id": "m1", "ts": 1})
+    write_lines(main_log(config, "s2"), {"t": "req", "id": "n1", "ts": 2})
+    stats = run_scan(config, source=FailingSource({"s1.jsonl"}))
+    err = capsys.readouterr().err
+    assert "failed on" in err and "s1.jsonl" in err and "RuntimeError" in err
+    assert "2/2 files" in err and "1 failed" in err
+    assert stats.records == 1
+    assert outputs(config) == [("n1", 0)]
+    assert scan(config).records == 1  # retried on the next scan
+    assert outputs(config) == [("m1", 0), ("n1", 0)]
+
+
+def test_in_place_rewrite_with_the_same_inode_is_read_from_zero(config: Config) -> None:
+    log = main_log(config)
+    write_lines(log, {"t": "req", "id": "m1", "ts": 1}, {"t": "req", "id": "m2", "ts": 2})
+    scan(config)
+    inode, size = log.stat().st_ino, log.stat().st_size
+    with log.open("r+b") as f:  # same inode, same length head, other content
+        f.write(log.read_bytes().replace(b'"m1"', b'"x1"').replace(b'"m2"', b'"x2"'))
+    write_lines(log, {"t": "req", "id": "x3", "ts": 3})
+    assert (log.stat().st_ino, log.stat().st_size > size) == (inode, True)
+    stats = scan(config)
+    assert (stats.files_reset, stats.records) == (1, 3)
+    assert outputs(config) == [("x1", 0), ("x2", 0), ("x3", 0)]
+    write_lines(log, {"t": "req", "id": "x4", "ts": 4})  # a plain append is no reset
+    assert scan(config).files_reset == 0
+
+
+def test_short_file_head_grows_without_a_reset(config: Config) -> None:
+    log = main_log(config)
+    write_lines(log, {"t": "req", "id": "m1", "ts": 1})
+    scan(config)
+    for i in range(2, 80):  # past the hashed head, a few lines per scan
+        write_lines(log, {"t": "req", "id": f"m{i}", "ts": i, "pad": "y" * 100})
+        if i % 10 == 0:
+            assert scan(config).files_reset == 0
+    assert scan(config).files_reset == 0
+    assert len(outputs(config)) == 79
+
+
+def test_meta_change_alone_is_picked_up(config: Config) -> None:
+    log = sub_log(config, "a1")
+    write_lines(log, {"t": "req", "id": "m1", "ts": 1})
+    meta = log.with_name("agent-a1.meta.json")
+    meta.write_text(json.dumps({"agentType": "scout", "finished": False}))
+    scan(config)
+    offset = log.stat().st_size
+    meta.write_text(json.dumps({"agentType": "scout", "finished": True}))
+    st = meta.stat()
+    os.utime(meta, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    source = FakeSource()
+    stats = scan(config, source)
+    assert source.calls == [(log, offset)]
+    assert (stats.files_read, stats.files_reset, stats.records) == (0, 0, 1)
+    with index(config) as ix:
+        assert [(a.agent_type, a.finished) for a in ix.agents()] == [("scout", True)]
+    source = FakeSource()
+    scan(config, source)
+    assert source.calls == []
+
+
+def test_run_scan_refuses_an_index_inside_the_logs(tmp_path: Path) -> None:
+    claude = tmp_path / ".claude"
+    config = Config(claude, tmp_path / ".openclaw", claude / "capcom-cache")
+    with pytest.raises(ValueError, match="log folder"):
+        run_scan(config, quiet=True, source=FakeSource())
+    assert not claude.exists()

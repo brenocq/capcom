@@ -221,11 +221,96 @@ def test_forget_file(ix: SqliteIndex) -> None:
 
 
 def test_apply_is_one_transaction(ix: SqliteIndex) -> None:
-    bad = Batch([req("m1", 1), "not a record"], 10)  # type: ignore[list-item]
-    with pytest.raises(TypeError):
-        ix.apply(A, bad, FileState(A.path, 1, 10, 1, 10))
-    assert list(ix.requests()) == []
-    assert ix.file_state(A.path) is None
+    put(ix, A, req("m0", 0), offset=5)
+    # The Request is written, then the Event breaks a NOT NULL constraint: roll back.
+    broken = Event(EventKind.TURN, None, None, at(1), "k1")  # type: ignore[arg-type]
+    with pytest.raises(sqlite3.IntegrityError):
+        ix.apply(A, Batch([req("m1", 1), broken], 10), FileState(A.path, 1, 10, 1, 10))
+    assert [r.message_id for r in ix.requests()] == ["m0"]
+    assert list(ix.events()) == []
+    state = ix.file_state(A.path)
+    assert state is not None and state.offset == 5
+    put(ix, A, req("m1", 1), offset=10)  # the connection is usable afterwards
+    assert len(list(ix.requests())) == 2
+
+
+def test_session_fields_merge_by_their_own_sequence(tmp_path: Path) -> None:
+    path = tmp_path / "index.sqlite"
+    with open_index(path) as ix:
+        put(ix, A, SessionInfo("s1", "p", title="from A", cwd="/a"))
+        put(ix, B, SessionInfo("s1", "p", title="from B"))
+        # A later write from A without a title must not bring A's old title back.
+        put(ix, A, SessionInfo("s1", "p", version="2.1.306"))
+        (s1,) = ix.sessions()
+        assert (s1.title, s1.cwd, s1.version) == ("from B", "/a", "2.1.306")
+    with open_index(path) as ix:  # the sequence is stored, not taken from the clock
+        put(ix, A, SessionInfo("s1", "p", title="from A again"))
+        (s1,) = ix.sessions()
+        assert s1.title == "from A again"
+
+
+def test_agent_fields_merge_by_their_own_sequence(ix: SqliteIndex) -> None:
+    put(ix, A, AgentInfo("a1", "s1", agent_type="scout", finished=False))
+    put(ix, B, AgentInfo("a1", "s1", finished=True))
+    put(ix, A, AgentInfo("a1", "s1", description="look"))
+    assert list(ix.agents()) == [AgentInfo("a1", "s1", "scout", "look", finished=True)]
+
+
+def test_last_cost_state_prefers_the_main_log(ix: SqliteIndex) -> None:
+    put(ix, A, CostState("s1", 100, 1.0), CostState("s1", 200, 2.0))
+    put(ix, B, CostState("s1", 99_999, 0.5))  # a subagent file: larger offsets, not later
+    put(ix, B, CostState("s9", 10, 0.1), CostState("s9", 20, 0.2))  # no main log for s9
+    got = {c.session_id: c for c in ix.last_cost_states()}
+    assert (got["s1"].offset, got["s1"].total_cost_usd) == (200, 2.0)
+    assert got["s9"].total_cost_usd == 0.2
+
+
+def test_tool_calls_union_and_estimated_output(ix: SqliteIndex) -> None:
+    t1, t2, t3 = (
+        ToolCall("tu1", "Read", "/a"),
+        ToolCall("tu2", "Bash", "ls"),
+        ToolCall("tu3", "Grep"),
+    )
+    put(ix, A, req("m1", 1, out=900, output_estimated=True, tool_calls=(t1, t2)))
+    # A later scan sees the rest of the reply: fewer tool calls, a smaller estimate.
+    put(ix, A, req("m1", 1, out=300, output_estimated=True, tool_calls=(t2, t3)))
+    (r,) = ix.requests()
+    assert r.tool_calls == (t1, t2, t3)
+    assert (r.usage.output, r.output_estimated) == (900, True)
+    put(ix, A, req("m1", 1, out=120, tool_calls=()))  # a logged, final count wins as is
+    (r,) = ix.requests()
+    assert (r.usage.output, r.output_estimated, r.tool_calls) == (120, False, (t1, t2, t3))
+    # The same within one batch.
+    put(
+        ix,
+        C,
+        req("n1", 2, out=50, output_estimated=True, tool_calls=(t1,)),
+        req("n1", 2, out=10, output_estimated=True, tool_calls=(t2,)),
+    )
+    n1 = next(r for r in ix.requests() if r.message_id == "n1")
+    assert (n1.usage.output, n1.tool_calls) == (50, (t1, t2))
+
+
+def test_naive_datetimes_are_refused(ix: SqliteIndex) -> None:
+    naive = at(1).replace(tzinfo=None)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        ix.requests(since=naive)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        ix.events(until=naive)
+
+
+def test_index_inside_log_folders_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    monkeypatch.setenv("OPENCLAW_STATE_DIR", str(tmp_path / "openclaw"))
+    for root in ("claude", "openclaw"):
+        path = tmp_path / root / "cache" / "index.sqlite"
+        with pytest.raises(ValueError, match="log folder"):
+            open_index(path)
+        with pytest.raises(ValueError, match="log folder"):
+            open_index(path, readonly=True)
+        assert not (tmp_path / root).exists()
 
 
 def test_readonly(tmp_path: Path) -> None:

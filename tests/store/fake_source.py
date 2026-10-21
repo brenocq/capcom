@@ -124,7 +124,8 @@ class FakeSource:
             for path in sorted(project.glob("*/subagents/agent-*.jsonl")):
                 session = path.parent.parent.name
                 agent = path.stem.removeprefix("agent-")
-                yield LogFile(path, LogKind.SUBAGENT, project.name, session, agent)
+                meta = path.with_name(f"agent-{agent}.meta.json")
+                yield LogFile(path, LogKind.SUBAGENT, project.name, session, agent, meta)
 
     def parse(self, log: LogFile, start: int) -> Iterator[Batch]:
         self.calls.append((log.path, start))
@@ -132,6 +133,18 @@ class FakeSource:
             f.seek(start)
             pos = start
             batch = Batch(records=[], end_offset=start)
+            if log.meta_path is not None and log.meta_path.is_file():
+                # Like the Claude Code adapter: the meta is read again on every call.
+                meta = json.loads(log.meta_path.read_text())
+                batch.records.append(
+                    AgentInfo(
+                        agent_id=log.agent_id or "",
+                        session_id=log.session_id,
+                        agent_type=meta.get("agentType"),
+                        description=meta.get("description"),
+                        finished=meta.get("finished"),
+                    )
+                )
             for line in f:
                 if not line.endswith(b"\n"):
                     break  # partial last line: read it next time
@@ -150,7 +163,7 @@ class FakeSource:
                 if batch.lines >= self.batch_lines:
                     yield batch
                     batch = Batch(records=[], end_offset=pos)
-            if batch.lines:
+            if batch.lines or batch.records:
                 yield batch
 
 
