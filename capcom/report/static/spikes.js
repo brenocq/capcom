@@ -89,6 +89,7 @@ export async function renderSpikes(main, r) {
       h('span', { class: txt.unexplained || !it.cause ? 'n gray' : 'n', text: String(it.n) }),
       h('span.body', null,
         h('span.row', null, h('span.t', { text: txt.title }), h('span.plus', { text: '+' + usd(it.excess_usd) })),
+        txt.rest ? h('span.rest', { text: txt.rest }) : null,
         h('span.meta', null, projectChip(it), h('span', { text: `${when(it.start)} · ${where(it)}` }))));
   }));
   main.append(h('div.row-wrap', { style: 'align-items:flex-start' }, list, detail(sel)));
@@ -102,7 +103,9 @@ export async function renderSpikes(main, r) {
 function detail(it) {
   const txt = spikeText(it);
   const causes = it.explanations || [];
-  const top = causes.length ? causes.reduce((a, b) => (b.excess_usd > a.excess_usd ? b : a)) : null;
+  const named = causes.filter((c) => c.cause !== 'unexplained');
+  const pool = named.length ? named : causes;
+  const top = pool.length ? pool.reduce((a, b) => (b.excess_usd > a.excess_usd ? b : a)) : null;
   const conf = top ? top.confidence : null;
   const box = h('section.card.detail');
   box.append(h('div.tags', null,
@@ -112,6 +115,7 @@ function detail(it) {
     it.scope === 'session' ? h('span.tag', { text: 'session-wide', title: 'Found over all the threads of the session together, where a fan-out of subagents shows.' }) : null,
     h('span.note', { text: `${when(it.start)} · ${where(it)}` })));
   box.append(h('div.split', { style: 'align-items:baseline' }, h('h2.big2', { text: txt.title }), h('span.excess', { text: '+' + usd(it.excess_usd) })));
+  if (txt.rest) box.append(h('p.note', { style: 'margin:0', text: txt.rest[0].toUpperCase() + txt.rest.slice(1) + '.' }));
   const body = top && top.summary ? top.summary
     : `${it.requests} request${it.requests === 1 ? '' : 's'} cost ${usd(it.cost_usd)}, where the usual pace would have spent ${usd(it.baseline_usd)}.`;
   box.append(h('p.para', { text: body }));

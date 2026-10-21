@@ -528,3 +528,49 @@ def test_spike_markers_name_their_project(spiky: Path) -> None:
         _, data, _ = client.get("/api/spend?days=7")
     (mark,) = data["spikes"]["marks"]
     assert mark["project"] == ALPHA and mark["title"] == "Spiky"
+
+
+def _explain_split(named: float, rest: float) -> Any:
+    """A spike `named` parts a cache rebuild and `rest` parts unexplained."""
+
+    def explain(index: Index, table: PriceTable, spikes: Sequence[Spike]) -> list[Explanation]:
+        out = []
+        for sp in spikes:
+            if named:
+                out.append(
+                    Explanation(
+                        sp, CauseKind.IDLE_REWRITE, Confidence.CLEAR, sp.excess_usd * named, "Idle"
+                    )
+                )
+            out.append(
+                Explanation(
+                    sp,
+                    CauseKind.UNEXPLAINED,
+                    Confidence.UNEXPLAINED,
+                    sp.excess_usd * rest,
+                    "The rest of the spike: no rule fits",
+                )
+            )
+        return out
+
+    return explain
+
+
+@pytest.mark.parametrize(
+    ("named", "rest", "headline", "cause", "mostly"),
+    [
+        (0.3, 0.7, "Idle", "idle_rewrite", True),  # a larger rest never heads the row
+        (0.6, 0.4, "Idle", "idle_rewrite", False),
+        (0.0, 1.0, "No rule fits", "unexplained", True),
+    ],
+)
+def test_headline_is_the_largest_named_cause(
+    spiky: Path, named: float, rest: float, headline: str, cause: str, mostly: bool
+) -> None:
+    for client in _client(spiky, _analysis(explain=_explain_split(named, rest))):
+        (item,) = client.get("/api/spikes?days=7")[1]["spikes"]
+        (mark,) = client.get("/api/overview")[1]["spikes_today"]["marks"]
+    for row in (item, mark):
+        assert row["headline"] == headline and row["cause"] == cause
+        assert row["mostly_unexplained"] is mostly
+        assert row["unexplained_usd"] == pytest.approx(rest * row["excess_usd"], abs=1e-5)

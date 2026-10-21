@@ -95,6 +95,7 @@ button { font: inherit; color: inherit; }
 .legend i { width: 16px; height: 3px; border-radius: 2px; display: inline-block; }
 .legend em { font-style: normal; color: var(--muted); }
 .legend .total { font-weight: 600; }
+.legend .total i { width: 8px; height: 8px; border-radius: 999px; }
 .empty { display: flex; flex-direction: column; gap: 6px; justify-content: center; align-items: flex-start; padding: 18px; border: 1px dashed var(--l25); border-radius: 10px; color: var(--muted); font-size: 13px; line-height: 1.45; }
 .empty strong { color: var(--text); font-weight: 600; }
 .error { background: var(--warn-bg); color: var(--warn-text); border-radius: 10px; padding: 12px 16px; }
@@ -123,6 +124,13 @@ button { font: inherit; color: inherit; }
 .guide { position: absolute; top: 0; bottom: 0; border-left: 1px dashed var(--l35); pointer-events: none; }
 .nowline { position: absolute; top: -6px; bottom: 0; border-left: 1px dashed var(--l35); }
 .spikemark { position: absolute; transform: translate(-50%, -135%); width: 26px; height: 26px; border-radius: 999px; background: var(--text); color: var(--inv); font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center; text-decoration: none; box-shadow: 0 0 0 3px var(--card); z-index: 2; }
+.enddot { position: absolute; width: 7px; height: 7px; border-radius: 999px; background: var(--text); transform: translate(-50%, -50%); box-shadow: 0 0 0 2px var(--card); z-index: 1; }
+.endlab { position: absolute; transform: translate(calc(-100% - 6px), calc(-100% - 6px)); font-size: 12px; font-weight: 600; color: var(--text); white-space: nowrap; z-index: 1;
+  text-shadow: 0 0 3px var(--card), 0 0 3px var(--card), 0 0 3px var(--card); }
+.endlab.beside { transform: translate(calc(-100% - 10px), -50%); }
+.endlab.below { transform: translate(calc(-100% - 8px), 8px); }
+.endlab.leftward { transform: translate(8px, calc(-100% - 6px)); }
+.endlab.beside.leftward, .endlab.below.leftward { transform: translate(10px, 8px); }
 .spikemark:hover, .spikemark:focus-visible { background: var(--clay); }
 .spikerow { display: flex; gap: 12px; padding: 12px 0; border-top: 0.5px solid var(--l12); text-decoration: none; color: var(--text); }
 .spikerow .num { flex: 0 0 26px; height: 26px; border-radius: 999px; background: var(--text); color: var(--inv); font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center; }
@@ -294,3 +302,4 @@ button.cause.pick:hover { background: var(--l07); }
 button.cause.pick[aria-pressed="true"] { background: var(--sel); }
 .cause .plabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 560px) { .cause { grid-template-columns: 110px minmax(0, 1fr) 64px; } }
+.spikerow .rest, .spikelist .rest { font-size: 12px; color: var(--muted); }
