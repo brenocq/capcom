@@ -269,7 +269,7 @@ def _spike_marks(
                 "excess_usd": round(sp.excess_usd, 6),
             }
             | _spike_project(sp, infos, names)
-            | _headline(causes.get(sp, ()))
+            | _headline(causes.get(sp, ()), sp.excess_usd)
             for i, sp in enumerate(marks)
         ],
     }
@@ -975,18 +975,28 @@ def _cause_json(e: Explanation, ctx: Context) -> dict[str, Any]:
     }
 
 
-def _headline(causes: Sequence[Explanation]) -> dict[str, Any]:
-    """The main cause of a spike (its largest share) for a marker or a list row."""
+def _headline(causes: Sequence[Explanation], excess_usd: float) -> dict[str, Any]:
+    """The main cause of a spike for a marker or a list row: its largest named cause,
+    never the unexplained rest. That rest is reported apart, with `mostly_unexplained`
+    set when it is more than half the excess; a spike with no named cause is headed
+    "No rule fits"."""
+    rest = sum(e.excess_usd for e in causes if e.cause == CauseKind.UNEXPLAINED)
+    out: dict[str, Any] = {
+        "unexplained_usd": round(rest, 6),
+        "mostly_unexplained": bool(causes) and rest > excess_usd / 2,
+    }
     if not causes:
-        return {"cause": None, "cause_label": None, "confidence": None, "headline": None}
-    top = max(causes, key=lambda e: e.excess_usd)
+        return {"cause": None, "cause_label": None, "confidence": None, "headline": None} | out
+    named = [e for e in causes if e.cause != CauseKind.UNEXPLAINED]
+    top = max(named or causes, key=lambda e: e.excess_usd)
     cause = str(top.cause)
+    label = CAUSE_LABELS.get(cause, cause)
     return {
         "cause": cause,
-        "cause_label": CAUSE_LABELS.get(cause, cause),
+        "cause_label": label,
         "confidence": str(top.confidence),
-        "headline": top.title,
-    }
+        "headline": top.title if named else label,
+    } | out
 
 
 def _spike_project(
@@ -1028,7 +1038,7 @@ def _spike_json(
         "baseline_usd": round(sp.baseline_usd, 6),
         "excess_usd": round(sp.excess_usd, 6),
         "explanations": None if causes is None else [_cause_json(e, ctx) for e in causes],
-    } | _headline(causes or ())
+    } | _headline(causes or (), sp.excess_usd)
 
 
 def _spike_window(ctx: Context, sp: Spike) -> dict[str, Any]:

@@ -267,11 +267,13 @@ export const SPIKE_KINDS = {
   slope_change: ['The spend rate rose and stayed up', 'Slope change'],
 };
 
-// A spike's headline and tag: its main cause when capcom.explain gave one, else
-// what capcom.timeline saw.
+// A spike's headline and tag: its largest named cause when capcom.explain gave
+// one, else what capcom.timeline saw; `rest` is a muted note when the unexplained
+// rest is more than half the excess.
 export function spikeText(m) {
   const kind = SPIKE_KINDS[m.kind] || [m.kind, m.kind];
-  return { title: m.headline || kind[0], tag: m.cause_label || kind[1], unexplained: m.cause === 'unexplained' };
+  const rest = m.mostly_unexplained && m.cause !== 'unexplained' ? `mostly unexplained: ${usd(m.unexplained_usd)} of ${usd(m.excess_usd)}` : null;
+  return { title: m.headline || kind[0], tag: m.cause_label || kind[1], unexplained: m.cause === 'unexplained', rest };
 }
 
 // The Spikes page for one spike: a window of whole days that starts on or before it.

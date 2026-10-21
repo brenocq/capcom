@@ -51,7 +51,7 @@ export function pickSpikes(sp, x0, x1, gap = 0.04, max = 8) {
 // chart markers from a picked spikes block; `days` picks the Spikes window
 export function spikeMarks(sp, days) {
   if (!sp) return [];
-  return sp.marks.map((m) => ({ n: m.n, t: m.t, href: spikeHref(m.key, m.t, days), aria: `Spike ${m.n}: ${spikeText(m).title}, +${usd(m.excess_usd)} over the baseline${m.project ? `, in project ${m.project}` : ''}, ${spikeWhen(m)}` }));
+  return sp.marks.map((m) => ({ n: m.n, t: m.t, href: spikeHref(m.key, m.t, days), aria: `Spike ${m.n}: ${spikeText(m).title}${spikeText(m).rest ? ` (${spikeText(m).rest})` : ''}, +${usd(m.excess_usd)} over the baseline${m.project ? `, in project ${m.project}` : ''}, ${spikeWhen(m)}` }));
 }
 
 // the numbered list next to a chart: the largest spikes first
@@ -64,6 +64,7 @@ export function spikeList(sp, days, limit = 4) {
     h('span.body', null,
       h('span.meta', null, projectChip(m), h('span', { text: spikeWhen(m) })),
       h('b', { text: spikeText(m).title }),
+      spikeText(m).rest ? h('span.rest', { text: spikeText(m).rest }) : null,
       h('span.tags', null, h('span.tag', { text: spikeText(m).tag }),
         h('span.plus', { text: `+${usd(m.excess_usd)}` }),
         h('span.note', { text: `${m.requests} request${m.requests === 1 ? '' : 's'}, ${usd(m.cost_usd)} in all` })))));

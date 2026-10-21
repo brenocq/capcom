@@ -68,15 +68,28 @@ export function xAxis(ticks, x0, x1, left, xOf) {
 
 // ------------------------------------------------------------------ band chart
 
-// Cumulative lines, largest first, each with a band down to the next line, filled
-// in its own color with a vertical fade; the total on top in the text color.
+// Running sums of series, bottom first: line i is series 0..i added up.
+export function stackLines(series) {
+  const out = [];
+  series.forEach((vals, i) => out.push(vals.map((v, k) => (i ? out[i - 1][k] : 0) + (v || 0))));
+  return out;
+}
+
+// Stacked cumulative lines: each series' line is its running total plus every
+// series below it, so the top line is the total. The largest final value sits at
+// the bottom; each band fills down to the line below it in the series' color with
+// a vertical fade, so its thickness is that series' share. The total is labeled at
+// the top line's right end.
 // opts: {times, members: [{label, values, color}], total, start, end, now,
 //        height, left, timeLabel(t), marks: [{n, t, href, aria}]}
 export function bandChart(opts) {
-  const { members, total } = opts;
   const times = [opts.start, ...opts.times];
-  const lines = members.map((m) => [0, ...m.values]);
-  const tot = [0, ...total];
+  const last = (m) => (m.values.length ? m.values[m.values.length - 1] : 0);
+  const order = opts.members.map((m, i) => i).sort((a, b) => last(opts.members[b]) - last(opts.members[a]) || a - b);
+  const members = order.map((i) => opts.members[i]);
+  const own = members.map((m) => [0, ...m.values]);
+  const lines = stackLines(own);
+  const tot = lines.length ? lines[lines.length - 1] : [0, ...opts.total];
   const x0 = opts.start, x1 = Math.max(opts.end, times[times.length - 1]);
   const W = 1000, H = opts.height || 300, left = opts.left || 52;
   const ticks = niceTicks(maxOf(tot, 1e-6));
@@ -90,15 +103,10 @@ export function bandChart(opts) {
     return d + 'Z';
   };
   const id = 'band' + (++uid);
-  const defs = s('defs', null, gradient(`${id}-t`, 'var(--text)', 0.18, 0.02),
-    members.map((m, i) => gradient(`${id}-${i}`, m.color, 0.32, 0.04)));
+  const defs = s('defs', null, members.map((m, i) => gradient(`${id}-${i}`, m.color, 0.32, 0.04)));
   const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' }, defs);
-  svg.append(s('path', { d: bandOf(tot, lines[0]), fill: `url(#${id}-t)` }));
-  lines.forEach((ln, i) => svg.append(s('path', { d: bandOf(ln, lines[i + 1]), fill: `url(#${id}-${i})` })));
-  for (let i = lines.length - 1; i >= 0; i--) {
-    svg.append(s('path', { d: lineOf(lines[i]), fill: 'none', 'stroke-width': 2, 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke', style: `stroke:${members[i].color}` }));
-  }
-  svg.append(s('path', { d: lineOf(tot), fill: 'none', 'stroke-width': 2.5, 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke', style: 'stroke:var(--text)' }));
+  lines.forEach((ln, i) => svg.append(s('path', { d: bandOf(ln, i ? lines[i - 1] : null), fill: `url(#${id}-${i})` })));
+  lines.forEach((ln, i) => svg.append(s('path', { d: lineOf(ln), fill: 'none', 'stroke-width': 2, 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke', style: `stroke:${members[i].color}` })));
 
   const plot = h('div.chart', { style: `height:${H}px;margin:12px 0 0 ${left}px` });
   yGrid(plot, ticks, ymax, left, (v) => usd(v, v >= 100 || Number.isInteger(v) ? 0 : 2));
@@ -108,13 +116,26 @@ export function bandChart(opts) {
     plot.append(h('div.nowline', { style: `left:${f}` }), h('span.nowlab', { style: `left:${f}`, text: 'now' }));
   }
   // spike markers: numbered, on the total line at the spike's start, linking to /spikes
+  const placed = [];
   for (const m of opts.marks || []) {
     if (m.t < x0 || m.t > x1) continue;
     let i = times.findIndex((tm) => tm >= m.t);
     if (i < 0) i = times.length - 1;
-    const left = ((m.t - x0) / (x1 - x0) * 100).toFixed(2) + '%';
-    const top = ((1 - tot[i] / ymax) * 100).toFixed(2) + '%';
+    placed.push({ fx: (m.t - x0) / (x1 - x0), fy: 1 - tot[i] / ymax });
+    const left = (placed[placed.length - 1].fx * 100).toFixed(2) + '%';
+    const top = (placed[placed.length - 1].fy * 100).toFixed(2) + '%';
     plot.append(h('a.spikemark', { href: m.href || '/spikes', style: `left:${left};top:${top}`, 'aria-label': m.aria || `Spike ${m.n}`, title: m.aria || '', text: String(m.n) }));
+  }
+  // the total at the top line's end: a dot and the amount, inside the plot and
+  // clear of the markers (above the line, below it near a marker, beside the end at the very top)
+  const end = tot[tot.length - 1];
+  if (end > 0) {
+    const fx = (times[times.length - 1] - x0) / (x1 - x0), fy = 1 - end / ymax;
+    const near = placed.some((p) => fx - p.fx < 0.16 && fx - p.fx > -0.04);
+    const place = near ? '.below' : fy < 0.1 ? '.beside' : '';
+    const pos = `left:${(fx * 100).toFixed(2)}%;top:${(fy * 100).toFixed(2)}%`;
+    plot.append(h('span.enddot', { style: pos }),
+      h('span.endlab' + place + (fx < 0.15 ? '.leftward' : ''), { style: pos, text: usd(end, end >= 100 ? 0 : 2) }));
   }
   const guide = h('div.guide', { hidden: true });
   plot.append(guide);
@@ -127,7 +148,7 @@ export function bandChart(opts) {
     guide.style.left = ((times[i] - x0) / (x1 - x0) * 100).toFixed(2) + '%';
     showTip(e, i === 0 ? label(times[0]) : 'Up to ' + label(times[i]), [
       { label: 'Total', value: usd(tot[i]), color: 'var(--text)' },
-      ...members.map((m, j) => ({ label: m.label, value: usd(lines[j][i]), color: m.color })),
+      ...members.map((m, j) => ({ label: m.label, value: usd(own[j][i]), color: m.color })).reverse(),
     ]);
   });
   plot.addEventListener('mouseleave', () => { guide.hidden = true; hideTip(); });
