@@ -1,7 +1,8 @@
 """capcom.checks: setup warnings drawn from real usage (contract: capcom.types.ChecksModule).
 
 `run_checks` makes one pass over the window (facts.py) and runs every check in
-rules.py on what it collected; each check's docstring gives its saving formula.
+rules.py and sessions.py on what it collected; each check's docstring gives its
+saving formula. `rollup` groups the findings by kind across their scopes.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from pathlib import Path
 
 from capcom.checks.agents import find_all_definitions
 from capcom.checks.facts import collect
+from capcom.checks.rollup import Rollup, ScopeShare, rollup
 from capcom.checks.rules import all_findings
 from capcom.types import Finding, Index, PriceTable
 
@@ -57,4 +59,4 @@ def run_checks(
     return all_findings(facts, find_all_definitions(agent_dirs), openclaw_root, user_dir)
 
 
-__all__ = ["run_checks"]
+__all__ = ["Rollup", "ScopeShare", "rollup", "run_checks"]

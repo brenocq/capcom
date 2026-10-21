@@ -15,6 +15,8 @@ from capcom.timeline.groups import TEMPORARY_LABEL, ProjectNames
 from capcom.types import Finding, Index
 
 WIDTH = 88
+MIN_LISTED_USD_PER_WEEK = 0.10  # smaller findings are counted in a line, not listed
+ROLLUP_SCOPES = 4  # scopes named on a roll-up line
 
 
 def _open_index(config: Config) -> Index | None:
@@ -44,20 +46,53 @@ def _scope_label(scope: str, names: ProjectNames | None, dirs: set[str]) -> str:
     return names.label(names.key(scope)) if named else scope
 
 
+def _overlapped_by(
+    findings: list[Finding], counted: list[bool | None], dirs: set[str]
+) -> list[int]:
+    """For each finding left out of the total, the number (1-based) of the first
+    counted finding it shares dollars with; 0 for the counted ones."""
+    from capcom.report.tally import finding_overlaps
+
+    out: list[int] = []
+    for i, f in enumerate(findings):
+        hit = 0
+        if counted[i] is False:
+            over = finding_overlaps(f)
+            for j in range(i):
+                g = findings[j]
+                near = g.scope == f.scope or g.scope not in dirs or f.scope not in dirs
+                if counted[j] and g.kind in over and near:
+                    hit = j + 1
+                    break
+        out.append(hit)
+    return out
+
+
 def format_findings(
     findings: list[Finding],
     limit: int,
     names: ProjectNames | None = None,
     dirs: set[str] | None = None,
+    counted: list[bool | None] | None = None,
 ) -> str:
     """Findings as numbered blocks: saving, title and scope, summary, advice, the
     change to paste, and the first evidence lines. Project scopes (folders in `dirs`)
-    are named by `names`, the website's rule, when given."""
+    are named by `names`, the website's rule, when given. A finding `counted` marks
+    as left out of the total is starred, with the finding it overlaps; one it marks
+    None (a judgement call) gets a dagger."""
     blocks: list[str] = []
     known = dirs if dirs is not None else set(names.paths) if names is not None else set()
+    flags: list[bool | None] = list(counted) if counted is not None else [True] * len(findings)
+    by = _overlapped_by(findings, flags, known)
     for i, f in enumerate(findings[: max(limit, 0)], 1):
         scope = _scope_label(f.scope, names, known)
-        lines = [f"{i:>2}. ${f.saving_usd_per_week:,.2f}/week  {f.title}  [{scope}]"]
+        star = {True: " ", False: "*", None: "+"}[flags[i - 1]]
+        lines = [f"{i:>2}.{star}${f.saving_usd_per_week:,.2f}/week  {f.title}  [{scope}]"]
+        if flags[i - 1] is None:
+            lines.append("    + a judgement call: not added to the total")
+        elif not flags[i - 1]:
+            what = f"#{by[i - 1]}" if by[i - 1] else "a larger finding"
+            lines.append(f"    * overlaps {what}: not added to the total")
         lines.append(_wrap(f.summary, "    "))
         lines.append(_wrap(f.advice, "    "))
         if f.change:
@@ -100,7 +135,7 @@ def run_checks_view(
         f"(prices checked {table.checked})",
         file=out,
     )
-    findings = run_checks(
+    every = run_checks(
         index,
         table,
         since,
@@ -108,22 +143,84 @@ def run_checks_view(
         claude_root=config.claude_root,
         openclaw_root=config.openclaw_root,
     )
-    shown = findings[: max(limit, 0)]
-    if any(f.metrics.get("overlaps") for f in shown):
-        note = "some overlap, so add only the total below"
-    else:
-        note = "they count different dollars"
-    print(f"Savings are weekly at this window's pace; {note}.\n", file=out)
+    findings = [f for f in every if f.saving_usd_per_week >= MIN_LISTED_USD_PER_WEEK]
+    small = [f for f in every if f.saving_usd_per_week < MIN_LISTED_USD_PER_WEEK]
+    print("Savings are weekly, at this window's pace.\n", file=out)
     if not findings:
         print("no findings in this window", file=out)
+        _print_small(small, out)
         return 0
     sessions = list(index.sessions())
     dirs = {s.project_dir for s in sessions}
     names = ProjectNames.build(sessions, config.openclaw_root)
-    print(format_findings(findings, limit, names, dirs), file=out)
-    from capcom.report.tally import savings_total  # the website's total, worded the same
+    from capcom.report.tally import counted_findings, savings_total  # the website's rule
 
-    total = savings_total(findings, dirs)
+    print(format_rollup(findings, names, dirs), file=out)
+    print("\nBy scope:\n", file=out)
+    # a judgement call (model_mix) shrinks every saving on the same requests: it
+    # stays out of the total, and the total is taken over the other findings
+    judged = [bool(f.metrics.get("judgement_call")) for f in findings]
+    rest = [f for f, j in zip(findings, judged, strict=True) if not j]
+    flags = iter(counted_findings(rest, dirs))
+    counted: list[bool | None] = [None if j else next(flags) for j in judged]
+    print(format_findings(findings, limit, names, dirs, counted), file=out)
+    print(file=out)
+    if any(judged):
+        print(
+            _wrap(
+                "+ A judgement call on quality (a cheaper model for an agent): its saving "
+                "would shrink the others on the same requests, so it is left out of the "
+                "total.",
+                "  ",
+                first="",
+            ),
+            file=out,
+        )
+    if any(c is False for c in counted):
+        print(
+            _wrap(
+                "* Overlapping: it counts some of the same dollars as the finding it "
+                "names (a cost carried in prompts is also part of the context and cache "
+                "rewrites it rode in), so it is left out of the total; the total covers "
+                "only findings that don't overlap.",
+                "  ",
+                first="",
+            ),
+            file=out,
+        )
+    _print_small(small, out)
+    total = savings_total(rest, dirs)
     if total is not None:
-        print(f"\nTogether: {total['text']}.", file=out)
+        print(f"Together: {total['text']}.", file=out)
     return 0
+
+
+def _print_small(small: list[Finding], out: TextIO) -> None:
+    if small:
+        usd = sum(f.saving_usd_per_week for f in small)
+        print(
+            f"{len(small)} more finding(s) under ${MIN_LISTED_USD_PER_WEEK:.2f}/week not listed "
+            f"(${usd:,.2f}/week together, not in the total).",
+            file=out,
+        )
+
+
+def format_rollup(
+    findings: list[Finding], names: ProjectNames | None = None, dirs: set[str] | None = None
+) -> str:
+    """One line per kind across its scopes, largest first, with the scopes' shares."""
+    from capcom.checks.rollup import rollup
+
+    known = dirs if dirs is not None else set(names.paths) if names is not None else set()
+    lines = ["By kind, across scopes (kinds may overlap; see the total at the end):"]
+    for r in rollup(findings):
+        lines.append(f"  {r.headline}")
+        if len(r.scopes) > 1:
+            parts = [
+                f"{_scope_label(s.scope, names, known)} {s.share:.0%}"
+                for s in r.scopes[:ROLLUP_SCOPES]
+            ]
+            more = len(r.scopes) - ROLLUP_SCOPES
+            tail = f", {more} more" if more > 0 else ""
+            lines.append(_wrap(", ".join(parts) + tail, "      "))
+    return "\n".join(lines)

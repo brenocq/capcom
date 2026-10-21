@@ -199,3 +199,23 @@ def test_the_main_thread_is_not_judged_for_model_mix() -> None:
     reqs = run(50, output=300)
     assert "model_mix" not in kinds(_checks(index(reqs)))
     assert at(0) == SINCE  # the window the fixtures assume
+
+
+def test_a_heartbeat_cut_back_by_compactions_still_carries_its_history() -> None:
+    # the context grows, a compaction cuts it back, it grows again: the last runs
+    # are no bigger than the first, but the runs carry about twice a fresh run
+    reqs: list[Request] = []
+    for i in range(26):
+        reqs += run(3, start=i * 30, session="s4", cache_read=40_000 + 8_000 * (i % 13))
+    idx = _with_spans(index(reqs), {"s4": timedelta(days=12)})
+    f = only(_checks(idx), "heartbeat_growing_session")
+    assert f.metrics["fresh_context"] == 40_000 and f.metrics["median_context"] == 88_000
+
+
+def test_a_heartbeat_past_the_line_is_counted_once_as_a_heartbeat() -> None:
+    reqs, idx = _heartbeat(grow=10_000)  # resumed contexts from 60k to 290k
+    found = _checks(idx)
+    f = only(found, "heartbeat_growing_session")
+    expected = sum(max(0, r.usage.context - 60_000) for r in reqs) * READ_RATE
+    assert f.saving_usd_per_week == pytest.approx(expected)
+    assert "long_running_agents" not in kinds(found)

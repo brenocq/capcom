@@ -44,6 +44,7 @@ from capcom.checks.facts import (
     LongContext,
     Rewrite,
     Thread,
+    heartbeat,
 )
 from capcom.cost.top import TEMPORARY, project_label
 from capcom.types import AttrValue, Evidence, Finding
@@ -998,6 +999,11 @@ def large_memory(facts: Facts) -> list[Finding]:
 # --------------------------------------------------------------------------- context
 
 
+def _heartbeats(facts: Facts) -> set[tuple[str, str | None]]:
+    """The main threads resumed as a heartbeat (facts.heartbeat)."""
+    return {k for k, t in facts.threads.items() if t.agent_id is None and heartbeat(t)}
+
+
 def _net(rereads: float, handoffs: float) -> float:
     """What a handoff saves: the rereads it avoids less the rebuild it costs, never
     below zero (a thread that barely passed the line saves nothing)."""
@@ -1010,30 +1016,34 @@ def long_running_agents(facts: Facts) -> list[Finding]:
         sum over its turns past the line of (context - LONG_CONTEXT) x read price
         - crossings x HANDOFF_TOKENS x its cache-write price
 
-    floored at zero. The first term is what rereading the tokens past the useful
-    size cost (a rewrite's premium on them is left to the rewrite findings; the
-    part above LATE_COMPACTION before a late compaction is left to
+    floored at zero. Heartbeat sessions (facts.heartbeat) are left to
+    `heartbeat_growing_session`, whose advice fits them. The first term is what
+    rereading the tokens past the useful size cost (a rewrite's premium on them is
+    left to the rewrite findings; the part above LATE_COMPACTION before a late compaction is left to
     `late_compactions`). The second is what the advice costs: a fresh agent at each
     crossing (the first turn past the line, again after a compaction brought the
     context back under it) rebuilds a handoff context of HANDOFF_TOKENS, written
     once to the cache."""
     out: list[Finding] = []
     grouped: dict[str, list[tuple[str, LongContext]]] = defaultdict(list)
+    beats = _heartbeats(facts)
     for project, lc in facts.long_context.items():
         grouped[_group(project)].append((project, lc))
     for project, items in grouped.items():
         lcs = [lc for _, lc in items]
-        gross = sum(lc.excess_usd for lc in lcs)
-        per_thread = [v for lc in lcs for v in lc.per_thread.values()]
+        per_thread = [v for lc in lcs for k, v in lc.per_thread.items() if k not in beats]
+        if not per_thread:
+            continue
+        gross = sum(v[0] for v in per_thread)
         usd = sum(_net(v[0], v[1]) for v in per_thread)
         handoffs = int(sum(v[2] for v in per_thread))
-        threads: set[tuple[str, str | None]] = set().union(*(lc.threads for lc in lcs))
-        turns = sum(lc.turns for lc in lcs)
-        biggest = max(lc.max_context for lc in lcs)
+        threads: set[tuple[str, str | None]] = set().union(*(lc.threads for lc in lcs)) - beats
+        turns = int(sum(v[3] for v in per_thread))
         evs = sorted(
-            (e for lc in lcs for e in lc.evidence.values()),
+            (e for lc in lcs for k, e in lc.evidence.items() if k not in beats),
             key=lambda p: -p[0],
         )
+        biggest = evs[0][0] if evs else max(lc.max_context for lc in lcs)
         subagents = sum(1 for _, aid in threads if aid is not None)
         f = _finding(
             facts,
@@ -1074,7 +1084,10 @@ def late_compactions(facts: Facts) -> list[Finding]:
     price, less one handoff (HANDOFF_TOKENS at the thread's cache-write price: the
     fresh session the advice starts), floored at zero."""
     per_project: dict[str, list[Compaction]] = defaultdict(list)
+    beats = _heartbeats(facts)
     for (sid, _aid), comps in facts.compactions.items():
+        if (sid, _aid) in beats:
+            continue  # heartbeat_growing_session counts these sessions whole
         for c in comps:
             if c.pre_tokens > LATE_COMPACTION and c.timestamp >= facts.since:
                 per_project[_group(facts.project_of(sid))].append(c)

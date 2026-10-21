@@ -165,7 +165,7 @@ def test_a_late_compaction_and_long_running_split_the_same_turns() -> None:
     assert "late_compactions" not in long.metrics["overlaps"]
 
 
-def test_the_checks_view_says_not_to_add_up_only_when_findings_overlap(tmp_path: Path) -> None:
+def test_the_checks_view_marks_overlapping_findings_and_totals_the_rest(tmp_path: Path) -> None:
     def view(idx) -> str:  # type: ignore[no-untyped-def]
         out = io.StringIO()
         config = Config(tmp_path / "claude", tmp_path / "openclaw", tmp_path / "cache")
@@ -175,7 +175,7 @@ def test_the_checks_view_says_not_to_add_up_only_when_findings_overlap(tmp_path:
     reqs = run(40, cache_read=200_000) + run(1, start=71, cache_read=0, cache_write_5m=200_000)
     text = view(index(reqs))
     assert "Long-running agents" in text and "Cache rewrites after the user was away" in text
-    assert "add only the total below" not in text and "different dollars" in text
+    assert "* overlaps" not in text and "Overlapping" not in text
     # an unused connector rides in those same prompts: its dollars overlap them
     evs = [
         ev(
@@ -187,7 +187,9 @@ def test_the_checks_view_says_not_to_add_up_only_when_findings_overlap(tmp_path:
         )
     ]
     text = view(index(reqs, evs))
-    assert "claude.ai connectors" in text and "add only the total below" in text
+    assert "claude.ai connectors" in text
+    assert "* overlaps #1: not added to the total" in text
+    assert "the total covers only findings that don't overlap" in text
 
 
 # --------------------------------------------------------------------------- tool waits

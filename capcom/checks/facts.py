@@ -32,6 +32,8 @@ from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from itertools import pairwise
+from statistics import median
 
 from capcom.cost.model import price, price_usage
 from capcom.cost.prices import is_placeholder, normalize
@@ -172,7 +174,7 @@ class LongContext:
     excess_usd: float = 0.0
     max_context: int = 0
     evidence: dict[ThreadKey, tuple[int, Evidence]] = field(default_factory=dict)
-    # per thread: [rereads past the line (USD), handoff cost (USD), crossings]
+    # per thread: [rereads past the line (USD), handoff cost (USD), crossings, turns]
     per_thread: dict[ThreadKey, list[float]] = field(default_factory=dict)
 
 
@@ -599,8 +601,9 @@ class _Pass:
                 if not late.handoff_usd:
                     late.handoff_usd = handoff
                 above = 0.0
-            acc = lc.per_thread.setdefault(tk, [0.0, 0.0, 0])
+            acc = lc.per_thread.setdefault(tk, [0.0, 0.0, 0, 0])
             acc[0] += band + above
+            acc[3] += 1
             if not t.above:  # one handoff per crossing of the line
                 acc[1] += handoff
                 acc[2] += 1
@@ -774,6 +777,37 @@ def _tagged(
     # Events sort before requests at the same time: an attachment precedes its reply.
     for seq, rec in enumerate(records):
         yield rec.timestamp, order, seq, rec
+
+
+HEARTBEAT_RESUMES = 20  # resumes (pauses of RESUME_GAP or more) in the window
+HEARTBEAT_STEADY = 0.7  # this share of the intervals between resumes ...
+HEARTBEAT_TOLERANCE = 0.25  # ... within this much of their median
+HEARTBEAT_GROWTH = 1.5  # the median resumed context over the smallest one ...
+HEARTBEAT_GROWTH_TOKENS = 20_000  # ... and at least this much more
+
+
+def heartbeat(t: Thread) -> tuple[timedelta, int, int] | None:
+    """(the interval, the smallest context at a resume, the median one) when main
+    thread `t` was resumed on a steady cadence (HEARTBEAT_RESUMES or more, most of
+    the intervals within HEARTBEAT_TOLERANCE of their median) and its runs carry
+    the history of the earlier ones: the median resumed context is HEARTBEAT_GROWTH
+    times the smallest (what a fresh run carries) or more. Compactions may cut it
+    back on the way: the median, not the last runs, is what the runs carried."""
+    if len(t.resumes) < HEARTBEAT_RESUMES:
+        return None
+    times = [when for when, _ in t.resumes]
+    gaps = [(b - a).total_seconds() for a, b in pairwise(times)]
+    mid = median(gaps)
+    if mid <= 0:
+        return None
+    steady = sum(1 for g in gaps if abs(g - mid) <= HEARTBEAT_TOLERANCE * mid)
+    if steady < HEARTBEAT_STEADY * len(gaps):
+        return None
+    smallest = min(c for _, c in t.resumes)
+    typical = int(median(c for _, c in t.resumes))
+    if typical < smallest * HEARTBEAT_GROWTH or typical - smallest < HEARTBEAT_GROWTH_TOKENS:
+        return None
+    return timedelta(seconds=mid), smallest, typical
 
 
 def collect(index: Index, table: PriceTable, since: datetime, until: datetime) -> Facts:

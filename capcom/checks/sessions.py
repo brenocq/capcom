@@ -17,9 +17,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
-from itertools import pairwise
 from pathlib import Path
-from statistics import median
 
 from capcom.checks.agents import AgentDefinition
 from capcom.checks.facts import (
@@ -31,6 +29,7 @@ from capcom.checks.facts import (
     Thread,
     ThreadKey,
     _short,
+    heartbeat,
 )
 from capcom.checks.rules import (
     BUILT_IN_AGENTS,
@@ -48,24 +47,20 @@ NEVER_ENDED_COMPACTIONS = 3  # ... with this many compactions in the window
 NEVER_ENDED_AUTO = 2  # ... or this many automatic ones (the context hit its top)
 FRESH_SPAN = timedelta(days=1)  # sessions this short give the typical fresh context
 FRESH_CONTEXT_DEFAULT = 50_000  # when the window has no such session
-HEARTBEAT_RESUMES = 20  # resumes (pauses of RESUME_GAP or more) in the window
-HEARTBEAT_STEADY = 0.7  # this share of the intervals between resumes ...
-HEARTBEAT_TOLERANCE = 0.25  # ... within this much of their median
-HEARTBEAT_GROWTH = 1.2  # the last resumes' context over the first ones'
-HEARTBEAT_GROWTH_TOKENS = 20_000
 MIX_MIN_SPAWNS = 5  # spawns of a type before judging its model
 MIX_TOP_SHARE = 0.5  # share of the type's spend on Opus (or Fable)
 MIX_SHORT_OUTPUT = 1_000  # mean output tokens per request on that model, at most
 MIX_TOOL_CALLS = 0.7  # mean tool calls per request on that model, at least
 
 
-def band_usd(t: Thread, lo: int, hi: int = LONG_CONTEXT) -> float:
+def band_usd(t: Thread, lo: int, hi: int | None = LONG_CONTEXT) -> float:
     """What thread `t`'s requests paid to reread their context between `lo` and `hi`
-    tokens (both multiples of BUCKET_TOKENS, which makes the sum exact)."""
+    tokens (both multiples of BUCKET_TOKENS, which makes the sum exact; None: no
+    upper end)."""
     usd = 0.0
     for b, (_, rate, ctx_rate) in t.hist.items():
         start = b * BUCKET_TOKENS
-        if start >= hi:
+        if hi is not None and start >= hi:
             usd += (hi - lo) * rate
         elif start >= lo:
             usd += ctx_rate - lo * rate
@@ -85,18 +80,21 @@ def _main_threads(facts: Facts) -> list[Thread]:
     return [t for t in facts.threads.values() if t.agent_id is None and t.hist]
 
 
-def fresh_context(facts: Facts) -> int:
+def fresh_context(facts: Facts, project: str | None = None, default: int | None = None) -> int:
     """A fresh session's typical context: the median context of the main-thread
-    requests of sessions active under FRESH_SPAN, rounded up to a bucket; at most
-    LONG_CONTEXT."""
+    requests of sessions active under FRESH_SPAN (in `project`'s group when given),
+    rounded up to a bucket; at most LONG_CONTEXT. Without such sessions, `default`
+    (FRESH_CONTEXT_DEFAULT when None)."""
     counts: dict[int, float] = defaultdict(float)
     for t in _main_threads(facts):
+        if project is not None and _group(t.project) != project:
+            continue
         if _span(facts, t) < FRESH_SPAN:
             for b, (n, _, _) in t.hist.items():
                 counts[b] += n
     total = sum(counts.values())
     if not total:
-        return FRESH_CONTEXT_DEFAULT
+        return FRESH_CONTEXT_DEFAULT if default is None else default
     seen = 0.0
     for b in sorted(counts):
         seen += counts[b]
@@ -105,43 +103,27 @@ def fresh_context(facts: Facts) -> int:
     return FRESH_CONTEXT_DEFAULT  # not reached
 
 
-def heartbeat(t: Thread) -> tuple[timedelta, int, int] | None:
-    """(the interval, the context at the first resumes, at the last ones) when main
-    thread `t` was resumed on a steady cadence (HEARTBEAT_RESUMES or more, most of
-    the intervals within HEARTBEAT_TOLERANCE of their median) and its context kept
-    growing; else None."""
-    if len(t.resumes) < HEARTBEAT_RESUMES:
-        return None
-    times = [when for when, _ in t.resumes]
-    gaps = [(b - a).total_seconds() for a, b in pairwise(times)]
-    mid = median(gaps)
-    if mid <= 0:
-        return None
-    steady = sum(1 for g in gaps if abs(g - mid) <= HEARTBEAT_TOLERANCE * mid)
-    if steady < HEARTBEAT_STEADY * len(gaps):
-        return None
-    quarter = max(len(t.resumes) // 4, 1)
-    first = int(median(c for _, c in t.resumes[:quarter]))
-    last = int(median(c for _, c in t.resumes[-quarter:]))
-    if last < first * HEARTBEAT_GROWTH or last - first < HEARTBEAT_GROWTH_TOKENS:
-        return None
-    return timedelta(seconds=mid), first, last
-
-
 def heartbeat_growing_session(facts: Facts) -> list[Finding]:
     """A main thread resumed on a regular cadence (a heartbeat, a scheduled job)
     whose context keeps growing: each run rereads the history of all the runs
-    before it. Saving: band_usd from the smallest context at a resume (what a fresh
-    run carries, rounded up to a bucket) to LONG_CONTEXT, over the thread's
-    requests; a fresh run needs no handoff."""
+    before it. Saving, over the thread's requests in the window:
+
+        band_usd(fresh run, no upper end)
+
+    every reread above what a fresh run carries: the smaller of the smallest
+    context at a resume and the project's fresh-session context (fresh_context;
+    the window may start when the session is already big), rounded up to a bucket.
+    A fresh run needs no handoff. These sessions are left out of
+    `long_running_agents` and `late_compactions`, so their dollars count once."""
     per_project: dict[str, list[tuple[Thread, timedelta, int, int, float]]] = defaultdict(list)
     for t in _main_threads(facts):
         beat = heartbeat(t)
         if beat is None:
             continue
-        base = _ceil_bucket(min(c for _, c in t.resumes))
-        usd = band_usd(t, base) if base < LONG_CONTEXT else 0.0
-        per_project[_group(t.project)].append((t, *beat, usd))
+        group = _group(t.project)
+        fresh = min(beat[1], fresh_context(facts, group, default=beat[1]))
+        usd = band_usd(t, _ceil_bucket(fresh), None)
+        per_project[group].append((t, beat[0], fresh, beat[2], usd))
     out: list[Finding] = []
     for project, found in per_project.items():
         found.sort(key=lambda x: -x[4])
@@ -157,10 +139,10 @@ def heartbeat_growing_session(facts: Facts) -> list[Finding]:
             summary=(
                 f"{len(found)} session(s) were resumed on a steady cadence (session "
                 f"{_short(t.session_id)}: {len(t.resumes)} times, about every "
-                f"{minutes:.0f} min) while the context grew from about {_k(first)} to "
-                f"{_k(last)} tokens; every run rereads the earlier runs, "
-                f"{_usd(usd)} of rereads below {_k(LONG_CONTEXT)} (the part past it is "
-                "in Long-running agents)."
+                f"{minutes:.0f} min); its runs carried about {_k(last)} tokens where a "
+                f"fresh run carries {_k(first)}: every run rereads the earlier runs. "
+                f"Rereading what a fresh run would not carry cost {_usd(usd)} (counted "
+                "here, not in Long-running agents or late compactions)."
             ),
             advice=(
                 "Start each run fresh: a new session per run, or /clear between runs, "
@@ -169,8 +151,8 @@ def heartbeat_growing_session(facts: Facts) -> list[Finding]:
             evidence=tuple(
                 Evidence(
                     f"session {_short(x[0].session_id)}: {len(x[0].resumes)} resumes about "
-                    f"every {x[1].total_seconds() / 60:.0f} min, context {_k(x[2])} to "
-                    f"{_k(x[3])}",
+                    f"every {x[1].total_seconds() / 60:.0f} min, context {_k(x[3])} at the "
+                    f"median resume, {_k(x[2])} for a fresh run",
                     session_id=x[0].session_id,
                     timestamp=x[0].resumes[-1][0],
                 )
@@ -180,8 +162,8 @@ def heartbeat_growing_session(facts: Facts) -> list[Finding]:
                 "sessions": len(found),
                 "resumes": len(t.resumes),
                 "interval_minutes": round(minutes, 1),
-                "first_context": first,
-                "last_context": last,
+                "fresh_context": first,
+                "median_context": last,
             },
         )
         if f:
@@ -333,6 +315,9 @@ def model_mix(
                 "output_per_request": round(output, 1),
                 "tool_calls_per_request": round(calls, 2),
                 "requests": requests,
+                # its saving shrinks every other one on these requests: keep it out
+                # of a total of savings
+                "judgement_call": True,
             },
         )
         if f:
