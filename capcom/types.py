@@ -660,4 +660,4 @@ class LimitSample:
     used_percentage: float
     resets_at: datetime | None = None
     session_id: str | None = None
-    source: str = "statusline"  # "statusline", "usage-cache" (seed), "rate_limit_error"
+    source: str = "statusline"  # "statusline" or "rate_limit_error" (a seed from the logs)
