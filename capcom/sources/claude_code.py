@@ -19,13 +19,15 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import re
+import shlex
 from collections import Counter, OrderedDict
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 from urllib.parse import urlsplit
 
 from capcom.types import (
@@ -194,13 +196,30 @@ def _json_len(value: object) -> int:
 
 
 def _first_word(command: object) -> str | None:
+    """The basename of a shell command's first word, after any leading VAR=value
+    assignments. Tokenized like a POSIX shell (quotes respected) and lazily, so only
+    the words up to the command are read; unbalanced quotes there give None."""
     if not isinstance(command, str):
         return None
-    for word in command.split():
-        if _ENV_ASSIGN.match(word):
-            continue  # FOO=1 cmd ...: the command is the next word
-        return word[:64]
+    lexer = shlex.shlex(command, posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        for word in lexer:
+            if _ENV_ASSIGN.match(word):
+                continue  # FOO="a b" cmd ...: the command is the next word
+            return _str(posixpath.basename(word.rstrip("/")) or word, 64)
+    except ValueError:
+        return None
     return None
+
+
+def _skill_name(value: object) -> str | None:
+    """A skill's name: the first word, without a slash command's leading '/'."""
+    if not isinstance(value, str):
+        return None
+    words = value.split(maxsplit=1)
+    return _str(words[0].lstrip("/"), 100) if words else None
 
 
 def tool_target(name: str, tool_input: object) -> str | None:
@@ -213,13 +232,13 @@ def tool_target(name: str, tool_input: object) -> str | None:
     if name in _AGENT_TOOLS:
         return _str(args.get("subagent_type"))
     if name == "Skill":
-        return _str(args.get("skill") or args.get("name") or args.get("command"))
+        return _skill_name(args.get("skill") or args.get("name") or args.get("command"))
     if name == "WebFetch":
         url = args.get("url")
         if not isinstance(url, str):
             return None
         try:
-            return urlsplit(url).hostname
+            return _str(urlsplit(url).hostname, 255)
         except ValueError:
             return None
     if name in ("Grep", "Glob"):
@@ -432,7 +451,8 @@ class _Parser:
         elif isinstance(kind, str) and kind in _IGNORED_TYPES:
             pass
         else:
-            self.source.unknown_types[str(kind)] += 1
+            label = kind[:64] if isinstance(kind, str) else "non-string"
+            self.source.unknown_types[label] += 1
 
     def _seen(self, rec: dict[str, Any]) -> datetime | None:
         """Feed the batch's SessionInfo; returns the record's time (or the last one)."""
@@ -468,6 +488,7 @@ class _Parser:
     ) -> None:
         t = _ts(rec.get("timestamp")) or self.last_ts
         if t is None:
+            self.batch.skipped += 1  # no time to place it at
             return
         key = _str(rec.get("uuid")) or str(offset)
         if suffix:
@@ -505,8 +526,12 @@ class _Parser:
             self.batch.skipped += 1
             return
         reply = self._reply(mid)
+        agent_id = self._agent_id(rec)
+        # Content lengths feed the output estimate: subagent logs, and old-format
+        # sidechain records inside a main log.
+        measure = self.subagent or agent_id is not None
         for block in _list(msg.get("content")):
-            self._block(rec, offset, reply, _dict(block))
+            self._block(rec, offset, reply, _dict(block), measure)
         stop = _str(msg.get("stop_reason"))
         if stop:
             reply.stop_reason = stop
@@ -536,10 +561,15 @@ class _Parser:
         slim["model"] = msg.get("model")
         slim["usage"] = _dict(msg.get("usage"))
         self.batch.pending.pop(mid, None)  # keep the batch in arrival order of last records
-        self.batch.pending[mid] = _Pending(slim, reply, t, self._agent_id(rec))
+        self.batch.pending[mid] = _Pending(slim, reply, t, agent_id)
 
     def _block(
-        self, rec: Mapping[str, Any], offset: int, reply: _Reply, block: Mapping[str, Any]
+        self,
+        rec: Mapping[str, Any],
+        offset: int,
+        reply: _Reply,
+        block: Mapping[str, Any],
+        measure: bool,
     ) -> None:
         kind = block.get("type")
         if kind == "tool_use" or kind == "server_tool_use":
@@ -554,7 +584,7 @@ class _Parser:
             self.tools[tid] = (name, target)
             if len(self.tools) > _MAX_PENDING_TOOLS:
                 self.tools.popitem(last=False)
-            if self.subagent:
+            if measure:
                 reply.content_chars += _json_len(tool_input)
             if name in _AGENT_TOOLS:
                 args = _dict(tool_input)
@@ -571,9 +601,9 @@ class _Parser:
                 )
         elif kind in ("thinking", "redacted_thinking"):
             reply.tool_or_thinking = True
-            if self.subagent:
+            if measure:
                 self._count_text(reply, "thinking", block.get("thinking"))
-        elif kind == "text" and self.subagent:
+        elif kind == "text" and measure:
             self._count_text(reply, "text", block.get("text"))
 
     @staticmethod
@@ -590,7 +620,9 @@ class _Parser:
         rec, reply = p.rec, p.reply
         usage = _usage(rec["usage"])
         estimated = False
-        if self.subagent and usage.output < STREAM_START_OUTPUT and reply.tool_or_thinking:
+        # Subagent logs, and old-format sidechain records inside a main log.
+        sidechain = self.subagent or p.agent_id is not None
+        if sidechain and usage.output < STREAM_START_OUTPUT and reply.tool_or_thinking:
             estimate = estimate_tokens(reply.content_chars)
             usage = Usage(
                 input=usage.input,
@@ -883,7 +915,7 @@ def _sorted_entries(path: Path) -> list[os.DirEntry[str]]:
 
 def _is_dir(entry: os.DirEntry[str]) -> bool:
     try:
-        return entry.is_dir()
+        return entry.is_dir(follow_symlinks=False)  # a symlink loop cannot recurse
     except OSError:
         return False
 
@@ -974,26 +1006,34 @@ class ClaudeCodeSource:
 
     def parse(self, log: LogFile, start: int) -> Iterator[Batch]:
         """Stream `log` from byte `start`. Always yields at least one batch (a subagent
-        log's first batch carries its AgentInfo); a missing file yields nothing."""
+        log's first batch carries its AgentInfo). A file that cannot be opened yields
+        nothing; a read error stops the stream after the batches already yielded."""
         try:
             f = log.path.open("rb")
-        except FileNotFoundError:
+        except OSError:
             return
-        with f:
-            f.seek(start)
-            parser = _Parser(self, log)
-            if log.kind == LogKind.SUBAGENT:
-                parser.batch.records.append(read_agent_info(log))
-            offset = start
-            yielded = False
-            for raw in f:
-                if not raw.endswith(b"\n"):
-                    break  # a write in progress: read it next time
-                parser.line(raw, offset)
-                offset += len(raw)
-                b = parser.batch
-                if b.lines >= MAX_BATCH_LINES or b.bytes >= MAX_BATCH_BYTES:
-                    yield parser.flush(offset)
-                    yielded = True
-            if not yielded or parser.batch.lines or parser.batch.records:
+        try:
+            yield from self._stream(f, log, start)
+        except OSError:
+            return
+        finally:
+            f.close()
+
+    def _stream(self, f: BinaryIO, log: LogFile, start: int) -> Iterator[Batch]:
+        f.seek(start)
+        parser = _Parser(self, log)
+        if log.kind == LogKind.SUBAGENT:
+            parser.batch.records.append(read_agent_info(log))
+        offset = start
+        yielded = False
+        for raw in f:
+            if not raw.endswith(b"\n"):
+                break  # a write in progress: read it next time
+            parser.line(raw, offset)
+            offset += len(raw)
+            b = parser.batch
+            if b.lines >= MAX_BATCH_LINES or b.bytes >= MAX_BATCH_BYTES:
                 yield parser.flush(offset)
+                yielded = True
+        if not yielded or parser.batch.lines or parser.batch.records:
+            yield parser.flush(offset)

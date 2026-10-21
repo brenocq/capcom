@@ -439,8 +439,9 @@ def test_bad_lines_and_unknown_types(tmp_path: Path) -> None:
     source = ClaudeCodeSource()
     batches = parse(session_log(s.path), source=source)
     assert sum(b.lines for b in batches) == 10
-    # Bad JSON, two non-objects, the empty line, the id-less reply.
-    assert sum(b.skipped for b in batches) == 5
+    # Bad JSON, two non-objects, the empty line, the id-less reply, and the tool
+    # result with no time to place it at.
+    assert sum(b.skipped for b in batches) == 6
     (cost,) = [r for b in batches for r in b.records]
     assert isinstance(cost, CostState) and cost.total_cost_usd == 0.0 and cost.models == {}
     assert source.unknown_types == {"future-record-type": 1}
@@ -652,6 +653,15 @@ def test_api_request_ttl_default(tmp_path: Path) -> None:
 
 def test_tool_targets() -> None:
     assert tool_target("Bash", {"command": "  FOO=1 BAR=2 uv run pytest -q"}) == "uv"
+    assert tool_target("Bash", {"command": 'API_KEY="abc def" curl x'}) == "curl"
+    assert tool_target("Bash", {"command": "GIT_AUTHOR_NAME='Jane Q Doe' git commit"}) == "git"
+    assert tool_target("Bash", {"command": "/usr/bin/git status"}) == "git"
+    assert tool_target("Bash", {"command": "sudo rm -rf /tmp/x"}) == "sudo"
+    assert tool_target("Bash", {"command": "env FOO=1 make"}) == "env"
+    assert tool_target("Bash", {"command": 'X="unbalanced git push'}) is None
+    assert tool_target("Bash", {"command": "ls # it's a comment"}) == "ls"
+    assert tool_target("Skill", {"command": "/deploy prod --token xyz"}) == "deploy"
+    assert tool_target("WebFetch", {"url": "https://" + "a" * 300 + ".com/"}) == "a" * 255
     assert tool_target("Bash", {"command": ""}) is None
     assert tool_target("WebFetch", {"url": "https://docs.example.com/a?b=c"}) == "docs.example.com"
     assert tool_target("WebFetch", {"url": 3}) is None
@@ -687,3 +697,84 @@ def test_no_content_in_records(sample: tuple[Path, dict[str, Any]]) -> None:
     text = repr([parse(log) for log in logs_of(projects)])
     for secret in ("synthetic answer", "synthetic prompt", "synthetic summary", "tttt", "hhhh"):
         assert secret not in text
+
+
+def test_reply_split_across_parse_calls(tmp_path: Path) -> None:
+    """A live file read mid-reply: the second parse call only sees the later records,
+    so its Request carries the tool calls and estimate of those records alone. The
+    store merges tool_calls by tool_use_id and keeps the larger estimated output."""
+    sub, log = _sub(tmp_path)
+    base: dict[str, Any] = {
+        "type": "assistant",
+        "timestamp": "2026-10-20T09:00:00Z",
+        "message": {"id": "msg_split", "model": "claude-haiku-4-5", "usage": {"output_tokens": 4}},
+    }
+
+    def block(uuid: str, tid: str, path: str) -> dict[str, Any]:
+        content = [{"type": "tool_use", "id": tid, "name": "Read", "input": {"file_path": path}}]
+        return {**base, "uuid": uuid, "message": {**base["message"], "content": content}}
+
+    sub.write(block("u1", "t1", "/w/" + "a" * 400))
+    first = parse(log)
+    (r1,) = of(first, Request)
+    sub.write(block("u2", "t2", "/w/b"))
+    sub.close()
+    (r2,) = of(parse(log, start=first[-1].end_offset), Request)
+    assert r1.message_id == r2.message_id == "msg_split"
+    assert [c.tool_use_id for c in r1.tool_calls] == ["t1"]
+    assert [c.tool_use_id for c in r2.tool_calls] == ["t2"]
+    assert r1.output_estimated and r2.output_estimated
+    assert r1.usage.output > r2.usage.output == estimate_tokens(len('{"file_path":"/w/b"}'))
+
+
+def test_old_sidechain_records_in_main_log(tmp_path: Path) -> None:
+    s = SessionWriter(tmp_path, cwd="/w", session_id="s1")
+    s.agent_id = "old-agent"  # records carry isSidechain and agentId, in the main log
+    s.assistant(Reply(at(1), output=4, stream_start_output=True, thinking_text="k" * 400))
+    s.agent_id = None
+    s.assistant(Reply(at(2), output=4, stream_start_output=True, thinking_text="k" * 400))
+    s.close()
+    side, main = of(parse(session_log(s.path)), Request)
+    assert side.agent_id == "old-agent" and side.output_estimated and side.usage.output == 100
+    assert main.agent_id is None and not main.output_estimated and main.usage.output == 4
+
+
+def test_unreadable_file_yields_nothing(tmp_path: Path) -> None:
+    folder = tmp_path / "dir.jsonl"
+    folder.mkdir()  # opening a directory raises IsADirectoryError, an OSError
+    assert parse(session_log(folder)) == []
+
+
+def test_unknown_type_labels(tmp_path: Path) -> None:
+    s = SessionWriter(tmp_path, cwd="/w", session_id="s1")
+    s.write({"type": ["assistant"]})
+    s.write({"type": 7, "x": '"type":"assistant"'})
+    s.write({"type": "q" * 300, "y": {"type": "assistant"}})
+    s.close()
+    source = ClaudeCodeSource()
+    parse(session_log(s.path), source=source)
+    assert source.unknown_types == {"non-string": 2, "q" * 64: 1}
+
+
+def test_discovery_does_not_follow_symlinked_folders(tmp_path: Path) -> None:
+    projects = tmp_path / "projects"
+    subagents = projects / "-p" / "s1" / "subagents"
+    subagents.mkdir(parents=True)
+    (subagents / "agent-a.jsonl").write_text("")
+    (subagents / "loop").symlink_to(subagents, target_is_directory=True)
+    (projects / "-link").symlink_to(projects / "-p", target_is_directory=True)
+    found = logs_of(projects)
+    assert [(f.project_dir, f.agent_id) for f in found] == [("-p", "a")]
+
+
+def test_workflow_agent_gets_agent_info(tmp_path: Path) -> None:
+    projects = tmp_path / "projects"
+    wf = projects / "-p" / "s1" / "subagents" / "workflows" / "wf_1"
+    wf.mkdir(parents=True)
+    (wf / "agent-w1.jsonl").write_text("")
+    (wf / "agent-w1.meta.json").write_text(
+        json.dumps({"agentType": "reviewer", "workflowPhase": "review", "spawnDepth": 2})
+    )
+    (log,) = logs_of(projects)
+    (agent,) = of(parse(log), AgentInfo)
+    assert agent == AgentInfo("w1", "s1", agent_type="reviewer", spawn_depth=2)
