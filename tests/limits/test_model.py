@@ -8,11 +8,13 @@ from pathlib import Path
 
 import pytest
 
+from capcom.cost.model import price
 from capcom.cost.prices import load_prices
 from capcom.cost.top import project_label
 from capcom.limits.model import (
     NOT_ENOUGH,
     Interval,
+    Line,
     Spend,
     analyze,
     append_samples,
@@ -21,11 +23,13 @@ from capcom.limits.model import (
     intervals,
     load_samples,
     nnls,
+    rate_factor,
     sample_json,
     samples_path,
     seed_samples,
     segments,
 )
+from capcom.limits.view import _at_reset, runs_out_text
 from capcom.types import Event, EventKind, LimitWindow
 from tests.limits.fakes import T0, FakeIndex, minutes, req, sample
 
@@ -179,7 +183,8 @@ def test_fit_falls_back_to_percent_per_dollar_with_few_samples() -> None:
     view = analyze(index, TABLE, few, H5, now=few[-1].time + minutes(1))
     f = view.fit
     assert f is not None and f.method == "per_usd"
-    assert "too few samples" in f.note
+    assert f.rough and f.note.startswith("About $") and f.note.endswith("from 4 rises (rough).")
+    assert "weight" not in f.note  # no per-type weights to mention
     assert f.per_usd > 0 and f.weights == {}
 
 
@@ -296,10 +301,90 @@ def test_seed_ignores_implausible_reset_times() -> None:
     assert [s.resets_at for s in found.samples[:2]] == [None, None]
 
 
-def test_few_intervals_give_no_forecast_range() -> None:
-    index, ss = synthetic(1)
-    few = ss[:4]
-    view = analyze(index, TABLE, few, H5, now=few[-1].time + minutes(1))
-    assert view.fit is not None and view.fit.intervals < 6
-    assert view.forecast is None
-    assert view.reason is not None and "needs 6" in view.reason
+def steady(rate: float = 4.0, every: int = 20) -> tuple[FakeIndex, list, float]:
+    """One 5-hour window with the same request every 5 minutes and a reading every
+    `every` minutes at a known `rate` (percent per API-equivalent dollar), rounded to
+    whole points; returns the index, the readings and the true value at the reset."""
+    reset = T0 + timedelta(hours=5)
+    reqs = [req(T0 + minutes(5 * i + 1), output=10_000) for i in range(60)]
+    usd = price(reqs[0], TABLE).total
+    ss = []
+    for k in range(1, 300 // every):
+        end = T0 + minutes(every * k)
+        spent = usd * sum(1 for r in reqs if r.timestamp < end)
+        ss.append(sample(end, round(rate * spent), resets=reset))
+    return FakeIndex(reqs), ss, rate * usd * len(reqs)
+
+
+def test_forecast_from_the_second_reading() -> None:
+    index, ss, truth = steady()
+    now = ss[1].time + minutes(5)
+    one = analyze(index, TABLE, ss[:1], H5, now=now)
+    assert one.forecast is None and one.reason == NOT_ENOUGH
+    two = analyze(index, TABLE, ss[:2], H5, now=now)
+    fc = two.forecast
+    assert fc is not None and fc.rough and fc.readings == 2
+    assert fc.low < fc.median < fc.high and fc.low <= truth <= fc.high
+    # very wide: at least half again the median on either side, rate times or divided by ~2
+    assert fc.high - fc.low > 0.6 * fc.median
+    assert two.fit is not None and two.fit.rate_factor > 1.5
+    assert two.fit.note.endswith("from 2 rises (rough).")
+
+
+def test_forecast_narrows_as_readings_come() -> None:
+    index, ss, truth = steady(every=20)
+    now = ss[-1].time + minutes(5)
+    widths = []
+    for k in (2, 4, 8, len(ss)):
+        fc = analyze(index, TABLE, ss[:k], H5, now=now).forecast
+        assert fc is not None and fc.low <= truth <= fc.high, k
+        widths.append(fc.high - fc.low)
+    assert widths == sorted(widths, reverse=True) and widths[0] > 3 * widths[-1]
+    f = analyze(index, TABLE, ss, H5, now=now).fit
+    assert f is not None and not f.rough and f.rate_factor < 1.2
+    assert f.per_usd == pytest.approx(4.0, rel=0.05)
+    usd = f"{1 / f.per_usd:.2f}"
+    assert f.note.startswith(f"About ${usd} of API-equivalent spend per 1% of your 5-hour window")
+    assert f"from {len(ss)} rises; readings stray from it by" in f.note  # one weight: not said
+
+
+def test_rate_factor_starts_wide_and_narrows() -> None:
+    assert rate_factor([10.0], [10.0]) >= 2.5
+    factors = [rate_factor([10.0] * n, [10.0] * n) for n in (1, 2, 3, 6, 20, 100)]
+    assert factors == sorted(factors, reverse=True) and factors[-1] < 1.1
+    # rises that disagree with the fit keep it wide
+    noisy = rate_factor([2.0, 18.0, 5.0, 15.0] * 5, [10.0] * 20)
+    assert noisy > rate_factor([10.0] * 20, [10.0] * 20) + 0.1
+
+
+def test_run_out_range() -> None:
+    now = T0
+    reset = now + timedelta(hours=4)
+    fc = forecast(H5, 50.0, 48.0, [5.0] * 16, now, reset, factor=1.3)
+    assert fc.runs_out_at is not None  # 50 + 5 per 15 minutes: 100 after 2 h 30
+    assert fc.runs_out_early is not None and fc.runs_out_late is not None
+    assert now < fc.runs_out_early < fc.runs_out_at < fc.runs_out_late < reset
+    assert 100 < fc.low < fc.median < fc.high
+    text = runs_out_text(fc, lambda t: t.strftime("%H:%M"))
+    assert text is not None and text.startswith("At this pace it runs out between ")
+    assert text.endswith(f", most likely {fc.runs_out_at:%H:%M}.")
+    # only the high end reaches 100 %: a warning, with the earliest time
+    slow = forecast(H5, 50.0, 50.0, [2.2] * 16, now, reset, factor=1.8)
+    assert slow.runs_out_at is None and slow.runs_out_early is not None
+    said = runs_out_text(slow, lambda t: t.strftime("%H:%M"))
+    assert said is not None and said.startswith("It may run out before the reset, as early as")
+    assert _at_reset(fc) == "at this pace it reaches the limit before the reset"
+    assert _at_reset(slow).endswith(" to the limit)")
+    calm = forecast(H5, 10.0, 10.0, [1.0] * 16, now, reset, factor=1.8)
+    assert calm.runs_out_early is None and runs_out_text(calm, str) is None
+
+
+def test_straight_line_widens_a_rough_range() -> None:
+    now = T0
+    reset = now + timedelta(hours=3)
+    plain = forecast(H5, 20.0, 20.0, [1.0] * 8, now, reset, factor=1.5)
+    line = Line(now, 20.0, 20.0)  # the readings say 20 points an hour; the spend says 4
+    wide = forecast(H5, 20.0, 20.0, [1.0] * 8, now, reset, factor=1.5, line=line)
+    assert wide.line and wide.high > plain.high and wide.median == plain.median
+    assert wide.high == pytest.approx(20 + 20 * 3 * 1.5)
+    assert wide.runs_out_early is not None and wide.runs_out_at is None

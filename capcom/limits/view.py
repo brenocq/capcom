@@ -12,6 +12,7 @@ from typing import Any
 from capcom.cost.top import project_label
 from capcom.limits.model import (
     NOT_ENOUGH,
+    Forecast,
     WindowView,
     analyze_all,
     load_samples,
@@ -78,7 +79,11 @@ def window_json(
             "method": f.method,
             "note": f.note,
             "percent_per_usd": _r(f.per_usd, 6),
+            "usd_per_percent": _r(f.usd_per_percent, 4),
             "intervals": f.intervals,
+            "readings": f.readings,
+            "rough": f.rough,
+            "rate_factor": _r(f.rate_factor, 3),
             "mean_abs_error": _r(f.mean_abs_error),
             "r2": _r(f.r2, 3),
             "weights": [
@@ -97,6 +102,12 @@ def window_json(
             "high": _r(fc.high),
             "resets_at": _iso(fc.resets_at, tz),
             "runs_out_at": _iso(fc.runs_out_at, tz),
+            "runs_out_early": _iso(fc.runs_out_early, tz),
+            "runs_out_late": _iso(fc.runs_out_late, tz),
+            "rough": fc.rough,
+            "readings": fc.readings,
+            "rate_factor": _r(fc.factor, 3),
+            "line": fc.line,
             "bucket_minutes": int(fc.bucket.total_seconds() // 60),
             "buckets": fc.buckets,
             "fan": [[_ms(t), _r(m), _r(lo), _r(hi)] for t, m, lo, hi in fc.fan],
@@ -105,6 +116,7 @@ def window_json(
         # the current window's recorded line, for the card's chart
         "history": [] if last is None or not v.current else [[_ms(t), p] for t, p in last.points()],
         "start": None if last is None or not v.current else _iso(last.start, tz),
+        "start_known": last is not None and v.current and last.start_known,
     }
     if full:
         by_seg = {id(sv.segment): sv for sv in v.shown}
@@ -130,6 +142,13 @@ def window_json(
     return out
 
 
+def _since(samples: Sequence[LimitSample]) -> datetime | None:
+    """The first status line sample (seeded rate-limit errors can be much older), or
+    the first sample when there is none."""
+    first = next((s for s in samples if s.source == "statusline"), None)
+    return first.time if first is not None else samples[0].time if samples else None
+
+
 def limits_json(
     index: Index,
     table: PriceTable,
@@ -149,6 +168,7 @@ def limits_json(
         "install": INSTALL,
         "samples": len(samples),
         "last_sample": _iso(samples[-1].time, tz) if samples else None,
+        "recording_since": _iso(_since(samples), tz),
     }
     if not samples:
         base["windows"] = {w.value: None for w in LimitWindow}
@@ -171,6 +191,43 @@ def _span(d: timedelta) -> str:
     if m >= 48 * 60:
         return f"{m // 1440} d {m % 1440 // 60} h"
     return f"{m // 60} h {m % 60:02d} min" if m >= 60 else f"{m} min"
+
+
+def _at_reset(fc: Forecast) -> str:
+    """The value at the reset; past 100 % only that it reaches the limit (usage stops
+    there)."""
+    if fc.low >= 100:
+        return "at this pace it reaches the limit before the reset"
+    med = "100% (the limit)" if fc.median >= 100 else f"{fc.median:.0f}%"
+    high = "the limit" if fc.high >= 100 else f"{fc.high:.0f}%"
+    return f"at the reset {med} (80% range {fc.low:.0f}% to {high})"
+
+
+def rough_text(readings: int) -> str:
+    n = f"{readings} reading{'' if readings == 1 else 's'}"
+    return f"Rough: {n} so far, so the range is wide; it narrows as readings come."
+
+
+def runs_out_text(fc: Forecast, when: Callable[[datetime], str]) -> str | None:
+    """When the forecast runs out, with its range, in words (None when even the high
+    end of the range lasts until the reset)."""
+    mid, early, late = fc.runs_out_at, fc.runs_out_early, fc.runs_out_late
+    if mid is not None and late is not None and early is not None and early < late:
+        return (
+            f"At this pace it runs out between {when(early)} and {when(late)}, "
+            f"most likely {when(mid)}."
+        )
+    if mid is not None and late is not None:
+        return f"At this pace it runs out around {when(mid)}."
+    if mid is not None:
+        first = f", as early as {when(early)}" if early is not None and early < mid else ""
+        return (
+            f"At this pace it runs out around {when(mid)}{first}; "
+            "at a slower pace it lasts until the reset."
+        )
+    if early is not None:
+        return f"It may run out before the reset, as early as {when(early)} if the pace picks up."
+    return None
 
 
 def format_views(
@@ -198,26 +255,24 @@ def format_views(
             )
         fc = v.forecast
         if fc is not None:
-            lines.append(
-                f"  now about {fc.now:.0f}%; at the reset {fc.median:.0f}% "
-                f"(80% range {fc.low:.0f} to {fc.high:.0f}%)"
-            )
-            if fc.runs_out_at is not None:
-                lines.append(f"  runs out around {_local(fc.runs_out_at)}")
+            lines.append(f"  now about {fc.now:.0f}%; {_at_reset(fc)}")
+            if fc.rough:
+                lines.append("  " + rough_text(fc.readings))
+            run = runs_out_text(fc, _local)
+            if run:
+                lines.append("  " + run)
         else:
             lines.append(f"  no forecast: {v.reason or NOT_ENOUGH}")
         f = v.fit
         if f is not None:
-            err = f"mean error {f.mean_abs_error:.1f} points"
-            lines.append(
-                f"  fit: {f.per_usd:.3f}% per API-equivalent dollar; {f.note}; "
-                f"{v.samples} samples; {err}"
-            )
+            lines.append(f"  {f.note} ({v.samples} samples recorded)")
             if f.method == "per_type":
+                lines.append("  what 1% costs, by model and token type:")
                 top = sorted(f.weights.items(), key=lambda kv: -kv[1])[:6]
                 for (m, c), wt in top:
                     if wt > 0:
-                        lines.append(f"    {m} {c.replace('_', ' ')}: {wt:.4f}% per M tokens")
+                        tok = 1e6 / wt  # the weight is percent per million tokens
+                        lines.append(f"    {m} {c.replace('_', ' ')}: {tok:,.0f} tokens")
         else:
             lines.append(f"  fit: {NOT_ENOUGH} ({v.samples} so far)")
         if v.shown and v.current:
