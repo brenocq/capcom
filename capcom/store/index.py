@@ -29,8 +29,9 @@ Version 2 lacked cost_states.ts, version 3 cost_states.next_ts and shared_replie
 version 4 filled next_ts from the earliest time of the next batch, and version 5 lacked
 requests.reported_cost (OpenClaw's own cost estimate), version 6
 cost_states.total_duration_ms: a writable open migrates them in place (the index keeps
-history the logs may have lost); except for 5 -> 6, which only adds the column, it
-queues the files with cost-states, and every file of their sessions, for a reread.
+history the logs may have lost); up to 5 it queues the files with cost-states, and
+every file of their sessions, for a reread, 5 -> 6 only adds the column, and 6 -> 7
+queues the files with cost-states alone.
 
 Times are stored as integer microseconds since the Unix epoch, UTC.
 """
@@ -876,15 +877,16 @@ def _migrate_5_to_6(con: sqlite3.Connection) -> None:
 
 def _migrate_6_to_7(con: sqlite3.Connection) -> None:
     """Add cost_states.total_duration_ms (cost-state's totalDuration, for comparing
-    per process step) and queue the sessions with cost-states for a reread, as
-    4 -> 5 does, so the column is filled. One transaction."""
+    per process step) and queue the files that hold cost-states for a reread, so the
+    column is filled. Only those: no other row changes, so the subagent logs and
+    other files of their sessions stay as they are. One transaction."""
     con.execute("BEGIN IMMEDIATE")
     try:
         if con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 6:
             cols = {r[1] for r in con.execute("PRAGMA table_info(cost_states)")}
             if "total_duration_ms" not in cols:
                 con.execute("ALTER TABLE cost_states ADD COLUMN total_duration_ms INTEGER")
-            _queue_cost_sessions(con)
+            con.execute("UPDATE files SET pos = 0 WHERE path IN (SELECT file FROM cost_states)")
             con.execute("DELETE FROM schema_version")
             con.execute("INSERT INTO schema_version (version) VALUES (7)")
     except BaseException:

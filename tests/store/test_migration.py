@@ -266,8 +266,10 @@ def test_v4_index_rereads_every_file_of_sessions_with_cost_states(config: Config
 def test_v6_index_gains_total_duration_and_rereads(config: Config) -> None:
     project = config.projects_dir / "-home-u-p"
     main = project / "s1.jsonl"
+    sub = project / "s1" / "subagents" / "agent-a1.jsonl"  # same session: not reread
     other = project / "s2.jsonl"  # no cost-state: not reread
     write_lines(main, {"t": "req", "id": "m1", "ts": 1})
+    write_lines(sub, {"t": "req", "id": "m3", "ts": 2})
     cost_pos = main.stat().st_size
     write_lines(main, {"t": "cost", "usd": 0.5, "ts": 1, "dur": 90_000})
     write_lines(other, {"t": "req", "id": "m2", "s": "s2", "ts": 2})
@@ -277,9 +279,10 @@ def test_v6_index_gains_total_duration_and_rereads(config: Config) -> None:
     con = sqlite3.connect(config.index_path)
     con.executescript(index_module._SCHEMA.replace("    total_duration_ms INTEGER,\n", ""))
     con.execute("INSERT INTO schema_version (version) VALUES (6)")
-    for f in (main, other):
+    for f in (main, sub, other):
         _file_row(con, f, f.stat().st_size)
     _request_row(con, "m1", main, 5)
+    _request_row(con, "m3", sub, 0)
     con.execute(
         "INSERT INTO cost_states (file, pos, session_id, main, total_cost_usd, ts) "
         "VALUES (?, ?, 's1', 1, 0.5, 0)",
@@ -291,9 +294,12 @@ def test_v6_index_gains_total_duration_and_rereads(config: Config) -> None:
     with open_index(config.index_path) as ix:
         assert ix.file_state(main).offset == 0  # type: ignore[union-attr]
         assert ix.file_state(other).offset == other.stat().st_size  # type: ignore[union-attr]
+        assert ix.file_state(sub).offset == sub.stat().st_size  # type: ignore[union-attr]
         (cs,) = ix.last_cost_states()
         assert cs.total_duration_ms is None
-    run_scan(config, quiet=True, source=FakeSource())
+    source = FakeSource()
+    run_scan(config, quiet=True, source=source)
+    assert source.calls == [(main, 0)]
     with open_index(config.index_path, readonly=True) as ix:
         (cs,) = ix.last_cost_states()
         assert cs.total_duration_ms == 90_000
