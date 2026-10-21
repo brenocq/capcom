@@ -3,9 +3,10 @@
     python .github/scripts/demo/record.py <work-dir> <out-dir> [--stills <dir>]
 
 <work-dir> is demo/data.py's (it is built there first when missing). One tab
-shows capcom's website, clicked with real mouse events: Overview, then Spend
-switching its grouping from Project to Model, then Spikes, opening one with a
-clear cause, then Checks, copying a change. A second tab draws each moment in
+shows capcom's website, clicked with real mouse events: Spend over 14 days by
+project, hovering a point of the chart, then switching to Model, then Spikes,
+opening one with a clear cause, then Checks, copying a change. Overview is left
+out (its limit cards are empty until milestone 5). A second tab draws each moment in
 a macOS-style window (frame.html) with a cursor, on a transparent page; ffmpeg
 joins the frames into <out-dir>/demo.webp (animated, lossless, looping, with a
 cross-fade back to the start) and <out-dir>/demo.png (a still of the Spikes
@@ -149,23 +150,33 @@ class Recorder:
 
 
 def script(rec: Recorder) -> None:
-    """Overview -> Spend (Project, Model) -> Spikes (one with a clear cause) -> Checks (copy)."""
-    rec.open("/")
+    """Spend (14 days by project, a hovered point) -> Model -> Spikes (a clear cause) -> Checks."""
+    rec.open("/spend?days=14&group=project")
     first = rec.page
     assert first is not None
-    rec.hold(1.4)
-    rec.still("overview")
-    rec.go("nav a", "Spend")
-    rec.hold(0.6)
-    rec.go(".seg button", "Project", seconds=0.5)
-    rec.hold(1.1)
-    rec.go(".seg button", "Model", seconds=0.4)
-    rec.hold(0.7)
+    rec.hold(0.8)
     x, y = rec.where(".chart")
-    rec.move((x + 250, y + 40), 0.5)
+    rec.move((x + 250, y + 40), 0.6)
+    # Each screenshot of the app tab sends the chart a mouseleave, which hides its
+    # guide and tooltip; block it while the cursor rests on the chart.
+    rec.app.eval(
+        "window.__keep = (e) => e.stopImmediatePropagation();"
+        " document.addEventListener('mouseleave', window.__keep, true)"
+    )
     rec.move((x + 470, y + 10), 0.9, hover=True)
-    rec.hold(0.9)
+    rec.hold(1.4)
     rec.still("spend")
+    rec.app.eval("document.removeEventListener('mouseleave', window.__keep, true)")
+    mx, my = rec.where(".seg button", "Model")
+    rec.move(((rec.x + mx) / 2, y - 60), 0.3)
+    rec.app.eval(
+        "document.querySelector('.guide').parentElement.dispatchEvent(new Event('mouseleave'))"
+    )
+    rec.snap()
+    rec.move((mx, my), 0.3)
+    rec.click()
+    rec.hold(1.6)
+    rec.still("model")
     rec.go("nav a", "Spikes")
     rec.hold(1.0)
     rec.go(".spikelist button", "new subagents", seconds=0.7)
