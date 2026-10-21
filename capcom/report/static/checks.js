@@ -23,7 +23,7 @@ export async function renderChecks(main, r) {
   }
   const t = d.total;
   if (t) {
-    const label = t.all ? (d.findings.length === 1 ? 'The one finding' : `All ${t.findings} together`) : `${t.findings} that count separate dollars`;
+    const label = t.all ? (d.findings.length === 1 ? 'The one finding' : `All ${t.findings} together`) : `${t.findings} findings that count separate dollars`;
     head.insertBefore(h('div.totalbox', null,
       h('span.label', { text: label }),
       h('span.big', null, 'up to ' + usd(t.usd_per_week, 0), h('small', { text: ' a week' }))), head.lastChild);
@@ -31,17 +31,38 @@ export async function renderChecks(main, r) {
   if (d.overlapping) {
     main.append(h('p.notice', { text: 'Some of these savings count the same dollars: a long context and the late compaction that ends it, say. Each saving is an “up to” on its own, and overlapping ones are never added together' + (t && !t.all ? '; the total above counts only findings that do not overlap.' : '.') }));
   }
-  for (const f of d.findings) main.append(card(f));
+  // the largest in full; the small ones as rows that open to the same content
+  const big = d.findings.filter((f, i) => i < FULL && f.saving_usd_per_week >= 1);
+  for (const f of big) main.append(card(f));
+  const rest = d.findings.slice(big.length);
+  if (rest.length) {
+    main.append(h('section.card.minor', null,
+      h('h2.small', { text: `${rest.length} smaller finding${rest.length === 1 ? '' : 's'}` }),
+      rest.map((f) => h('details', null,
+        h('summary', null,
+          h('span.n', { text: String(f.n) }),
+          h('span.mtext', null, h('b', { text: f.title }), f.scope && f.scope !== 'all' ? h('span.note', { text: ' · ' + (f.scope_label || f.scope) }) : null,
+            h('span.note.block', { text: f.summary })),
+          h('span.save.small', { text: 'up to ' + usd(f.saving_usd_per_week, 2) + '/wk' })),
+        body(f)))));
+  }
 }
+
+const FULL = 8;  // findings shown in full; the rest as rows
 
 function card(f) {
   const box = h('section.card.check');
   box.append(h('div.chead', null,
     h('span.n', { text: String(f.n) }),
     h('div.ctext', null,
-      h('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;align-items:baseline' }, h('h2', { text: f.title }), f.scope && f.scope !== 'all' ? h('span.chip', { text: f.scope }) : null),
+      h('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;align-items:baseline' }, h('h2', { text: f.title }), f.scope && f.scope !== 'all' ? h('span.chip', { text: f.scope_label || f.scope }) : null),
       h('p.para', { text: f.summary })),
     h('span.save', { title: 'Estimated at this window’s pace' }, h('small', { text: 'up to ' }), usd(f.saving_usd_per_week, f.saving_usd_per_week < 10 ? 2 : 0) + '/wk')));
+  box.append(body(f));
+  return box;
+}
+
+function body(f) {
   const left = h('div.cleft');
   const v = visual(f.visual);
   if (v) left.append(v);
@@ -51,10 +72,9 @@ function card(f) {
         e.session_id ? h('a', { href: sessionHref(e.session_id), text: e.label }) : h('span', { text: e.label }),
         e.timestamp ? h('span.note', { text: ' · ' + stamp(new Date(e.timestamp)) }) : null)))));
   }
-  const fix = h('div.fix', null, h('h3', { text: 'The change' }), h('p', { text: f.advice }));
+  const fix = h('div.fix', null, h('h3', { text: 'What to change' }), h('p', { text: f.advice }));
   if (f.change) fix.append(h('pre.change', { text: f.change }), h('div', null, copyButton(f.change)));
-  box.append(h('div.cbody', null, left, fix));
-  return box;
+  return h('div.cbody', null, left, fix);
 }
 
 function visual(v) {

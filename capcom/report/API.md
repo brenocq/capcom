@@ -218,11 +218,12 @@ the spike's requests cost above it, adding up to its excess.
 ```
 {days, since, until, overlapping,
  total: {usd_per_week, findings, all} | null,
- findings: [{n, kind, title, scope, summary, saving_usd_per_week, advice, change,
+ findings: [{n, kind, title, scope, scope_label, summary, saving_usd_per_week, advice, change,
              evidence: [Evidence], metrics, overlaps: [kind], counted, visual}]}
 ```
 
-Findings come ranked by weekly saving. Some savings count the same dollars
+Findings come ranked by weekly saving; `scope_label` names a project scope as in
+"Projects" (other scopes, an agent type or `all`, as they are). Some savings count the same dollars
 (`overlaps`, from `metrics["overlaps"]`; `overlapping` says whether any do), so they
 are never added up: `total` sums only the findings with `counted` true, picked largest
 first, each one that overlaps none picked before it (`all` says whether that is every

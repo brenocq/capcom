@@ -1080,14 +1080,19 @@ def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     overlapping = any(_overlaps(f) for f in found)
     calls = _subagent_calls(ctx, since) if "one_command_subagents" in kinds else {}
     comps = _compactions(ctx, since) if "late_compactions" in kinds else {}
+    infos = ctx.infos()
+    names = project_names(infos.values())
+    dirs = {info.project_dir for info in infos.values()}
     rows = []
     for i, f in enumerate(found):
+        label = project_display(f.scope, names, ctx.openclaw_dir) if f.scope in dirs else f.scope
         rows.append(
             {
                 "n": i + 1,
                 "kind": f.kind,
                 "title": f.title,
                 "scope": f.scope,
+                "scope_label": label,
                 "summary": f.summary,
                 "saving_usd_per_week": round(f.saving_usd_per_week, 6),
                 "advice": f.advice,

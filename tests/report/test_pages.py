@@ -231,6 +231,8 @@ def test_checks_page_data(spiky: Path) -> None:
     assert [r["counted"] for r in rows] == [True, False, True, True, True]
     assert data["total"] == {"usd_per_week": 46.0, "findings": 4, "all": False}
     assert rows[0]["overlaps"] == ["long_running_agents"]
+    assert rows[0]["scope_label"] == "a"  # the project's folder name (cwd "/a")
+    assert rows[2]["scope_label"] == "scout"  # an agent type stays as it is
     assert rows[0]["change"] == '{"a": 1}' and rows[0]["evidence"][0]["label"] == "one fact"
     visual = {r["kind"]: r["visual"] for r in rows}
     assert visual["late_compactions"] == {

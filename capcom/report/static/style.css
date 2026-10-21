@@ -252,7 +252,7 @@ ul.evidence a { color: inherit; }
 .ctext h2 { margin: 0; }
 .save { font-family: var(--serif); font-size: 24px; color: var(--clay); white-space: nowrap; }
 .save small { font-family: var(--sans); font-size: 12px; color: var(--muted); }
-.cbody { display: flex; flex-wrap: wrap; gap: 20px; }
+.cbody { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
 .cleft { flex: 3 1 380px; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
 .check .fix { flex: 2 1 300px; }
 pre.change { margin: 0; padding: 10px 12px; border-radius: 8px; background: var(--card); border: 0.5px solid var(--l15); font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -273,3 +273,12 @@ button.copy { font: inherit; font-size: 12px; padding: 5px 12px; border-radius: 
 .gauge { position: relative; height: 12px; border-radius: 4px; background: var(--subtle); }
 .gauge div { height: 12px; border-radius: 4px; background: var(--accent); }
 .gauge span { position: absolute; top: -4px; bottom: -4px; border-left: 2px solid var(--text); }
+.minor { gap: 0; }
+.minor details { border-top: 0.5px solid var(--l12); padding: 12px 0; }
+.minor summary { display: flex; gap: 12px; align-items: flex-start; cursor: pointer; list-style: none; }
+.minor summary::-webkit-details-marker { display: none; }
+.minor summary .n { flex: 0 0 22px; height: 22px; border-radius: 999px; background: var(--subtle); color: var(--text); font-size: 11px; font-weight: 600; display: flex; align-items: center; justify-content: center; }
+.minor .mtext { flex: 1; min-width: 0; font-size: 13px; }
+.minor .block { display: block; margin-top: 2px; }
+.minor details[open] .cbody { margin-top: 14px; }
+.save.small { font-size: 15px; }
