@@ -1,6 +1,8 @@
 // Shared helpers: DOM building (text only, never HTML from data), formatting,
 // fetching the API, the tooltip.
 
+import { getProgressive } from './loading.js';
+
 const SVGNS = 'http://www.w3.org/2000/svg';
 
 // h('div.card', {style: '...'}, child, 'text', ...): an element. Children that
@@ -115,6 +117,8 @@ export const categoryColor = (key) => SERIES[Math.max(0, CATEGORY_ORDER.indexOf(
 // ------------------------------------------------------------------ API
 
 const memo = new Map();
+// set by the frame (loading.js) to see the replies so far while a job computes
+export const apiHooks = { onPartial: null };
 
 // Drop the kept results, so the next draw fetches fresh data.
 export function forget() { memo.clear(); }
@@ -131,12 +135,9 @@ export class ApiError extends Error {
 // without fetching again). `fresh` skips the memo (the live list).
 export function api(path, fresh = false) {
   if (!fresh && memo.has(path)) return memo.get(path);
-  const p = fetch('/api/' + path, { headers: { Accept: 'application/json' } }).then(async (r) => {
-    let body = null;
-    try { body = await r.json(); } catch (e) { body = null; }
-    if (!r.ok) throw new ApiError(r.status, body);
-    return body;
-  });
+  // a slow reply is a server job (202, then 200): follow it to the end
+  const p = getProgressive(path, { onPartial: apiHooks.onPartial && ((...a) => apiHooks.onPartial(path, ...a)) })
+    .catch((err) => { throw err.status ? new ApiError(err.status, err.body) : err; });
   if (!fresh) {
     memo.set(path, p);
     p.catch(() => memo.delete(path));
