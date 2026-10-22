@@ -76,6 +76,14 @@ export function savingText(x, digits) {
   return (x > 0 ? '−' : '+') + usd(Math.abs(x), d);
 }
 
+// An expected saving in words, never a sign in front of a saving: "save $137" or, for
+// a change expected to cost more, "cost $12 more".
+export function expectedText(x, digits) {
+  if (x === null || x === undefined) return '—';
+  const d = digits ?? (Math.abs(x) >= 10 ? 0 : 2);
+  return x >= 0 ? `save ${usd(x, d)}` : `cost ${usd(-x, d)} more`;
+}
+
 // A rate as the measure reads: dollars when it is in dollars, else a number.
 export function rateText(x, measure) {
   if (x === null || x === undefined) return '—';

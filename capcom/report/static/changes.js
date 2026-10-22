@@ -4,8 +4,7 @@
 import { h, s, api, pct, monthDay, localDate, empty, tipOn, ApiError } from './lib.js';
 import { niceTicks } from './charts.js';
 import {
-  READ_ONLY, VERDICTS, VERDICT_ORDER, postChange, verdictChip, savingText, rateText, agoText, todayIso,
-} from './marks.js';
+  READ_ONLY, VERDICTS, VERDICT_ORDER, postChange, verdictChip, savingText, rateText, agoText, todayIso, expectedText } from './marks.js';
 
 const longDay = (iso) => { const d = localDate(iso); return `${monthDay(d)}, ${d.getFullYear()}`; };
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
@@ -70,7 +69,7 @@ function savingTile(d) {
   if (w.expected_usd_per_week !== null) {
     const these = w.changes === 1 ? 'this one' : `these ${w.changes}`;
     const share = w.share === null ? '' : w.share > 0 ? `: ${pct(w.share)} of it showed up` : '; none of it showed up';
-    tile.append(h('span.note', { text: `capcom expected ${savingText(w.expected_usd_per_week)} a week for ${these}${share}.` }));
+    tile.append(h('span.note', { text: `capcom expected ${these} to ${expectedText(w.expected_usd_per_week)} a week${share}.` }));
   }
   return tile;
 }
@@ -109,7 +108,7 @@ function changeCard(c) {
       h('div.verdict', null, verdictChip(c.verdict)),
       h('span.note', { text: 'measured / expected' }),
       h('span.serif.mid', { class: measured > 0 && !early ? 'goodtext' : measured < 0 && !early ? 'badtext' : null, text: measured === null ? (early ? 'not yet' : '—') : (early ? '≈ ' : '') + savingText(measured) + '/wk' }),
-      h('span.note', { text: c.expected_usd_per_week === null ? 'no saving expected' : `of ${savingText(c.expected_usd_per_week)}/wk expected` })),
+      h('span.note', { text: c.expected_usd_per_week === null ? 'no saving expected' : `expected to ${expectedText(c.expected_usd_per_week)}/wk` })),
     h('div.why', null, why.filter(Boolean).join(' '),
       isJudgement(c) ? h('span.quality', null, 'Quality is yours to judge: ', c.quality.map((q, i) => [i ? '; ' : '', `${lower(q.label)} ${q.before} → ${q.after}`]), '.') : null));
 }
@@ -165,7 +164,7 @@ function moneyTile(c) {
   const e = c.expected_usd_per_week;
   if (e !== null) {
     const share = m === null || !(e > 0) || early ? '' : m > 0 ? `: ${pct(m / e)} of it showed up` : '; none of it showed up';
-    tile.append(h('span.note', { text: `capcom expected ${savingText(e)}${share}` }));
+    tile.append(h('span.note', { text: `capcom expected it to ${expectedText(e)} a week${share}` }));
   }
   return tile;
 }
