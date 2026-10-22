@@ -13,8 +13,8 @@ const GRACE_MS = 80; // a page drawn within this needs no loading state
 const POLL_MS = 200; // how often the frame looks at the replies still loading
 const REDRAW_MS = 350; // at most one redraw per this while partial replies come
 
-const LABELS = { overview: 'Overview', spend: 'Spend', sessions: 'Sessions', spikes: 'Spikes', checks: 'Checks', limits: 'Limits', session: 'Session', day: 'Day' };
-const PAGE_PATH = /^\/(?:(?:spend|sessions|spikes|checks|limits)\/?|(?:session|day)\/[^/]+)?$/;
+const LABELS = { overview: 'Overview', spend: 'Spend', sessions: 'Sessions', spikes: 'Spikes', checks: 'Checks', changes: 'Did it work?', limits: 'Limits', session: 'Session', day: 'Day' };
+const PAGE_PATH = /^\/(?:(?:spend|sessions|spikes|checks|changes|limits)\/?|(?:session|day|changes)\/[^/]+)?$/;
 
 let cfg = null; // {pages, route, decorate, onNavigate}
 let view = null;
@@ -284,13 +284,13 @@ export function go(href, { replace = false } = {}) {
 // The API paths a link's page asks for first, to prefetch on hover.
 function apiFor(url) {
   const p = url.pathname.replace(/\/+$/, '') || '/';
-  const m = /^\/(session|day)\/([^/]+)$/.exec(p);
+  const m = /^\/(session|day|changes)\/([^/]+)$/.exec(p);
   if (m) return [`${m[1]}/${encodeURIComponent(decodeURIComponent(m[2]))}`];
   if (url.search) return [];
   return {
     '/': ['overview', 'checks?days=14'], '/spend': ['spend?days=14&group=category'],
     '/sessions': ['sessions?days=14&sort=usd&limit=300'], '/spikes': ['spikes?days=14'],
-    '/checks': ['checks?days=14'], '/limits': ['limits?days=14'],
+    '/checks': ['checks?days=14', 'changes', 'changes/noticed?days=14'], '/changes': ['changes'], '/limits': ['limits?days=14'],
   }[p] || [];
 }
 

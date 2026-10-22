@@ -1,8 +1,16 @@
 // Checks: setup warnings drawn from real usage, ranked by the weekly saving, each
 // with its evidence, a small chart from its numbers and the change to paste.
 
-import { h, usd, pct, monthDay, hm, tokens, seg, empty, setQuery, sessionHref, maxOf, copyButton, daysText } from './lib.js';
+import { h, api, usd, pct, monthDay, hm, tokens, seg, empty, setQuery, sessionHref, maxOf, copyButton, daysText } from './lib.js';
 import { pendingBlock } from './sessions.js';
+import { READ_ONLY, markForm, markedChip, noticedBanners, summaryCard } from './marks.js';
+
+// The marks the finding cards show: each mark's result by id (from /api/changes),
+// and the Checks window a new mark answers.
+let marked = { results: new Map(), days: 14 };
+
+// /api/changes and its noticed list are extras on this page: a failure leaves them out.
+const quiet = (path) => api(path).catch(() => null);
 
 const RANGES = [[7, '7 days'], [14, '14 days'], [30, '30 days']];
 
@@ -11,6 +19,7 @@ export async function renderChecks(main, r) {
   const titles = h('div.titles', null, h('h1', { text: 'Checks' }));
   const head = h('header.head', null, titles, h('div.controls', null, seg('Range', RANGES, days, (v) => setQuery({ days: v }))));
   main.append(head);
+  const changesP = quiet('changes'), noticedP = quiet(`changes/noticed?days=${days}`);
   const { data: d, block } = await pendingBlock('checks', `days=${days}`);
   if (block) {
     main.append(h('section.card', null, block));
@@ -30,6 +39,10 @@ export async function renderChecks(main, r) {
       // the label says what it adds; the note only what it leaves out
       t.judgement_calls ? h('span.note', { text: `Judgement calls, up to ${usd(t.judgement_calls.usd_per_week, 0)}/wk more, are listed apart and not in it.` }) : null), head.lastChild);
   }
+  const [changes, noticed] = await Promise.all([changesP, noticedP]);
+  marked = { results: new Map(((changes && changes.changes) || []).map((c) => [c.id, c])), days };
+  if (changes) main.append(h('div.row-wrap', null, summaryCard(changes)));
+  if (noticed) main.append(...noticedBanners(noticed.noticed, days));
   if (d.overlapping) {
     main.append(h('p.notice', { text: 'Some of these savings count the same dollars: a long context and the late compaction that ends it, say. Each saving is an “up to” on its own; the total counts each dollar once, over the findings that do not overlap.' }));
   }
@@ -98,9 +111,30 @@ function card(f, scoped = false) {
       h('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;align-items:baseline' }, h('h2', { text: scoped ? scopeName : f.title, title: scoped ? (f.scope_path || null) : null }), !scoped && f.scope && f.scope !== 'all' ? h('span.chip', { text: f.scope_label || f.scope, title: f.scope_path || null }) : null,
         f.counted ? null : h('span.tag.over', { text: f.metrics && f.metrics.judgement_call ? 'judgement call' : 'overlaps a larger finding', title: 'Not added to the total.' })),
       h('p.para', { text: f.summary })),
-    h('span.save', { title: 'Estimated at this window’s pace' }, h('small', { text: 'up to ' }), usd(f.saving_usd_per_week, f.saving_usd_per_week < 10 ? 2 : 0) + '/wk')));
+    h('span.save', { title: 'Estimated at this window’s pace' }, h('small', { text: 'up to ' }), usd(f.saving_usd_per_week, f.saving_usd_per_week < 10 ? 2 : 0) + '/wk'),
+    markAction(f, box)));
   box.append(body(f));
   return box;
+}
+
+// A finding's mark: its chip, linked to the measure, or the button that opens the
+// "Mark as applied" form under the card's head (none in read-only mode).
+function markAction(f, box) {
+  if (f.mark) return h('div.mark', null, markedChip(f.mark, marked.results.get(f.mark.id)));
+  if (READ_ONLY || !('finding_id' in f)) return null;
+  const btn = h('button.btn.small', { type: 'button', 'aria-expanded': 'false', text: 'Mark as applied' });
+  let form = null;
+  const close = () => { if (form) form.remove(); form = null; box.classList.remove('marking'); btn.setAttribute('aria-expanded', 'false'); btn.focus(); };
+  btn.addEventListener('click', () => {
+    if (form) { close(); return; }
+    form = markForm(f, marked.days, close);
+    box.querySelector('.chead').after(form);
+    box.classList.add('marking');
+    btn.setAttribute('aria-expanded', 'true');
+    const first = form.querySelector('button');
+    if (first) first.focus();
+  });
+  return h('div.mark', null, btn);
 }
 
 function body(f) {

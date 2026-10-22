@@ -8,6 +8,7 @@ an error.
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -76,6 +77,8 @@ class Analysis:
     explain_fn: ExplainFn
     checks_fn: ChecksFn
     regimes_fn: RegimesFn | None = None  # None: capcom.timeline.regime_changes
+    # capcom.changes, or a stand-in with the same functions; None: imported on use
+    changes_mod: Any = None
 
     def cumulative(
         self,
@@ -158,6 +161,15 @@ class Analysis:
             return _call("timeline", 2, lambda: fn(*args, **kwargs))
 
         return call
+
+    def changes(self) -> Any:
+        """capcom.changes (the marks and their measures), imported on first use."""
+        if self.changes_mod is not None:
+            return self.changes_mod
+        try:
+            return importlib.import_module("capcom.changes")
+        except ImportError as err:
+            raise Unavailable("changes", 5) from err
 
 
 def default_analysis() -> Analysis:

@@ -82,7 +82,8 @@ def test_tween_mixed_moves_every_number_of_a_text() -> None:
     got = _run(
         "console.log(JSON.stringify(["
         "m.tweenMixed('12 of 30 spikes', '40 of 30 spikes', 0.5),"
-        "m.tweenMixed('width:40.0%;background:var(--s1)', 'width:80.0%;background:var(--s1)', 1, true),"
+        "m.tweenMixed('width:40.0%;background:var(--s1)',"
+        " 'width:80.0%;background:var(--s1)', 1, true),"
         "m.tweenMixed('M0 4.5L12 9', 'M0 8.5L20 9', 0, true),"
         "m.tweenMixed('Oct 21, 14:30', 'Oct 21, 15:05', 0.5),"
         "m.tweenMixed('3 spikes', '3 spikes in 2 projects', 0.5),"

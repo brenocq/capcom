@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import math
+import re
 import statistics
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -104,6 +105,10 @@ class Context:
     openclaw_root: Path | None = None  # None: from the configuration
     state_dir: Path | None = None  # where the usage samples are; None: no samples
     scanning: bool = False  # serve's first scan is still running: totals may be partial
+    changes_path: Path | None = None  # the marks (changes.jsonl); None: capcom.changes' own
+    day_cache: Path | None = None  # capcom.changes' finished days; None: not kept
+    agent_dirs: Sequence[Path] | None = None  # noticed()'s definitions; None: its own
+    watching: bool = True  # False: this server never scans (serve --no-scan), so "live" is stale
     # serve's job runner (capcom.report.jobs): `step(progress, partial)` after each
     # chunk of work, with a function that builds the reply so far; it may raise
     # jobs.Cancelled, or wait while a request of higher priority runs
@@ -317,6 +322,9 @@ def status(ctx: Context) -> dict[str, Any]:
     out: dict[str, Any] = {"now": iso(ctx.now, ctx.tz), "sessions": sessions}
     out["scanning"] = ctx.scanning
     out["prices_checked"] = ctx.table.checked.isoformat()
+    from capcom.report.didit import count
+
+    out["changes"] = count(ctx)  # marked changes, the sidebar's badge
     if ctx.index_path is not None:
         st = ctx.index_path.stat()
         mtime = st.st_mtime
@@ -468,8 +476,13 @@ def spend(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
         raise ApiError(400, "bad_query", "group must be one of: " + names) from None
     since = ctx.midnight(days - 1)
     w = _window(ctx)
+    hour_projects: dict[int, dict[str, float]] = {}  # local hour start (ms) -> project -> usd
     for req in ctx.index.requests(since=since):
-        w.add(req)
+        cost = w.add(req)
+        if cost is not None and cost.total:
+            per = hour_projects.setdefault(_hour_ms(ctx, req.timestamp), {})
+            key = w.names.key(req.project_dir)
+            per[key] = per.get(key, 0.0) + cost.total
     ctx.progress(0.15)
 
     unavailable: list[str] = []
@@ -508,6 +521,7 @@ def spend(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
             )
             hourly = _tidy(full or [], group, w.names)
         daily_json, heat_json = _daily_and_heat(ctx, hourly, keep, days)
+        heat_json |= _heat_hours(ctx, hourly, hour_projects, w.names)
     marks = _spike_marks(ctx, since, ctx.now, w.infos, w.names, unavailable)
 
     rows = w.session_rows(ctx.tz)
@@ -670,6 +684,134 @@ def _daily_and_heat(
         "max": round(max(max(row) for row in cells), 6),
     }
     return daily, heat
+
+
+def _hour_ms(ctx: Context, t: datetime) -> int:
+    """The start of the local clock hour holding `t`, in epoch ms."""
+    return ms(ctx.local(t).replace(minute=0, second=0, microsecond=0))
+
+
+def _heat_hours(
+    ctx: Context,
+    hourly: Sequence[Series],
+    projects: Mapping[int, Mapping[str, float]],
+    names: ProjectNames,
+) -> dict[str, Any]:
+    """The heatmap's hours one by one: each local hour with spend (from the same
+    hourly steps as the cells) and its costliest project, so a page can lay out the
+    past days by date and list the dates behind a weekday-and-hour cell; and the
+    costliest project of each weekday-and-hour cell over the window."""
+    hours: list[dict[str, Any]] = []
+    for i, t in enumerate(hourly[0].times if hourly else ()):
+        total = sum(s.values[i] for s in hourly)
+        if total <= 0:
+            continue
+        per = projects.get(_hour_ms(ctx, t), {})
+        top = max(per, key=lambda k: per[k]) if per else None
+        hours.append(
+            {
+                "start": iso(t, ctx.tz),
+                "usd": round(total, 6),
+                "project": names.label(top) if top is not None else None,
+            }
+        )
+    cells: list[list[dict[str, float]]] = [[{} for _ in range(24)] for _ in range(7)]
+    for start, per in projects.items():
+        local = ctx.local(datetime.fromtimestamp(start / 1000, UTC))
+        cell = cells[local.weekday()][local.hour]
+        for k, v in per.items():
+            cell[k] = cell.get(k, 0.0) + v
+    top_projects = [
+        [names.label(max(c, key=lambda k: c[k])) if c else None for c in row] for row in cells
+    ]
+    return {"hours": hours, "top_projects": top_projects}
+
+
+HOUR = timedelta(hours=1)
+SPIKE_REACH = timedelta(hours=12)  # how far before an hour a spike overlapping it may start
+_OFFSET_SPACE = re.compile(r" (\d\d:?\d\d)$")
+
+
+def hour(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
+    """One local clock hour: what it cost by project, agent type and kind of token,
+    the spikes that overlap it with their causes, and its costliest sessions."""
+    raw = (query.get("start") or "").strip()
+    raw = _OFFSET_SPACE.sub(r"+\1", raw)  # a "+" left unescaped in the query reads as a space
+    try:
+        start = datetime.fromisoformat(raw)
+    except ValueError:
+        msg = "start must be an ISO 8601 time, e.g. 2026-10-21T05:00:00+02:00"
+        raise ApiError(400, "bad_query", msg) from None
+    if start.tzinfo is None:  # a local wall time
+        start = start.replace(tzinfo=ctx.tz) if ctx.tz is not None else start.astimezone()
+    if _hour_ms(ctx, start) != ms(start):
+        raise ApiError(400, "bad_query", "start must be the start of a local hour")
+    if start > ctx.now:
+        raise ApiError(404, "not_found", "that hour has not come yet")
+    end = start + HOUR
+    until = min(end, ctx.now)
+    w = _window(ctx)
+    for req in ctx.index.requests(since=start, until=until):
+        w.add(req)
+
+    unavailable: list[str] = []
+    found: list[Spike] | None = _try(
+        lambda: ctx.analysis.find_spikes(ctx.index, ctx.table, start - SPIKE_REACH, until),
+        unavailable,
+    )
+    spikes_json: list[dict[str, Any]] | None = None
+    causes_json: list[dict[str, Any]] | None = None
+    if found is not None:
+        over = [sp for sp in found if sp.end > start and sp.start < until]
+        over = sorted(over, key=lambda sp: -sp.excess_usd)[:MAX_SESSION_SPIKES]
+        explained = _try(lambda: ctx.analysis.explain(ctx.index, ctx.table, over), unavailable)
+        by_spike = _by_spike(explained or [])
+        spikes_json = [
+            _spike_json(ctx, sp, by_spike.get(sp, []), w.infos, w.agents, w.names)
+            if explained is not None
+            else _spike_json(ctx, sp, None, w.infos, w.agents, w.names)
+            for sp in over
+        ]
+        if explained is not None:
+            causes_json = _cause_totals(explained)
+    rows = w.session_rows(ctx.tz)
+    return {
+        "window": {
+            "start": iso(start, ctx.tz),
+            "end": iso(end, ctx.tz),
+            "until": iso(until, ctx.tz),
+        },
+        "partial": until < end,
+        "totals": w.total.to_json(),
+        "by_project": w.groups_json(w.by_project),
+        "by_agent": w.groups_json(w.by_agent),
+        "spikes": spikes_json,
+        "causes": causes_json,
+        "sessions_count": len(rows),
+        "sessions": rows[:5],
+        "unavailable": unavailable,
+    }
+
+
+def _cause_totals(explained: Sequence[Explanation]) -> list[dict[str, Any]]:
+    """The named causes (capcom.explain) of some spikes, largest first: each cause's
+    excess over the baseline summed over the spikes, with the headline of its largest."""
+    by: dict[str, list[Explanation]] = {}
+    for e in explained:
+        if e.cause != CauseKind.UNEXPLAINED and e.excess_usd > 0:
+            by.setdefault(str(e.cause), []).append(e)
+    out = [
+        {
+            "cause": cause,
+            "cause_label": CAUSE_LABELS.get(cause, cause),
+            "cause_color": cause_color(cause),
+            "excess_usd": round(sum(e.excess_usd for e in group), 6),
+            "spikes": len({e.spike for e in group}),
+            "title": max(group, key=lambda e: e.excess_usd).title,
+        }
+        for cause, group in by.items()
+    ]
+    return sorted(out, key=lambda c: -c["excess_usd"])
 
 
 def sessions(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
@@ -1042,7 +1184,11 @@ def live(ctx: Context) -> dict[str, Any]:
             }
         )
     out.sort(key=lambda s: (-float(s["usd_per_hour"] or 0), str(s["session_id"])))
-    return {"window_s": int(LIVE_WINDOW.total_seconds()), "sessions": out}
+    reply: dict[str, Any] = {"window_s": int(LIVE_WINDOW.total_seconds()), "sessions": out}
+    reply["watching"] = ctx.watching
+    if not ctx.watching:  # nothing new reaches the index: say how old it is, never "no session"
+        reply["index_updated"] = status(ctx).get("index", {}).get("updated")
+    return reply
 
 
 # --------------------------------------------------------------------------- spikes
@@ -1458,6 +1604,7 @@ def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     overlapping = any(finding_overlaps(f) for f in found)
     calls = _subagent_calls(ctx, since) if "one_command_subagents" in kinds else {}
     comps = _compactions(ctx, since) if "late_compactions" in kinds else {}
+    marks, measure_name = _open_marks(ctx)
     rows = []
     for i, f in enumerate(found):
         named = f.scope in dirs or f.scope.startswith("temporary (") or f.scope == TEMPORARY_LABEL
@@ -1481,6 +1628,9 @@ def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
                 # the counted findings (their `n`) that kept this one out of the total
                 "overlapped_by": [j + 1 for j in blockers[i]],
                 "visual": _visual(f, calls, comps),
+                "finding_id": f"{f.kind}@{f.scope}",
+                "mark": marks.get(f"{f.kind}@{f.scope}"),
+                "measure": measure_name(f.kind),
             }
         )
     total = savings_total(found, dirs)
@@ -1499,6 +1649,29 @@ def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
         },
         "footer": _checks_footer(total, len(small)),
     }
+
+
+def _open_marks(ctx: Context) -> tuple[dict[str, Any], Any]:
+    """The open mark of each finding ("kind@scope") as JSON, and the name of the
+    measure capcom.changes would use for a kind (None when it does not say); no marks
+    without capcom.changes."""
+    from capcom.report import didit
+
+    try:
+        backend = ctx.analysis.changes()
+        found = didit.open_by_finding(didit._marks(ctx))
+    except (Unavailable, ValueError, OSError):  # no backend, or a marks file it refuses
+        return {}, lambda kind: None
+    label = didit.labeler(ctx)
+    named = getattr(backend, "measure_name", None)
+
+    def measure_name(kind: str) -> str | None:
+        with contextlib.suppress(Exception):
+            name = named(kind) if callable(named) else None
+            return name if isinstance(name, str) else None
+        return None
+
+    return {fid: didit.mark_json(m, label) for fid, m in found.items()}, measure_name
 
 
 def _rollups(found: Sequence[Finding], rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:

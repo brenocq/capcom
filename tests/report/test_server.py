@@ -50,6 +50,17 @@ def test_static_files_and_types(client: Client) -> None:
         assert body
 
 
+def test_favicon(client: Client) -> None:
+    # the page links it, and browsers that ask /favicon.ico before reading the page get it too
+    page = client.get("/")[1].decode()
+    assert '<link rel="icon" href="/static/favicon.svg"' in page
+    for path in ("/static/favicon.svg", "/favicon.ico"):
+        status, body, headers = client.get(path)
+        assert status == 200, path
+        assert headers["Content-Type"].startswith("image/svg+xml")
+        assert body.startswith(b"<svg")
+
+
 def test_serves_a_page_load_burst(client: Client) -> None:
     # the browser fetches every module of the page at once, a connection each
     names = sorted(p.name for p in STATIC.glob("*.js"))
