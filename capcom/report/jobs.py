@@ -125,8 +125,8 @@ class Job:
     def _check(self) -> None:
         if self.cancelled is not None:
             raise Cancelled(self.cancelled)
-        if self.jobs.current_gen is not None and self.gen != self.jobs.current_gen:
-            self.cancelled = "stale"
+        if self.jobs.current_gen is not None and self.gen != self.jobs.current_gen and self.low:
+            self.cancelled = "stale"  # a page's job ends its reply, as the click saw the data
         elif self.started is not None and self.jobs.clock() - self.started > self.jobs.timeout:
             self.cancelled = "timeout"
         if self.cancelled is not None:
@@ -218,15 +218,17 @@ class Jobs:
         return self._pages(job, started=False) or self._pages(job, started=True)
 
     def set_gen(self, gen: Hashable) -> None:
-        """The index's current generation: jobs of another one stop at their next
-        step and are forgotten."""
+        """The index's current generation: jobs of another one are forgotten (a new
+        request starts a new one); background ones stop at their next step, while a
+        page's job finishes the reply its page is polling for, so a scan in the
+        middle of a click never makes the click start over."""
         with self._lock:
             if gen == self.current_gen:
                 return
             self.current_gen = gen
             for key, job in list(self._by_key.items()):
                 if job.gen != gen:
-                    if job.result is None:
+                    if job.result is None and job.low:
                         job.cancelled = job.cancelled or "stale"
                     del self._by_key[key]
             self._turn.notify_all()

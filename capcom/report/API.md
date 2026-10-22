@@ -35,8 +35,9 @@ the job has a newer partial reply or ends, and gets `202` with newer progress an
 partial replies, then the final `200` (or the endpoint's error). `progress` never goes
 back; between the job's own steps it is estimated from how long the same view took last
 time. A `job` the server no longer knows is ignored: the request is answered as if it
-were the first. A job is dropped when the index's generation changes (the next poll
-starts a new one), stops after 120 s (the poll gets `504 {"error": "timeout"}`), and
+were the first. When the index's generation changes, a background job is dropped,
+while a page's job finishes the reply its page polls for (its `job` keeps being
+followed; a request without it starts a new job on the new data). A job stops after 120 s (the poll gets `504 {"error": "timeout"}`), and
 runs at low priority once no page polled it for 2.5 s. `status` and `live` are always
 answered at once.
 

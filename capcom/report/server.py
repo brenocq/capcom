@@ -811,7 +811,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         jobs.set_gen(key[0])
         job = jobs.by_id(job_id) if job_id else None
-        if job is None or job.key != key or (job.cancelled and job.result is None):
+        if job is None or not _same_view(job.key, key) or (job.cancelled and job.result is None):
             job = jobs.find(key)
         if job is None:
             work = _work(site, name, parts, query, now, key, background=low)
@@ -862,6 +862,16 @@ def version(site: Site) -> dict[str, Any]:
         "marks": digest(_changes_stamp(site)),
         "updated": updated,
     }
+
+
+def _same_view(a: Any, b: tuple[Any, ...]) -> bool:
+    """Two cache keys of the same view, maybe of different index generations (or
+    usage samples, or marks): a poll keeps following the job its page started."""
+    if not isinstance(a, tuple) or len(a) != len(b):
+        return False
+    stamps = ("samples", "marks")
+    args = [tuple(x for x in k[4] if x[0] not in stamps) for k in (a, b)]
+    return a[1:4] == b[1:4] and args[0] == args[1]
 
 
 def _ctype(result: Result) -> str:

@@ -147,7 +147,7 @@ def test_requests_for_one_view_share_a_job(index_path: Path) -> None:
     assert gate.calls == 2  # one explain per view (one chunk each)
 
 
-def test_a_new_index_generation_drops_the_job(
+def test_a_new_index_generation_lets_the_page_finish_its_job(
     index_path: Path, tmp_path: Path, small_batches: None
 ) -> None:
     path = tmp_path / "index.sqlite"
@@ -162,13 +162,19 @@ def test_a_new_index_generation_drops_the_job(
             conn.execute("CREATE TABLE IF NOT EXISTS scratch (x)")
             conn.execute("INSERT INTO scratch VALUES (1)")
         status, body = _poll(client, "/api/spikes?days=1", job)
-        assert status == 202 and body["job"] != job  # a new job, for the new index
+        assert status == 202 and body["job"] == job  # the click's job goes on
+        status, fresh, _ = client.get("/api/spikes?days=1")  # a new request: new data
+        assert status == 202 and fresh["job"] != job
         gate.tokens.release(99)
         deadline = time.monotonic() + 10
         while status == 202 and time.monotonic() < deadline:
-            status, body = _poll(client, "/api/spikes?days=1", body["job"])
+            status, body = _poll(client, "/api/spikes?days=1", job)
         assert status == 200
-    assert site.jobs is not None and len(site.jobs) == 0
+    assert site.jobs is not None
+    deadline = time.monotonic() + 10
+    while len(site.jobs) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert len(site.jobs) == 0
 
 
 def test_a_job_past_its_time_limit_is_a_504(index_path: Path, small_batches: None) -> None:
@@ -234,14 +240,17 @@ def test_background_job_holding_a_needed_slot_is_cancelled() -> None:
     assert bg.done.wait(5) and bg.cancelled == "cancelled"
 
 
-def test_set_gen_cancels_running_jobs() -> None:
+def test_set_gen_cancels_background_jobs_and_lets_a_page_finish() -> None:
     jobs = Jobs()
     jobs.set_gen("g1")
-    job = jobs.submit("k", "g1", _stepper(200, 0.01, [], "x"))
+    bg = jobs.submit("w", "g1", _stepper(200, 0.01, [], "x"), background=True)
+    page = jobs.submit("k", "g1", _stepper(20, 0.01, [], "x"))
     time.sleep(0.05)
     jobs.set_gen("g2")
-    assert job.done.wait(5) and job.cancelled == "stale" and job.result is None
-    assert jobs.find("k") is None
+    assert bg.done.wait(5) and bg.cancelled == "stale" and bg.result is None
+    # the page's job ends the reply its page polls for; a new request starts afresh
+    assert page.done.wait(5) and page.cancelled is None and page.result is not None
+    assert jobs.find("k") is None and jobs.by_id(page.id) is page
 
 
 def test_progress_is_monotonic_and_estimated_between_steps() -> None:
