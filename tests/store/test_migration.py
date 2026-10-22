@@ -303,3 +303,16 @@ def test_v6_index_gains_total_duration_and_rereads(config: Config) -> None:
     with open_index(config.index_path, readonly=True) as ix:
         (cs,) = ix.last_cost_states()
         assert cs.total_duration_ms == 90_000
+
+
+def test_an_index_from_a_newer_capcom_asks_for_an_update(tmp_path: Path) -> None:
+    path = tmp_path / "index.sqlite"
+    open_index(path).close()
+    con = sqlite3.connect(path)
+    con.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION + 1,))
+    con.commit()
+    con.close()
+    for readonly in (True, False):
+        with pytest.raises(RuntimeError, match="a newer capcom wrote it") as err:
+            open_index(path, readonly=readonly)
+        assert "capcom scan" not in str(err.value)  # a scan by this capcom cannot fix it
