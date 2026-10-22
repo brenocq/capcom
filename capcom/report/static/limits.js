@@ -144,8 +144,9 @@ function fitNote(w) {
 // Usage windows over time: each window's readings as a rising line that drops to
 // 0 at its reset, a dashed line at 100%, and the current window's forecast as a
 // fan (the 80% range, filled, with hairline edges, and the median dashed).
-// Each reading is a dot; the stretch from a window's reset (0 %) to its first reading
-// is dashed and labeled, since nothing was read there.
+// Readings are drawn as the line alone (Breno found the dots crowded); only a reading
+// that hit the limit gets a mark. The stretch from a window's reset (0 %) to its first
+// reading is dashed and labeled, since nothing was read there.
 // opts: {segments: [{points, resets_at, reset, hit_limit, start_known}], fan, now, x0, x1,
 //        height, left, weekly, since (ms: when recording began), runout (runoutMark)}
 export function limitChart(opts) {
@@ -215,13 +216,11 @@ export function limitChart(opts) {
       h('span.ylab', { style: `left:-${left}px;top:${t}`, text: `${v}%` }));
   }
   plot.append(svg);
-  // each reading as a dot (too many to tell apart: only the limit hits)
+  // only the readings that hit the limit get a mark; the others are the line itself
   const xp = (t) => ((t - x0) / (x1 - x0) * 100).toFixed(2) + '%';
   const yp = (v) => ((1 - v / ymax) * 100).toFixed(2) + '%';
-  const shown = hover.filter((p) => p.t >= x0 && p.t <= x1);
-  for (const p of shown) {
-    if (p.hit) plot.append(h('span.enddot', { style: `left:${xp(p.t)};top:${yp(p.v)};background:var(--accent-strong)`, title: 'Rate limit hit' }));
-    else if (shown.length <= 240) plot.append(h('span.rdot', { style: `left:${xp(p.t)};top:${yp(p.v)}` }));
+  for (const p of hover) {
+    if (p.hit && p.t >= x0 && p.t <= x1) plot.append(h('span.enddot', { style: `left:${xp(p.t)};top:${yp(p.v)};background:var(--accent-strong)`, title: 'Rate limit hit' }));
   }
   for (const g of gaps) {
     if ((g.b[0] - Math.max(g.a[0], x0)) / (x1 - x0) < 0.12) continue; // too narrow to label

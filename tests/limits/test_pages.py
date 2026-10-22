@@ -170,7 +170,7 @@ console.log(JSON.stringify({{ text: texts(el), range: m.runsOut(fc, at), low: m.
 
 
 @needs_node
-def test_readings_are_dots_and_the_unseen_start_is_dashed() -> None:
+def test_readings_are_a_line_without_dots_and_the_unseen_start_is_dashed() -> None:
     got = node(
         f"""
 const m = await import('./limits.js');
@@ -184,7 +184,7 @@ console.log(JSON.stringify({{
 }}));
 """
     )
-    assert got["dots"] == 2  # the two readings, not the window's start
+    assert got["dots"] == 0  # readings are the line itself, no dots
     assert got["labels"] == ["before recording"]
     unseen = [p for p in got["paths"] if p.get("stroke-dasharray") == "4 4"]
     assert len(unseen) == 1 and unseen[0]["style"] == "stroke:var(--muted)"
