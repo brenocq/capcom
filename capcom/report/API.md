@@ -1,7 +1,8 @@
 # capcom serve: the JSON API
 
 `capcom serve` listens on `127.0.0.1` only (default port 8787). Every endpoint is a
-`GET` (`HEAD` gives the same headers without the body); other methods get 405. There are no CORS headers, and a request whose `Host`
+`GET` (`HEAD` gives the same headers without the body) but one, `POST /api/changes`
+(the marks of "Did it work?", below); other methods and paths get 405. There are no CORS headers, and a request whose `Host`
 header is not `127.0.0.1` or `localhost` gets 403 (DNS rebinding). Each request opens
 the index read-only and closes it before answering.
 
@@ -49,7 +50,12 @@ Errors are JSON: `{"error": code, "message": text, ...}`.
 | Status | `error` | When |
 | --- | --- | --- |
 | 400 | `bad_query` | A query parameter is out of range or unknown. |
-| 404 | `not_found` | Unknown endpoint or session. |
+| 400 | `bad_request`, `bad_json` | `POST /api/changes`: a body outside the schema, or not JSON. |
+| 403 | `bad_token`, `cross_origin` | `POST /api/changes` without this launch's token, or from another origin. |
+| 404 | `not_found` | Unknown endpoint, session or change. |
+| 405 | | A method other than GET and HEAD, except `POST /api/changes`; that one too under `--read-only`. |
+| 409 | `already_marked` | `POST /api/changes`: the finding already has an open mark. |
+| 411, 413, 415 | `no_length`, `too_large`, `bad_type` | `POST /api/changes`: no Content-Length, a body over 4 KB, not `application/json`. |
 | 501 | `unavailable` | The analysis module behind it is not built yet; adds `module` and `milestone`. |
 | 503 | `no_index` | No index, or one written by another capcom version: run `capcom scan`. Adds `scanning`: true when serve's scan is running (the message then says the logs are being read). |
 | 503 | `index_busy` | SQLite could not read the index. |
@@ -57,8 +63,10 @@ Errors are JSON: `{"error": code, "message": text, ...}`.
 Anything else is a plain-text `500 internal error` that says nothing more; the
 traceback goes to the terminal only. A static name that cannot be a file (a NUL byte,
 a name too long) or that resolves outside `static/` is a 404.
-Page paths (`/`, `/spend`, `/sessions`, `/session/<id>`, `/spikes`, `/checks`, `/limits`) serve
-`static/index.html`, or a 503 page saying to run `capcom scan` when the index is
+Page paths (`/`, `/spend`, `/sessions`, `/session/<id>`, `/spikes`, `/checks`, `/changes`,
+`/changes/<id>`, `/limits`) serve `static/index.html` with this launch's write token in
+`<meta name="capcom-token">` (and `<meta name="capcom-read-only" content="1">` under
+`--read-only`), or a 503 page saying to run `capcom scan` when the index is
 missing or old. Static files are under `/static/`.
 
 ## Shared shapes
@@ -434,3 +442,119 @@ index; `small` marks two calls or fewer), `{type: "dots", label, values, thresho
 (context size when each compaction of the finding's project started, from the index),
 `{type: "gauge", label, value, limit}` (memory size against its budget, the largest
 context against its threshold).
+
+Each finding also carries `finding_id`, `"<kind>@<scope>"`, the same in every window
+and scan; `mark`, its open mark (a `Mark`, below) or null; and `measure`, the name of
+the rate capcom.changes would measure for its kind, or null when it does not say.
+
+### Did it work?
+
+The user marks a finding as applied on a date; `capcom.changes` measures the
+finding's own rate over the 4 weeks before that date and from the day after, weekly
+(`design.md`, "Did it work?"). The marks live in `$XDG_DATA_HOME/capcom/changes.jsonl`,
+the only file capcom writes besides its cache; its size and modification time are
+part of the cache key of `checks` and `changes` (the replies that show marks), so a
+mark shows on Checks and here at once and leaves every other reply cached. The
+measures keep each finished day in `changes-days.sqlite` in the cache folder, the
+file `capcom changes` keeps too, so a request reads from the index only the days not
+measured before (and today). All dates are
+`YYYY-MM-DD` local dates; `marked_at` and `since` are ISO 8601 times. 501
+(`module` "changes") while `capcom.changes` is missing.
+
+```
+Mark = {id, finding_id, kind, scope, scope_label, applied_on, title, what, note,
+        expected_usd_per_week, marked_at, source}
+Result = Mark + {days_since, measure, before, after, before_range: [low, high] | null,
+                 requests_per_week_before, requests_per_week_after,
+                 measured_usd_per_week, verdict, verdict_due, reason,
+                 evidence: [{label, before, after}], quality: [{label, before, after}],
+                 window: {before_from, before_to, after_from}}
+```
+
+`what` is "suggested" (the finding's own change) or "other"; `source` "user" or
+"noticed"; `note` is the user's own words, at most 500 characters, which the pages
+render as text. `title` and `expected_usd_per_week` are the finding's when it was
+marked. `measure` names what is counted (such as "Tool-wait rewrites per 1,000
+requests"; "(no measure)" for a kind capcom cannot measure yet). The verdict compares
+rates, so a busier week does not count: `working` / `worse` when the after days' rate
+is below / above the before days' by a permutation test over days at 95 % and by more
+than the before days' usual swing; `no_effect` otherwise; `too_early` under 7 days, or
+too few requests in scope since the date (`verdict_due`: when to look again, projected
+from the pace of requests since; null when none came since); `no_data` (the pages say
+"Can't tell") without a measure, with too little in scope before the date, for work
+that only started after it, or when the requests in scope per week changed 4-fold.
+`reason` is that sentence with its numbers. `before_range` is the lowest and highest
+before week (weeks with a small share of the usual workload left out).
+`measured_usd_per_week` is given for working (positive, a saving) and worse
+(negative), null otherwise: (before − after) × the after weeks' workload × what one
+counted unit cost in the before window, API-equivalent. `evidence` holds the counts
+behind the measure, `quality` the signals to judge a model change by (requests per
+spawn, tool errors per 100 calls); empty otherwise. `window.before_from` is the first
+before week's start, null without weeks.
+
+#### `GET /api/changes`
+
+```
+{marks, counts: {working, no_effect, worse, too_early, no_data},
+ with_verdict: {changes, measured_usd_per_week, expected_usd_per_week, share},
+ next_verdict, changes: [Result], path}
+```
+
+Every open mark measured, the latest date first. `with_verdict` sums the measured and
+the expected savings over the changes with a verdict (working, no clear effect or
+worse); `share` is measured over expected, null without an expectation.
+`next_verdict` is the earliest `verdict_due` of the changes still too early. `path`
+is the marks file.
+
+#### `GET /api/changes/<id>`
+
+One `Result` with `weeks: [{week_start, value, requests, after}]`: the before weeks
+(up to 4, clipped where the logs begin) and the weeks from the day after the date,
+each starting on the applied weekday, `value` null for a week without requests in
+scope; empty for a kind without a measure. 404 for an unknown id.
+
+#### `GET /api/changes/noticed?days=14`
+
+`{days, noticed: [{finding_id, kind, scope, scope_label, title, path, detail, since,
+saving_usd_per_week}]}`: changes capcom saw in a file it already reads (an agent
+definition's frontmatter, `detail` such as "model: sonnet", modified at `since`) that
+answer a finding of the Checks window (`days`: 7, 14 or 30), without an open mark yet.
+The page asks the user to confirm each; "Not this" is remembered in the browser only.
+The reply is cached like the others, so a definition edited since shows within 5
+minutes, or after a scan or a mark.
+
+`/api/status` also carries `changes`: how many marks are open (null without
+`capcom.changes`), the sidebar's count.
+
+#### `POST /api/changes`
+
+The one write. The request must have (and send it within 30 seconds: every request
+has a socket timeout, so a body shorter than its `Content-Length` cannot hold a
+thread):
+
+- a `Host` of `127.0.0.1` or `localhost` (403, as every request);
+- an `Origin` of `http://127.0.0.1:<port>` or `http://localhost:<port>`, this server's
+  own port, or with no `Origin`, a `Referer` on one of them (403 `cross_origin`);
+- the header `X-Capcom-Token` equal to this launch's token, a random
+  `secrets.token_urlsafe` value made when the server starts and found only in the
+  pages' `<meta name="capcom-token">` (403 `bad_token`);
+- `Content-Type: application/json` (415) and a `Content-Length` (411) of at most
+  4,096 bytes (413);
+- a JSON object in one of these shapes, no other fields (400 otherwise):
+
+```
+{action: "mark", kind, scope, applied_on, what?, note?, days?, source?}
+{action: "edit", id, applied_on?, note?}         (at least one of the two)
+{action: "unmark", id}
+```
+
+A mark's `kind` and `scope` must name a finding of Checks over `days` (7, 14 or 30;
+14 by default) without an open mark (409 `already_marked`: one open mark per
+finding, so re-marking is changing the date, or unmarking first; also when `capcom
+mark` wrote one meanwhile and `capcom.changes` refuses the second); its title and
+saving are taken from that finding (from the cached Checks reply of that window when
+there is one), not from the request. The finding is looked up before the write lock
+is taken; under it, only the marks are read again and written. `applied_on` cannot be after today nor
+before the first day the index holds; `id` must be an open mark (404). The reply is
+`{mark: Mark}`, or `{unmarked: id}`. `capcom serve --read-only` answers 405 and the
+pages leave out every button that writes.

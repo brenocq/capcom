@@ -104,6 +104,9 @@ class Context:
     openclaw_root: Path | None = None  # None: from the configuration
     state_dir: Path | None = None  # where the usage samples are; None: no samples
     scanning: bool = False  # serve's first scan is still running: totals may be partial
+    changes_path: Path | None = None  # the marks (changes.jsonl); None: capcom.changes' own
+    day_cache: Path | None = None  # capcom.changes' finished days; None: not kept
+    agent_dirs: Sequence[Path] | None = None  # noticed()'s definitions; None: its own
 
     def local(self, t: datetime) -> datetime:
         return t.astimezone(self.tz)
@@ -305,6 +308,9 @@ def status(ctx: Context) -> dict[str, Any]:
     out: dict[str, Any] = {"now": iso(ctx.now, ctx.tz), "sessions": sessions}
     out["scanning"] = ctx.scanning
     out["prices_checked"] = ctx.table.checked.isoformat()
+    from capcom.report.didit import count
+
+    out["changes"] = count(ctx)  # marked changes, the sidebar's badge
     if ctx.index_path is not None:
         st = ctx.index_path.stat()
         mtime = st.st_mtime
@@ -1369,6 +1375,7 @@ def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     overlapping = any(finding_overlaps(f) for f in found)
     calls = _subagent_calls(ctx, since) if "one_command_subagents" in kinds else {}
     comps = _compactions(ctx, since) if "late_compactions" in kinds else {}
+    marks, measure_name = _open_marks(ctx)
     rows = []
     for i, f in enumerate(found):
         named = f.scope in dirs or f.scope.startswith("temporary (") or f.scope == TEMPORARY_LABEL
@@ -1392,6 +1399,9 @@ def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
                 # the counted findings (their `n`) that kept this one out of the total
                 "overlapped_by": [j + 1 for j in blockers[i]],
                 "visual": _visual(f, calls, comps),
+                "finding_id": f"{f.kind}@{f.scope}",
+                "mark": marks.get(f"{f.kind}@{f.scope}"),
+                "measure": measure_name(f.kind),
             }
         )
     total = savings_total(found, dirs)
@@ -1410,6 +1420,29 @@ def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
         },
         "footer": _checks_footer(total, len(small)),
     }
+
+
+def _open_marks(ctx: Context) -> tuple[dict[str, Any], Any]:
+    """The open mark of each finding ("kind@scope") as JSON, and the name of the
+    measure capcom.changes would use for a kind (None when it does not say); no marks
+    without capcom.changes."""
+    from capcom.report import didit
+
+    try:
+        backend = ctx.analysis.changes()
+        found = didit.open_by_finding(didit._marks(ctx))
+    except (Unavailable, ValueError, OSError):  # no backend, or a marks file it refuses
+        return {}, lambda kind: None
+    label = didit.labeler(ctx)
+    named = getattr(backend, "measure_name", None)
+
+    def measure_name(kind: str) -> str | None:
+        with contextlib.suppress(Exception):
+            name = named(kind) if callable(named) else None
+            return name if isinstance(name, str) else None
+        return None
+
+    return {fid: didit.mark_json(m, label) for fid, m in found.items()}, measure_name
 
 
 def _rollups(found: Sequence[Finding], rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:

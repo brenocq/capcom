@@ -116,3 +116,74 @@ def test_band_chart_draws_the_total_and_each_series_from_zero() -> None:
     # not stacked: the smaller series stays below the larger one, and the total
     # (5 then 9) lies above both
     assert all(t < x < y for t, x, y in zip(total[1:], a[1:], b[1:], strict=True))
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_week_bars_split_before_and_after_at_the_applied_date() -> None:
+    script = (
+        FAKE_DOM
+        + """
+globalThis.document.querySelector = () => null;
+const m = await import('./changes.js');
+const weeks = ['2026-09-24', '2026-10-01', '2026-10-08', '2026-10-15'].map((d, i) =>
+  ({ week_start: d, value: [36, 41, 33, 43][i], requests: 1000, after: false }));
+weeks.push({ week_start: '2026-10-23', value: 6.2, requests: 1100, after: true });
+weeks.push({ week_start: '2026-10-30', value: null, requests: 0, after: true });
+const el = m.weekBars({ measure: 'Rewrites per 1,000 requests', before: 38.2, after: 4.1,
+  applied_on: '2026-10-22', weeks });
+const all = walk(el, []);
+const groups = all.filter((n) => n.tag === 'g' && /^wk /.test(n.attrs.class || ''));
+const bars = (g) => g.children.filter((c) => c.attrs.class === 'bar');
+const applied = all.find((n) => n.attrs.class === 'applied');
+const firstAfter = groups[4].children.find((c) => c.attrs.class === 'hit');
+console.log(JSON.stringify({
+  classes: groups.map((g) => g.attrs.class),
+  bars: groups.map((g) => bars(g).length),
+  texts: all.filter((n) => n.tag === 'text').map((n) => n.textContent),
+  appliedX: applied.attrs.x1, afterX: firstAfter.attrs.x,
+  label: el.attrs['aria-label'],
+}));
+"""
+    )
+    out = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=STATIC,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    got = json.loads(out.stdout)
+    assert got["classes"] == ["wk before"] * 4 + ["wk after"] * 2
+    assert got["bars"] == [1, 1, 1, 1, 1, 0]  # a week without requests has no bar
+    assert {"before: 38.2", "after: 4.1", "Applied Oct 22", "none", "Oct 23"} <= set(got["texts"])
+    assert abs(float(got["appliedX"]) - float(got["afterX"])) < 0.01  # the line opens week 5
+    assert got["label"].endswith("Oct 23 6.2, Oct 30 no requests")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_verdict_labels() -> None:
+    script = (
+        FAKE_DOM
+        + """
+globalThis.document.querySelector = () => null;
+const m = await import('./marks.js');
+const labels = Object.entries(m.VERDICTS).map(([k, v]) => [k, v.label]);
+console.log(JSON.stringify(Object.fromEntries(labels)));
+"""
+    )
+    out = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=STATIC,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    assert json.loads(out.stdout) == {
+        "working": "Working",
+        "no_effect": "No clear effect",
+        "worse": "Worse",
+        "too_early": "Too early",
+        "no_data": "Can\u2019t tell",
+    }
