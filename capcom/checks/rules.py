@@ -22,6 +22,7 @@ may share dollars with (`_OVERLAP_PAIRS`), and such findings are not to be added
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 from collections import defaultdict
@@ -124,6 +125,7 @@ def _accounts(
             yield sid, aid, key, acc
 
 
+@functools.lru_cache(maxsize=8192)  # a few thousand item keys, met millions of times
 def _server(key: ItemKey) -> str | None:
     """The MCP server an item belongs to (tool names `mcp__<server>__<tool>`, or the
     server named by an instructions item)."""
@@ -188,10 +190,12 @@ def claudeai_connectors_unused(facts: Facts) -> list[Finding]:
     prompt price."""
     listed: dict[str, dict[str, _Sum]] = defaultdict(dict)  # project -> session -> sum
     servers: dict[str, set[str]] = defaultdict(set)
+    token_requests: dict[str, int] = defaultdict(int)  # session -> connector tokens x requests
     for sid, aid, key, acc in _accounts(facts, _is_connector):
         project = _group(facts.project_of(sid))
         listed[project].setdefault(sid, _Sum()).add(sid, aid, acc)
         servers[project].add(_server(key) or "?")
+        token_requests[sid] += acc.size * acc.requests
     out: list[Finding] = []
     for project, sessions in listed.items():
         using = {
@@ -204,7 +208,7 @@ def claudeai_connectors_unused(facts: Facts) -> list[Finding]:
             continue
         usd = sum(s.usd for s in unused.values())
         reqs = sum(s.requests for s in unused.values())
-        tokens = _connector_tokens(facts, unused)
+        tokens = _connector_tokens(token_requests, unused)
         names = sorted(n.removeprefix("claude_ai_").replace("_", " ") for n in servers[project])
         top = sorted(unused.items(), key=lambda kv: -kv[1].usd)[:EVIDENCE_PER_FINDING]
         summary = (
@@ -261,15 +265,13 @@ def claudeai_connectors_unused(facts: Facts) -> list[Finding]:
     return out
 
 
-def _connector_tokens(facts: Facts, sessions: Mapping[str, _Sum]) -> int:
-    """Connector tokens per request in `sessions`, averaged over their requests."""
-    token_requests = sum(
-        acc.size * acc.requests
-        for sid, _aid, _key, acc in _accounts(facts, _is_connector)
-        if sid in sessions
-    )
+def _connector_tokens(token_requests: Mapping[str, int], sessions: Mapping[str, _Sum]) -> int:
+    """Connector tokens per request in `sessions`, averaged over their requests
+    (`token_requests`: each session's connector tokens x requests, summed once for
+    every project instead of a pass over every account per project)."""
+    total = sum(token_requests.get(sid, 0) for sid in sessions)
     reqs = sum(s.requests for s in sessions.values())
-    return round(token_requests / reqs) if reqs else 0
+    return round(total / reqs) if reqs else 0
 
 
 # --------------------------------------------------------------------------- MCP servers
@@ -602,6 +604,10 @@ def agent_tools_unused(
     spawns, and says in a comment that it is a restriction and how many tools it
     removes."""
     out: list[Finding] = []
+    tools: dict[tuple[str, str | None], list[_ToolAccount]] = defaultdict(list)
+    for pos, (sid, aid, key, acc) in enumerate(_accounts(facts, lambda k: k[0] == "tool")):
+        tools[(sid, aid)].append((pos, sid, aid, key, acc))  # each thread's tool accounts, in order
+    openclaw: dict[str, bool] = {}
     for kind, all_threads in _agent_threads(facts).items():
         if kind in BUILT_IN_AGENTS or kind.startswith("(") or len(all_threads) < MIN_AGENTS:
             continue
@@ -611,8 +617,15 @@ def agent_tools_unused(
         infos = [facts.agents.get(t.agent_id or "") for t in all_threads]
         if any(i is not None and i.is_built_in for i in infos):
             continue
-        out.extend(_tools_unused_for(facts, kind, all_threads, defs, openclaw_root, user_dir))
+        out.extend(
+            _tools_unused_for(
+                facts, kind, all_threads, defs, openclaw_root, user_dir, tools, openclaw
+            )
+        )
     return out
+
+
+_ToolAccount = tuple[int, str, str | None, ItemKey, Account]  # place, session, agent, key
 
 
 def _tools_unused_for(
@@ -622,7 +635,18 @@ def _tools_unused_for(
     defs: AgentDefinition | Sequence[AgentDefinition],
     openclaw_root: Path | None,
     user_dir: Path | None,
+    tools: Mapping[tuple[str, str | None], list[_ToolAccount]],
+    openclaw: dict[str, bool],
 ) -> list[Finding]:
+    """`tools`: each thread's tool accounts with their place in `facts.accounts`;
+    `openclaw`: `_is_openclaw` per project, filled as it goes (both shared by every
+    agent type, instead of a pass over every account and path per type)."""
+
+    def is_openclaw(project: str) -> bool:
+        if project not in openclaw:
+            openclaw[project] = _is_openclaw(facts, project, openclaw_root)
+        return openclaw[project]
+
     out: list[Finding] = []
     for definition, scope, claimed in _scoped(facts, defs, user_dir):
 
@@ -631,7 +655,7 @@ def _tools_unused_for(
         ) -> bool:
             if scope is not None:
                 return project in scope
-            return project not in claimed and not _is_openclaw(facts, project, openclaw_root)
+            return project not in claimed and not is_openclaw(project)
 
         threads = [t for t in all_threads if governed(t.project)]
         if len(threads) < MIN_AGENTS:
@@ -651,13 +675,11 @@ def _tools_unused_for(
             continue
         sized: dict[str, dict[str, _Sum]] = defaultdict(dict)  # name -> family -> sum
         shape_requests: dict[tuple[str, str | None], int] = {}
-        for sid, aid, key, acc in _accounts(facts, lambda k: k[0] == "tool"):
-            if (sid, aid) in keys:
-                sized[key[2]].setdefault(key[1], _Sum()).add(sid, aid, acc)
-                if key[1] == "shape":
-                    shape_requests[(sid, aid)] = max(
-                        shape_requests.get((sid, aid), 0), acc.requests
-                    )
+        mine = sorted((e for k in keys for e in tools.get(k, ())), key=lambda e: e[0])
+        for _pos, sid, aid, key, acc in mine:  # in facts.accounts' order, as before
+            sized[key[2]].setdefault(key[1], _Sum()).add(sid, aid, acc)
+            if key[1] == "shape":
+                shape_requests[(sid, aid)] = max(shape_requests.get((sid, aid), 0), acc.requests)
         spawns = len(threads)
         requests = sum(t.requests for t in threads)
         scale = requests / sum(shape_requests.values()) if shape_requests else 1.0
