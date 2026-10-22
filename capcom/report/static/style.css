@@ -172,9 +172,21 @@ details.astable[open] > summary { margin-bottom: 6px; }
 table.data.small { min-width: 0; font-size: 12px; }
 table.data.small td { padding: 5px 10px; }
 .days { display: flex; align-items: flex-end; gap: 6px; height: 200px; border-bottom: 1px solid var(--l15); }
-.day { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 4px; }
-.day .amt { font-size: 10px; color: var(--muted); white-space: nowrap; }
-.day .bar { width: 100%; max-width: 26px; display: flex; flex-direction: column-reverse; gap: 2px; border-radius: 4px 4px 0 0; overflow: hidden; }
+.day { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; position: relative; }
+/* bars reach --scale of the chart's height at the highest day; the amount sits 4 px
+   above its bar, level ("flat"), upright ("rot", leaving more room on top) or only
+   on the highest day and today ("key") */
+.days { --scale: 85%; }
+.days.rot { --scale: 74%; }
+.day .bar { width: 100%; max-width: 26px; height: calc(var(--f, 0) * var(--scale)); display: flex; flex-direction: column-reverse; gap: 2px; border-radius: 4px 4px 0 0; overflow: hidden; }
+.day .amt { position: absolute; left: 50%; bottom: calc(var(--f, 0) * var(--scale) + 4px); transform: translateX(-50%);
+  font-size: 10px; line-height: 12px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; letter-spacing: -0.2px; pointer-events: none; }
+.day .amt.key { color: var(--text); }
+.days.rot .amt { writing-mode: vertical-rl; transform: translateX(-50%) rotate(180deg); }
+.days.key .amt:not(.key) { visibility: hidden; }
+/* thin bars: the end labels stay inside the chart */
+.days.key .day:first-child .amt { left: 0; transform: none; }
+.days.key .day:last-child .amt { left: auto; right: 0; transform: none; }
 .day .bar div { min-height: 0; }
 a.day { color: inherit; text-decoration: none; }
 a.day:hover .bar, a.day:focus-visible .bar { filter: brightness(1.15); }

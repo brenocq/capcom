@@ -226,18 +226,23 @@ function clearOfMarks(plot, lab, fx, fy, axis) {
 export function dayBars(days, members, todayIso) {
   const max = Math.max(...days.map((d) => d.total), 1e-9);
   const many = days.length > 31;
-  // the amount shows above the highest day and today only; every day's is on hover
+  // every day's amount sits above its bar: level when it fits the bar's width,
+  // turned upright when it does not; on a phone, or with bars too thin even for
+  // that, only the highest day and today keep theirs (every day's is on hover)
   const top = days.reduce((a, d, i) => (d.total > days[a].total ? i : a), 0);
-  const bars = h('div.days.hl', { style: many ? 'gap:2px' : '' }, days.map((d, i) => {
-    const bar = h('div.bar', { style: `height:${(d.total / max * 85).toFixed(1)}%` },
+  const bars = h('div.days.hl.' + (many ? 'key' : 'flat'), { style: many ? 'gap:2px' : '' }, days.map((d, i) => {
+    const f = `--f:${(d.total / max).toFixed(4)}`;
+    const bar = h('div.bar', null,
       d.values.map((v, j) => (v > 0 ? h('div', { style: `flex:${v} 1 0px;background:${members[j].color}` }) : null)));
-    const shown = !many && d.total > 0 && (i === top || i === days.length - 1);
-    const col = h('a.day', { href: `/day/${d.iso}` }, many ? null : h('span.amt', { text: shown ? usdShort(d.total) : '' }), bar);
+    const key = i === top || i === days.length - 1;
+    const amt = d.total > 0 ? h('span.amt' + (key ? '.key' : ''), { text: usdShort(d.total), 'aria-hidden': 'true' }) : null;
+    const col = h('a.day', { href: `/day/${d.iso}`, style: f }, amt, bar);
     const rows = () => members
       .map((m, j) => ({ label: m.label, value: usd(d.values[j]), color: m.color }))
       .filter((r, j) => d.values[j] > 0).reverse();
     return tipOn(col, `${monthDay(d.date)}: ${usd(d.total)}`, rows, { native: true, aria: `${monthDay(d.date)}: ${usd(d.total)}, open the day` });
   }));
+  fitAmounts(bars, days.map((d) => (d.total > 0 ? usdShort(d.total).length : 0)));
   const step = many ? 7 : days.length > 14 ? 3 : 1;
   // a regular label too close to today's (always shown, at the end) would run into it
   const clear = (i) => days.length - 1 - i >= Math.ceil(step * 0.8);
@@ -250,6 +255,27 @@ export function dayBars(days, members, todayIso) {
   })));
   // a few days keep bars wide enough to tap, scrolling inside the card when narrow
   return h('div.daychart', { style: many ? null : `--days:${days.length}` }, bars, labs);
+}
+
+// Choose how the per-day amounts show for the bars' width now: "flat" (level),
+// "rot" (upright) or "key" (highest day and today only). A label is about 6 px a
+// character at 10 px; upright, it needs a bar at least 11 px wide.
+const PHONE = '(max-width: 599.98px)';
+function fitAmounts(bars, lengths) {
+  if (typeof ResizeObserver === 'undefined' || typeof window === 'undefined') return;
+  const n = lengths.length;
+  const need = Math.max(...lengths, 0) * 6 + 4;
+  const phone = window.matchMedia ? window.matchMedia(PHONE) : null;
+  const fit = () => {
+    const w = bars.clientWidth;
+    if (!w) return;
+    const gap = parseFloat(getComputedStyle(bars).columnGap) || 0;
+    const col = (w - gap * (n - 1)) / n;
+    const mode = phone && phone.matches ? 'key' : col >= need ? 'flat' : col >= 11 ? 'rot' : 'key';
+    for (const m of ['flat', 'rot', 'key']) bars.classList.toggle(m, m === mode);
+  };
+  new ResizeObserver(fit).observe(bars);
+  if (phone && phone.addEventListener) phone.addEventListener('change', fit);
 }
 
 // ------------------------------------------------------------------ heatmap

@@ -100,6 +100,34 @@ console.log(JSON.stringify({
     assert got["labels"][89] == "Oct 21"
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_day_bars_put_an_amount_on_every_day_with_spend() -> None:
+    got = _node("""
+const m = await import('./charts.js');
+const totals = [0, 12.5, 1234, 80, 3.2, 640, 41];
+const days = totals.map((t, i) => ({ date: new Date(2026, 9, 16 + i),
+  iso: `2026-10-${16 + i}`, values: [t], total: t }));
+const el = m.dayBars(days, [{ label: 'a', color: 'red' }], days[6].iso);
+const [bars] = el.children;
+console.log(JSON.stringify({
+  mode: bars.className,
+  amts: bars.children.map((c) => {
+    const a = c.children.find((k) => k && /amt/.test(k.className || ''));
+    return a ? [a.textContent, a.className] : null;
+  }),
+  f: bars.children.map((c) => c.attrs.style),
+}));
+""")
+    # a week fits level labels until the browser measures the bars
+    assert got["mode"] == "days hl flat"
+    assert got["amts"][0] is None  # a day without spend has no amount
+    assert [a[0] for a in got["amts"][1:]] == ["$13", "$1.2k", "$80", "$3.2", "$640", "$41"]
+    # the highest day and today are the ones a phone keeps
+    keys = [i for i, a in enumerate(got["amts"]) if a and "key" in a[1]]
+    assert keys == [2, 6]
+    assert got["f"][2] == "--f:1.0000" and got["f"][0] == "--f:0.0000"
+
+
 def _ys(d: object) -> list[float]:
     assert isinstance(d, str)
     return [float(pt.split(" ")[1]) for pt in d.lstrip("M").split("L")]
