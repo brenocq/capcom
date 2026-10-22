@@ -107,6 +107,7 @@ class Context:
     changes_path: Path | None = None  # the marks (changes.jsonl); None: capcom.changes' own
     day_cache: Path | None = None  # capcom.changes' finished days; None: not kept
     agent_dirs: Sequence[Path] | None = None  # noticed()'s definitions; None: its own
+    watching: bool = True  # False: this server never scans (serve --no-scan), so "live" is stale
 
     def local(self, t: datetime) -> datetime:
         return t.astimezone(self.tz)
@@ -1031,7 +1032,11 @@ def live(ctx: Context) -> dict[str, Any]:
             }
         )
     out.sort(key=lambda s: (-float(s["usd_per_hour"] or 0), str(s["session_id"])))
-    return {"window_s": int(LIVE_WINDOW.total_seconds()), "sessions": out}
+    reply: dict[str, Any] = {"window_s": int(LIVE_WINDOW.total_seconds()), "sessions": out}
+    reply["watching"] = ctx.watching
+    if not ctx.watching:  # nothing new reaches the index: say how old it is, never "no session"
+        reply["index_updated"] = status(ctx).get("index", {}).get("updated")
+    return reply
 
 
 # --------------------------------------------------------------------------- spikes

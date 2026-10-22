@@ -585,6 +585,7 @@ class Handler(BaseHTTPRequestHandler):
             changes_path=site.changes_path,
             day_cache=site.day_cache,
             agent_dirs=site.agent_dirs,
+            watching=site.scanner is not None,
         )
 
     def _page(self, path: str) -> None:

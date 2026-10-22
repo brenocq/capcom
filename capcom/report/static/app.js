@@ -96,6 +96,12 @@ function drawSidebar() {
 function liveList() {
   const box = h('div.live', null, h('div.side-head', null, h('span', { text: 'Live now' }), h('span', { text: '$/hour' })));
   if (!liveData) { box.append(h('span.note', { style: 'padding:0 10px', text: 'Loading…' })); return box; }
+  if (liveData.watching === false) {
+    // this server never scans, so the index stops at its last update: say that, not "nothing ran"
+    const at = liveData.index_updated ? new Date(liveData.index_updated).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null;
+    box.append(h('span.note', { style: 'padding:0 10px', text: `Paused: this server doesn't scan${at ? `; the index is from ${at}` : ''}.` }));
+    return box;
+  }
   if (!liveData.sessions.length) { box.append(h('span.note', { style: 'padding:0 10px', text: 'No session wrote in the last 10 minutes.' })); return box; }
   const top = liveData.sessions[0].usd_per_hour;
   for (const sn of liveData.sessions.slice(0, 8)) {
