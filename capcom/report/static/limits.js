@@ -77,7 +77,7 @@ export function runoutMark(fc, x0, x1, weekly) {
 // sits under the lowest point of the fan and median over the label's span (and
 // under the run-out dot). Returns {side, top (px from the plot's top), x: [a, b] px}.
 export const LABEL_BOX = { w: 240, h: 46 }, LABEL_GAP = 10, PLOT_GUESS = 560;
-export function runoutLabel(f, fan, plot, box = LABEL_BOX) {
+export function runoutLabel(f, fan, plot, box = LABEL_BOX, reads = []) {
   const { x0, x1, w, h, ymax } = plot;
   const xc = f * w;
   const Ypx = (v) => h - v / ymax * h;
@@ -102,15 +102,20 @@ export function runoutLabel(f, fan, plot, box = LABEL_BOX) {
       }
     }
     const top = Math.max(Ypx(100) + 10, Ypx(low) + 6);
-    return { side, top, x: [a, b], fits: top + box.h <= h };
+    // the readings in the span must stay below the label, not run through it
+    let high = -Infinity;
+    for (const [t, v] of reads) if (t >= ta && t <= tb) high = Math.max(high, v);
+    const floor = high === -Infinity ? h : Math.min(h, Ypx(high) - 6);
+    return { side, top, x: [a, b], fits: top + box.h <= floor, inside: a >= 0 && b <= w };
   };
   const first = xc + LABEL_GAP + box.w <= w ? 'right' : 'left';
   let best = place(first);
   if (!best.fits) {
     const other = place(first === 'right' ? 'left' : 'right');
-    if (other.fits && other.x[0] >= 0 && other.x[1] <= w) best = other;
+    if (other.fits && other.inside) best = other;
   }
-  return { side: best.side, top: Math.min(best.top, h - box.h), x: best.x };
+  // clear: nothing passes through it; otherwise the label gets a solid backing
+  return { side: best.side, top: Math.min(best.top, h - box.h), x: best.x, clear: best.fits };
 }
 
 // What the cards and the page say about a window, in words.
@@ -144,8 +149,9 @@ function fitNote(w) {
 // Usage windows over time: each window's readings as a rising line that drops to
 // 0 at its reset, a dashed line at 100%, and the current window's forecast as a
 // fan (the 80% range, filled, with hairline edges, and the median dashed).
-// Each reading is a dot; the stretch from a window's reset (0 %) to its first reading
-// is dashed and labeled, since nothing was read there.
+// Readings are drawn as the line alone (Breno found the dots crowded); only a reading
+// that hit the limit gets a mark. The stretch from a window's reset (0 %) to its first
+// reading is dashed and labeled, since nothing was read there.
 // opts: {segments: [{points, resets_at, reset, hit_limit, start_known}], fan, now, x0, x1,
 //        height, left, weekly, since (ms: when recording began), runout (runoutMark)}
 export function limitChart(opts) {
@@ -215,13 +221,11 @@ export function limitChart(opts) {
       h('span.ylab', { style: `left:-${left}px;top:${t}`, text: `${v}%` }));
   }
   plot.append(svg);
-  // each reading as a dot (too many to tell apart: only the limit hits)
+  // only the readings that hit the limit get a mark; the others are the line itself
   const xp = (t) => ((t - x0) / (x1 - x0) * 100).toFixed(2) + '%';
   const yp = (v) => ((1 - v / ymax) * 100).toFixed(2) + '%';
-  const shown = hover.filter((p) => p.t >= x0 && p.t <= x1);
-  for (const p of shown) {
-    if (p.hit) plot.append(h('span.enddot', { style: `left:${xp(p.t)};top:${yp(p.v)};background:var(--accent-strong)`, title: 'Rate limit hit' }));
-    else if (shown.length <= 240) plot.append(h('span.rdot', { style: `left:${xp(p.t)};top:${yp(p.v)}` }));
+  for (const p of hover) {
+    if (p.hit && p.t >= x0 && p.t <= x1) plot.append(h('span.enddot', { style: `left:${xp(p.t)};top:${yp(p.v)};background:var(--accent-strong)`, title: 'Rate limit hit' }));
   }
   for (const g of gaps) {
     if ((g.b[0] - Math.max(g.a[0], x0)) / (x1 - x0) < 0.12) continue; // too narrow to label
@@ -237,10 +241,11 @@ export function limitChart(opts) {
     const y100 = yp(100), fx = (f) => (f * 100).toFixed(2) + '%';
     // the plot's width is not known until it is laid out: a narrow one (the
     // label spans more of it) is the cautious guess, as the forecast rises
-    const lab = runoutLabel(runout.f, fan, { x0, x1, w: PLOT_GUESS, h: H, ymax });
+    const lab = runoutLabel(runout.f, fan, { x0, x1, w: PLOT_GUESS, h: H, ymax }, LABEL_BOX,
+      hover.map((p) => [p.t, p.v]));
     plot.append(h('div.runguide', { style: `left:${fx(runout.f)};top:${y100}` }),
       h('span.rundot', { style: `left:${fx(runout.f)};top:${y100}`, title: runout.title }),
-      h(`div.runlab.${lab.side}`, { style: `left:${fx(runout.f)};top:${lab.top.toFixed(1)}px` },
+      h(`div.runlab.${lab.side}${lab.clear ? '' : '.backed'}`, { style: `left:${fx(runout.f)};top:${lab.top.toFixed(1)}px` },
         h('span.v', { text: runout.title }), runout.sub ? h('span.r', { text: runout.sub }) : null));
   }
   const label = (t) => `${opts.weekly ? monthDay(new Date(t)) + ' ' : ''}${hm(new Date(t))}`;
