@@ -383,14 +383,15 @@ class Chrome:
             # CI runners (Ubuntu 24.04) block the user namespaces Chrome's sandbox needs,
             # so Chrome exits at once; it only loads this suite's synthetic local pages
             args[1:1] = ["--no-sandbox", "--disable-dev-shm-usage"]
-        # a shell puts the pipe ends on fds 3 and 4, where Chrome expects them
+        # a shell puts the pipe ends on fds 3 and 4, where Chrome expects them; bash,
+        # since dash (Ubuntu's /bin/sh) rejects fd numbers above 9 ("Bad fd number")
         wire = f'exec "$@" 3<&{hi_r} 4>&{hi_w} {hi_r}<&- {hi_w}>&-'
         # Chrome's own errors go to a file, so a Chrome that dies says why
         profile.mkdir(parents=True, exist_ok=True)
         self._errlog = profile / "chrome-stderr.log"
         with self._errlog.open("wb") as err:
             self.proc = subprocess.Popen(
-                ["/bin/sh", "-c", wire, "sh", *args],
+                [shutil.which("bash") or "/bin/bash", "-c", wire, "sh", *args],
                 pass_fds=(hi_r, hi_w),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
