@@ -34,7 +34,9 @@ modules. Never add or commit anything under `docs/`.
   beyond a tool name, a file path or a short label.
 - **No network.** capcom makes no network requests at run time. Never read
   `~/.claude/.credentials.json`, `~/.openclaw/credentials/`, auth profiles or
-  any token.
+  any token. The one read of account data: `oauthAccount.emailAddress` and
+  `oauthAccount.accountUuid` from `~/.claude.json`, only those two keys, to tell
+  accounts apart in the limits (`capcom/limits/`); nothing else in that file.
 - **One reply, one count.** Claude Code writes an assistant message several
   times while it streams: count each `message.id` once, from its last record
   (`docs/data-sources.md`).
