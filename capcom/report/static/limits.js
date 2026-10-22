@@ -276,7 +276,8 @@ export function limitCard(label, w, lim, account) {
       account ? h('span.note.acct', { text: account.label + (account.current ? ' · current' : ''), title: account.label }) : null,
       h('span.big', { style: big ? null : 'color:var(--muted)' }, big || 'No data yet', small ? h('small', { text: ' ' + small }) : null)));
   if (!lim || !lim.available || !w || !w.reading) {
-    return h('section.card', null, head(0, null, null, false), notRecording(lim || {}));
+    const none = lim && lim.recording ? empty(null, account ? 'No reading of this window for this account yet.' : 'No reading of this window yet.') : notRecording(lim || {});
+    return h('section.card', null, head(0, null, null, false), none);
   }
   const fc = w.forecast;
   const weekly = isWeekly(w);
