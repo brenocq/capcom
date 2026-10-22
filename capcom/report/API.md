@@ -385,12 +385,20 @@ The subscription's 5-hour and weekly windows from `capcom.limits`: the samples
 (`$XDG_STATE_HOME/capcom`, else `~/.local/state/capcom`: no scan rebuilds them, so they
 stay out of the cache), and the seed from the index's rate-limit errors. `days` is one
 of 7, 14, 30, 90 and bounds `segments`.
-The reply's cache key also holds the size and modification time of `limits.jsonl`,
-since the recorder writes it without a scan.
+The reply's cache key also holds the size and modification time of `limits.jsonl`
+(and of the recorder's account files beside it), since the recorder writes them
+without a scan.
 
 ```
 Limits = {available, recording, message, install, samples, last_sample, recording_since, days,
-          windows: {five_hour: Window | null, seven_day: Window | null}}
+          windows: {five_hour: Window | null, seven_day: Window | null},  # the current account's
+          accounts: [Account],          # the current one first; absent without samples
+          combined: Combined | null}    # null with fewer than two accounts
+Account = {id, email, label, current, samples,
+           windows: {five_hour: Window | null, seven_day: Window | null}}
+Combined = {usd_left, pace_usd_per_hour, pace_hours, runs_out_at,
+            reset_first: {id, resets_at} | null,
+            accounts: [{id, label, percent, usd_per_percent, usd_left, resets_at}]}
 Window = {window, label, samples, current,
           reading: {percent, time, resets_at, source} | null,
           fit: {method, note, percent_per_usd, usd_per_percent, intervals, readings, rough,
@@ -403,7 +411,7 @@ Window = {window, label, samples, current,
           history: [[ms, percent]],     # the current window's line, from its start at 0 %
           start, start_known,           # start_known: history's first point is the reset, not a reading
           segments: [{start, start_known, resets_at, peak, hit_limit, reset,
-                      points: [[ms, percent]], usd,
+                      points: [[ms, percent]], usd, inferred_usd,
                       by_project: [{project, usd, percent}] | null}]}   # newest first
 ```
 
@@ -430,6 +438,24 @@ percent against time through the window's readings (`line` says it widened it).
 index's requests spent in the segment, and their fitted percent (null without a fit).
 Usage from other machines or claude.ai counts toward the limits but is not in the
 logs.
+
+Accounts: each account (Claude Code's `oauthAccount.accountUuid`, the `id`) has its
+own windows, segments, fit and forecast; `email` is its `oauthAccount.emailAddress`
+(null when unknown), shown only on this local site and in `capcom limits`, and
+`label` is the email, or "earlier account" for the `unknown` id (samples from before
+accounts were recorded, on no known account's weekly cycle). The recorder reads only
+those two keys of `~/.claude.json`. `current` is the account Claude Code was last
+seen logged in with. A window's spend (`usd`, `by_project`) is that of the
+account's sessions, through the session ids of its samples and the recorder's
+session log; `inferred_usd` is the part from sessions no sample names, put on the
+account Claude Code was logged in with at the time. With a single account,
+everything is that account's. `combined`: before each account's weekly limit,
+`usd_left` = (100 - `percent`) x the account's own `usd_per_percent` (null without
+a fit); its `usd_left` is the sum of those known; `runs_out_at` is when that sum is
+spent at `pace_usd_per_hour` (all accounts' spend over the last `pace_hours`), null
+with nothing spent or nothing left; `reset_first` is an account whose weekly
+window resets before then. The website's account filter (`?account=` on `/` and
+`/limits`, an email or id) is applied in the browser.
 
 ### `GET /api/checks?days=14`
 

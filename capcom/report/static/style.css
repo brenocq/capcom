@@ -517,3 +517,7 @@ code, .mono, pre { overflow-wrap: anywhere; }
   h1 { font-size: 30px; }
   .bitem .top span:first-child { white-space: normal; overflow-wrap: anywhere; }
 }
+.note.acct { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.seg.acct { max-width: 100%; flex-wrap: wrap; }
+.seg.acct button { max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+h2.acct { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
