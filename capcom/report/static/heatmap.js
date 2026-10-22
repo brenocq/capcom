@@ -218,7 +218,7 @@ function gridEl(grid, week, open) {
         style = cell.usd > 0 ? `background:${heatColor(cell.usd / grid.max)}` : '';
       }
       const cls = ['cell', cell.future ? 'hm-future' : '', cell.usd > 0 ? '' : 'hm-zero', cell.partial ? 'hm-now' : ''].filter(Boolean).join(' ');
-      const btn = h('button', { type: 'button', class: cls, style, 'aria-label': aria, tabindex: '-1', 'aria-disabled': cell.future ? 'true' : null });
+      const btn = h('button', { type: 'button', class: cls, style, 'aria-label': aria, tabindex: '-1', 'data-mark': '', 'aria-disabled': cell.future ? 'true' : null });
       const title = week ? `${rowLabel(row.date)}, ${span}` : `${row.label} ${span}`;
       const rowsOf = () => (cell.future ? [{ label: 'Not yet', value: '' }] : [
         { label: cell.partial ? 'So far' : 'Spent', value: usd(cell.usd) },
