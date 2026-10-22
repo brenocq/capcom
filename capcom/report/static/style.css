@@ -463,6 +463,7 @@ table.data.narrow { min-width: 0; }
 .runlab.left { transform: translateX(calc(-100% - 10px)); align-items: flex-end; }
 .runlab .v { font-family: var(--serif); font-size: 22px; line-height: 1.05; color: var(--text); }
 .runlab .r { font-size: 12px; color: var(--muted); }
+.runlab.backed { background: var(--card); padding: 4px 8px; border-radius: 6px; box-shadow: 0 0 0 1px var(--l25); }
 
 /* ------------------------------------------------------------------ responsive
    One breakpoint, 900 px. Above it the sidebar sits beside the page and scrolls on
