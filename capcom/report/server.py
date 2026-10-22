@@ -57,6 +57,7 @@ from capcom.limits.model import samples_path
 from capcom.report import api, didit
 from capcom.report.analysis import Analysis, Unavailable, default_analysis
 from capcom.report.jobs import Job, Jobs, Result, computing_body
+from capcom.report.worker import Worker
 from capcom.store.index import open_index
 from capcom.types import PriceTable
 
@@ -97,6 +98,8 @@ CACHE_BYTES = 32 * 1024 * 1024  # encoded replies kept, all endpoints together
 CACHE_TTL = 300.0  # seconds: "today", "last hour" and "running" move with the clock
 UNCACHED = {"status", "live"}  # cheap, and about the current minute
 PATIENCE = 0.3  # seconds a request waits for its reply before answering 202
+POLL_WAIT = 0.5  # seconds a poll waits for a newer partial reply or the end
+PRIORITY_HEADER = "X-Capcom-Priority"  # "low": a prefetch, run as background work
 MARKED = {"checks", "changes"}  # replies that show marks: keyed on the marks file too
 DAY_CACHE = "changes-days.sqlite"  # in the cache folder: the file `capcom changes` keeps
 
@@ -306,6 +309,8 @@ class Site:
     jobs: Jobs | None = field(default_factory=Jobs)  # None: every reply computed in the request
     patience: float = PATIENCE  # seconds a request waits for its job before a 202
     warmer: Warmer | None = None
+    worker: Worker | None = None  # the warmer's process; None: it computes in a thread
+    poll_wait: float = POLL_WAIT  # seconds a poll waits for news of its job
     changes_path: Path | None = None  # the marks; None: capcom.changes' own file
     read_only: bool = False  # True: no POST /api/changes, no buttons that write
     token: str = field(default_factory=lambda: secrets.token_urlsafe(32))  # per launch
@@ -463,14 +468,15 @@ class Warmer:
             if site.cache.get(key, now.timestamp()) is not None:
                 continue
             site.jobs.set_gen(key[0])
-            work = _work(site, name, [name], query, now, key)
+            work = _work(site, name, [name], query, now, key, background=True)
             t0 = time.monotonic()
             job = site.jobs.submit(key, key[0], work, (name, key[4]), background=True)
             job.done.wait()
             if job.cancelled is not None:
                 return False
             self.computed += 1
-            if self._stop.wait(min(30.0, (time.monotonic() - t0) * self.rest)):
+            spent = time.monotonic() - t0 - job.paused
+            if self._stop.wait(min(30.0, max(0.0, spent) * self.rest)):
                 return False
         self._warm = mark
         return True
@@ -769,6 +775,18 @@ class Handler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, "not_found", "no such endpoint")
             return
         site = self.site
+        low = (self.headers.get(PRIORITY_HEADER) or "").lower() == "low"
+        if site.jobs is None or low:
+            self._reply(name, parts, query, low)
+            return
+        site.jobs.user_begin()  # background work waits while a page's request is in flight
+        try:
+            self._reply(name, parts, query, low)
+        finally:
+            site.jobs.user_end()
+
+    def _reply(self, name: str, parts: list[str], query: dict[str, str], low: bool) -> None:
+        site = self.site
         job_id = query.pop("job", None)
         now = site.clock()
         if site.cache is None or name in UNCACHED:
@@ -776,7 +794,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(result.status, result.body, _ctype(result))
             return
         key = cache_key(site, name, parts, query, now)
-        if site.warmer is not None:
+        if site.warmer is not None and not low:
             site.warmer.saw(name, query)
         hit = site.cache.get(key, now.timestamp())
         if hit is not None:
@@ -792,13 +810,14 @@ class Handler(BaseHTTPRequestHandler):
         if job is None or job.key != key or (job.cancelled and job.result is None):
             job = jobs.find(key)
         if job is None:
-            job = jobs.submit(
-                key, key[0], _work(site, name, parts, query, now, key), (name, key[4])
-            )
-        else:
+            work = _work(site, name, parts, query, now, key, background=low)
+            job = jobs.submit(key, key[0], work, (name, key[4]), background=low)
+        elif not low:
             job.poll()
         if not job_id:
             job.done.wait(site.patience)
+        else:  # a poll: wait for a newer partial reply or the end, so the page hears at once
+            job.wait_news(job.version, site.poll_wait)
         if job.result is not None:
             self._send(job.result.status, job.result.body, _ctype(job.result))
         elif job.timed_out() or job.cancelled == "timeout":
@@ -846,8 +865,27 @@ def _work(
     query: dict[str, str],
     now: datetime,
     key: tuple[Any, ...],
+    background: bool = False,
 ) -> Callable[[Job], Result]:
-    return lambda job: compute(site, name, parts, query, now, key, job.step)
+    """A job's work: compute the reply in the job's thread, or, for background
+    work when the server has a worker process, there (and cache it here)."""
+    worker = site.worker
+
+    def here(job: Job) -> Result:
+        return compute(site, name, parts, query, now, key, job.step)
+
+    if not background or worker is None:
+        return here
+
+    def there(job: Job) -> Result:
+        result = worker.run(job, name, parts, query, now, lambda: here(job))
+        first_scan = site.scanner is not None and site.scanner.first_scan
+        ok = result.status == HTTPStatus.OK and result.cacheable and not first_scan
+        if ok and site.cache is not None:
+            site.cache.put(key, now.timestamp(), result.body)
+        return result
+
+    return there
 
 
 def _encode(payload: Any) -> bytes:
@@ -986,6 +1024,7 @@ def run_serve(
     print(f"capcom: serving {url} (local only, {fresh}; Ctrl+C to stop)", flush=True)
     if scanner is not None:
         scanner.start()
+    site.worker = Worker(site)
     site.warmer = Warmer(site)
     site.warmer.start()
     if open_browser:
@@ -997,6 +1036,7 @@ def run_serve(
     finally:
         server.server_close()
         site.warmer.stop(timeout=1)
+        site.worker.close()
         if scanner is not None:
             scanner.stop(timeout=5)
             if scanner.running:

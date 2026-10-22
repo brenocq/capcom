@@ -3,7 +3,9 @@
 // "Progressive replies"), and the number tween the pages use while it fills.
 // No DOM here except in `tweenText`, so node can test the helpers.
 
-export const POLL_MS = 400;
+// a poll waits on the server until there is news (a newer partial reply or the
+// end, up to half a second), so the next one can follow at once
+export const POLL_MS = 40;
 export const TWEEN_MS = 400;
 
 export const easeOut = (t) => 1 - Math.pow(1 - Math.min(1, Math.max(0, t)), 3);
@@ -105,11 +107,12 @@ const wait = (ms, signal) => new Promise((resolve, reject) => {
 // GET /api/<path>, following a job to its end: `onPartial(partial, progress,
 // source)` for each 202 (partial may be null), the final body returned. Throws
 // {status, body} for an error reply, and the abort reason when `signal` aborts.
-export async function getProgressive(path, { signal, onPartial, fetchFn = fetch, pollMs = POLL_MS } = {}) {
+// `headers`: extra request headers (a prefetch says it is low priority).
+export async function getProgressive(path, { signal, onPartial, headers = null, fetchFn = fetch, pollMs = POLL_MS } = {}) {
   let url = '/api/' + path;
   for (;;) {
     // no-store: a browser holds a second request for a URL until the first one ends
-    const r = await fetchFn(url, { headers: { Accept: 'application/json' }, cache: 'no-store', signal });
+    const r = await fetchFn(url, { headers: { Accept: 'application/json', ...(headers || {}) }, cache: 'no-store', signal });
     let body = null;
     try { body = await r.json(); } catch (e) { body = null; }
     if (r.status !== 202) {

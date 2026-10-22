@@ -142,12 +142,13 @@ export class ApiError extends Error {
   }
 }
 
-function load(path) {
+function load(path, low = false) {
   const ctrl = new AbortController();
-  const e = { path, ctrl, done: false, error: null, data: null, partial: partials.get(path) || null, progress: 0, source: null, waiters: new Set() };
+  const e = { path, ctrl, low, done: false, error: null, data: null, partial: partials.get(path) || null, progress: 0, source: null, waiters: new Set() };
   const wake = () => { for (const w of e.waiters) w(); };
   e.promise = getProgressive(path, {
     signal: ctrl.signal,
+    headers: low ? { 'X-Capcom-Priority': 'low' } : null,
     onPartial: (partial, progress, source) => {
       e.progress = Math.max(e.progress, progress || 0);
       if (partial) { e.partial = partial; e.source = source; partials.set(path, partial); }
@@ -179,13 +180,23 @@ export function api(path, fresh = false) {
   if (fresh) {
     return getProgressive(path).catch((err) => { throw err.status ? new ApiError(err.status, err.body) : err; });
   }
-  const e = store.get(path) || load(path);
+  const e = wanted(path);
   return apiHooks.pass ? apiHooks.pass.use(path, e) : e.promise;
+}
+
+// The kept load of `path` for a page, started now if there is none. A prefetch
+// still loading runs at low priority on the server: a page that needs it asks
+// again at a page's priority (the server lifts the same job; nothing is lost).
+function wanted(path) {
+  const e = store.get(path);
+  if (e && !(e.low && !e.done && !e.error)) return e;
+  if (e) { e.ctrl.abort(); store.delete(path); }
+  return load(path);
 }
 
 // Start loading `path` now, for a page that will ask for it after another reply
 // (Overview asks for checks once its own data is in): the two then load side by side.
-export function preload(path) { if (!store.has(path)) load(path); }
+export function preload(path) { wanted(path); }
 
 // Where the reply of `path` stands: {done, error, partial, progress}, or null
 // when nothing is loading or kept for it.
@@ -207,7 +218,7 @@ export function stopLoads(keep = new Set()) {
 
 // Start the server on `path` ahead of a click (a hover on a link to its page):
 // the reply is followed like any other, so the click finds it loading or done.
-export function prefetch(path) { preload(path); }
+export function prefetch(path) { if (!store.has(path)) load(path, true); }
 
 // ------------------------------------------------------------------ tooltip
 

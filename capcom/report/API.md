@@ -30,20 +30,28 @@ the cache (two requests for the same view share one job). When the job is done w
 count, excess and projects, with the causes and listed spikes of the sessions explained
 so far, the sessions of the largest spikes first); with `"stale"` it is the last reply
 of the same view from before the index changed (or from an earlier day). The client
-polls the same URL with `&job=<id>` (about every 400 ms) and gets `202` with newer
-progress and partial replies, then the final `200` (or the endpoint's error). `progress`
-never goes back; between the job's own steps it is estimated from how long the same view
-took last time. A `job` the server no longer knows is ignored: the request is answered
-as if it were the first. A job is dropped when the index's generation changes (the next
-poll starts a new one), stops after 120 s (the poll gets `504 {"error": "timeout"}`),
-and runs at low priority once no page polled it for 2.5 s. `status` and `live` are
-always answered at once.
+polls the same URL with `&job=<id>`; a poll waits on the server (at most 0.5 s) until
+the job has a newer partial reply or ends, and gets `202` with newer progress and
+partial replies, then the final `200` (or the endpoint's error). `progress` never goes
+back; between the job's own steps it is estimated from how long the same view took last
+time. A `job` the server no longer knows is ignored: the request is answered as if it
+were the first. A job is dropped when the index's generation changes (the next poll
+starts a new one), stops after 120 s (the poll gets `504 {"error": "timeout"}`), and
+runs at low priority once no page polled it for 2.5 s. `status` and `live` are always
+answered at once.
 
-At most 3 jobs compute at once. A warmer thread computes the views pages asked for
-in the last 30 minutes (newest first) and then every page's default view, after
-startup and whenever the index changes, at low priority: its jobs pause while a
-page's job runs, it rests three times as long as each reply took (about a quarter
-of a core at most), and it stops after 30 minutes without a page request.
+A request with the header `X-Capcom-Priority: low` (a page's prefetch, on a hover) is
+background work: its job runs at low priority and its polls do not lift it; the same
+request without the header (the click) lifts the same job to a page's priority.
+
+At most 3 jobs compute at once. Background work (low-priority jobs, and the warmer)
+waits while any page's request or job is in flight, and for 0.5 s after the last one,
+so a click never shares the CPU with it. The warmer computes the views pages asked for
+in the last 30 minutes (newest first) and then every page's default view, after startup
+and whenever the index changes, in a child process of its own (`capcom.report.worker`),
+which is stopped (SIGSTOP) while a page needs the CPU and continued after; it rests
+three times as long as each reply took (about a quarter of a core at most), and it
+stops after 30 minutes without a page request.
 
 The server keeps the index fresh itself: an incremental scan (`run_scan`, quiet) at
 start and then a minute after each scan ends, in one background thread; a lock keeps

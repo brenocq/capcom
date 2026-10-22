@@ -8,8 +8,11 @@ after each chunk of work (through `api.Context.progress`); `step` records the
 progress, builds the reply so far now and then, and is also where a job is
 stopped: when the index changed under it (its generation is no longer current),
 when it ran past its time limit, or when it was cancelled. It is also where a
-background job waits: the warmer's jobs, and jobs no page has polled for a while,
-pause there while a page's job runs, so a click never queues behind the warmer.
+background job waits: the warmer's jobs, prefetches, and jobs no page has polled
+for a while pause there while a page's job runs or a page's request is in flight
+(and for `quiet` seconds after), so a click never queues behind background work.
+The warmer's own jobs compute in a separate process (`capcom.report.worker`) that
+is stopped outright while a page needs the CPU.
 
 Threads, not processes: the work is SQLite reads and Python loops, and at most
 `max_running` jobs compute at once (each holds about one window of requests in
@@ -32,6 +35,7 @@ from typing import Any
 
 JOB_TIMEOUT = 120.0  # seconds a job may compute
 ABANDONED = 2.5  # seconds without a poll after which a page's job runs as background
+QUIET = 0.5  # seconds after a page's last request before background work goes on
 PARTIAL_EVERY = 0.25  # seconds between two builds of the reply so far
 KEEP_DONE = 60.0  # seconds a finished job's reply stays for its pollers
 MAX_RUNNING = 3  # jobs computing at once (memory: each holds a window of requests)
@@ -78,6 +82,9 @@ class Job:
         self._partial_at = -1e9
         self.done = threading.Event()
         self.expected = 0.0  # seconds this kind of reply took last time (0: unknown)
+        self.paused = 0.0  # seconds spent paused (not counted in its duration)
+        self.version = 0  # bumped on each new partial reply and at the end
+        self._news = threading.Condition()
 
     # ------------------------------------------------------------- the job's side
 
@@ -89,10 +96,31 @@ class Job:
         now = self.jobs.clock()
         if partial is not None and now - self._partial_at >= self.jobs.partial_every:
             body = json.dumps(partial(), separators=(",", ":"), allow_nan=False).encode()
-            self.partial = body
-            self._partial_at = self.jobs.clock()
+            self.publish(progress, body)
+        t0 = self.jobs.clock()
         self.jobs.wait_turn(self)
+        self.paused += self.jobs.clock() - t0
         self._check()
+
+    def publish(self, progress: float, partial: bytes | None = None) -> None:
+        """Record progress and, when given, the encoded reply so far (the step of a
+        job computed elsewhere: the worker process)."""
+        self._progress = max(self._progress, min(0.99, progress))
+        if partial is not None:
+            self.partial = partial
+            self._partial_at = self.jobs.clock()
+            self._bump()
+
+    def _bump(self) -> None:
+        with self._news:
+            self.version += 1
+            self._news.notify_all()
+
+    def wait_news(self, version: int, timeout: float) -> None:
+        """Wait until the job ends or has a newer partial reply than `version`, at
+        most `timeout` seconds (a poll's long wait)."""
+        with self._news:
+            self._news.wait_for(lambda: self.version != version or self.done.is_set(), timeout)
 
     def _check(self) -> None:
         if self.cancelled is not None:
@@ -144,9 +172,11 @@ class Jobs:
         partial_every: float = PARTIAL_EVERY,
         keep_done: float = KEEP_DONE,
         clock: Callable[[], float] = time.monotonic,
+        quiet: float = QUIET,
     ) -> None:
         self.timeout = timeout
         self.abandoned = abandoned
+        self.quiet = quiet
         self.partial_every = partial_every
         self.keep_done = keep_done
         self.clock = clock
@@ -159,6 +189,33 @@ class Jobs:
         self._durations: dict[Hashable, float] = {}  # kind -> seconds, last run
         self.peak_running = 0
         self._running = 0
+        self._max = max_running
+        self._users = 0  # pages' requests in flight
+        self._last_user = -1e9  # when the last one ended
+
+    def user_begin(self) -> None:
+        """A page's request came in: background work pauses until it ends."""
+        with self._lock:
+            self._users += 1
+
+    def user_end(self) -> None:
+        with self._lock:
+            self._users -= 1
+            self._last_user = self.clock()
+            self._turn.notify_all()
+
+    def must_yield(self, job: Job) -> bool:
+        """Whether background `job` must wait now: a page's request is in flight or
+        ended less than `quiet` seconds ago, or a page's job runs or waits."""
+        with self._lock:
+            return self._yield(job)
+
+    def _yield(self, job: Job) -> bool:
+        if not job.low:
+            return False
+        if self._users > 0 or self.clock() - self._last_user < self.quiet:
+            return True
+        return self._pages(job, started=False) or self._pages(job, started=True)
 
     def set_gen(self, gen: Hashable) -> None:
         """The index's current generation: jobs of another one stop at their next
@@ -226,7 +283,7 @@ class Jobs:
                     job._check()
                     result = work(job)
                     with self._lock:
-                        self._durations[kind] = self.clock() - job.started
+                        self._durations[kind] = self.clock() - job.started - job.paused
                     job.result = result
                 finally:
                     with self._lock:
@@ -246,20 +303,23 @@ class Jobs:
                     del self._by_key[job.key]
                 self._turn.notify_all()
             job.done.set()
+            job._bump()
 
     def wait_turn(self, job: Job) -> None:
-        """Block a background job while a page's job runs or waits to run. A
-        background job that holds a slot a page's job is waiting for is cancelled
-        instead (pausing it would keep the page waiting for good)."""
+        """Block a background job while a page's request or job is in flight (and
+        `quiet` seconds after). A background job that holds the last slot while a
+        page's job waits for one is cancelled instead (pausing it would keep the
+        page waiting for good)."""
         with self._lock:
-            while job.low and job.cancelled is None and not job.timed_out():
-                waiting = self._pages(job, started=False)
-                if job.started is not None and waiting:
+            while job.cancelled is None and not job.timed_out() and self._yield(job):
+                if (
+                    job.started is not None
+                    and self._running >= self._max
+                    and self._pages(job, started=False)
+                ):
                     job.cancelled = "cancelled"
                     break
-                if not waiting and not self._pages(job, started=True):
-                    break
-                self._turn.wait(0.1)
+                self._turn.wait(0.05)
 
     def _pages(self, job: Job, started: bool) -> bool:
         """Whether a page's job other than `job` is running (`started`) or waiting."""

@@ -329,3 +329,117 @@ def test_usage_samples_turn_only_the_limits_reply_stale(index_path: Path, tmp_pa
     assert after["spikes"] == before["spikes"] and after["spend"] == before["spend"]
     assert after["limits"] != before["limits"] and after["overview"] != before["overview"]
     assert after["limits"][0] == after["spikes"][0]  # one generation for every page
+
+
+# --------------------------------------------------------------------------- priority
+
+
+def test_background_work_waits_while_a_page_request_is_in_flight() -> None:
+    jobs = Jobs(quiet=0.1)
+    log: list[str] = []
+    jobs.user_begin()
+    bg = jobs.submit("warm", "g", _stepper(5, 0.01, log, "bg"), background=True)
+    time.sleep(0.2)
+    assert log == [] and not bg.done.is_set()  # not even started while the page waits
+    jobs.user_end()
+    assert jobs.must_yield(bg)  # the quiet time after the last request
+    assert bg.done.wait(5) and bg.result is not None and log == ["bg"] * 5
+    assert not jobs.must_yield(bg)
+
+
+def test_a_page_job_never_yields() -> None:
+    jobs = Jobs()
+    jobs.user_begin()
+    page = jobs.submit("page", "g", _stepper(3, 0.01, [], "page"))
+    assert page.done.wait(5) and page.result is not None
+    jobs.user_end()
+
+
+def test_a_prefetch_runs_low_and_the_click_lifts_it(index_path: Path, small_batches: None) -> None:
+    gate = Gate()
+    site = _site(index_path, gate, patience=0.05)
+    low = {"X-Capcom-Priority": "low"}
+    for client in serve(site):
+        status, body, _ = client.get("/api/spikes?days=1", headers=low)
+        assert status == 202
+        assert site.jobs is not None
+        job = site.jobs.by_id(body["job"])
+        assert job is not None and job.low
+        _poll_low = client.get(f"/api/spikes?days=1&job={body['job']}", headers=low)
+        assert _poll_low[0] == 202 and job.low  # its own polls do not lift it
+        status, body2, _ = client.get("/api/spikes?days=1")  # the click
+        assert body2["job"] == body["job"] and not job.low  # the same job, lifted
+        gate.tokens.release(99)
+        assert job.done.wait(5) and job.result is not None
+
+
+def test_a_poll_waits_for_news(index_path: Path, small_batches: None) -> None:
+    gate = Gate()
+    site = _site(index_path, gate, patience=0.05, poll_wait=0.4)
+    for client in serve(site):
+        status, body, _ = client.get("/api/spikes?days=1")
+        assert status == 202
+        t0 = time.monotonic()
+        status, _, _ = client.get(f"/api/spikes?days=1&job={body['job']}")
+        assert status == 202 and time.monotonic() - t0 >= 0.35  # nothing new: waited
+        threading.Timer(0.1, lambda: gate.tokens.release(99)).start()
+        t0 = time.monotonic()
+        while status == 202:
+            status, _, _ = client.get(f"/api/spikes?days=1&job={body['job']}")
+        assert status == 200 and time.monotonic() - t0 < 1.5
+
+
+# --------------------------------------------------------------------------- worker
+
+
+def test_the_worker_process_computes_the_same_reply_and_pauses(index_path: Path) -> None:
+    from capcom.report.analysis import default_analysis
+    from capcom.report.server import _work, compute
+    from capcom.report.worker import Worker
+
+    site = Site(index_path, TABLE, default_analysis(), clock=lambda: NOW, tz=UTC)
+    site.jobs = Jobs(quiet=0.05)
+    site.worker = Worker(site)
+    try:
+        query = {"days": "14"}
+        key = cache_key(site, "sessions", ["sessions"], query, NOW)
+        here = compute(site, "sessions", ["sessions"], dict(query), NOW)
+        site.jobs.user_begin()  # a page's request in flight: the child must not run
+        work = _work(site, "sessions", ["sessions"], query, NOW, key, background=True)
+        job = site.jobs.submit(key, key[0], work, "sessions", background=True)
+        assert not job.done.wait(0.5)
+        site.jobs.user_end()
+        assert job.done.wait(30) and job.result is not None
+        assert job.result.status == 200 and job.result.body == here.body
+        assert site.worker.started == 1
+        assert site.cache is not None and site.cache.get(key, NOW.timestamp()) == here.body
+    finally:
+        site.worker.close()
+
+
+def test_the_worker_stops_its_child_while_a_page_needs_the_cpu(index_path: Path) -> None:
+    from capcom.report.analysis import default_analysis
+    from capcom.report.server import _work
+    from capcom.report.worker import Worker
+
+    site = Site(index_path, TABLE, default_analysis(), clock=lambda: NOW, tz=UTC)
+    site.jobs = Jobs(quiet=0.05)
+    site.worker = Worker(site)
+    try:
+        query = {"days": "30"}
+        key = cache_key(site, "overview", ["overview"], query, NOW)
+        work = _work(site, "overview", ["overview"], query, NOW, key, background=True)
+        job = site.jobs.submit(key, key[0], work, "overview", background=True)
+        deadline = time.monotonic() + 10
+        while site.worker._proc is None and time.monotonic() < deadline:
+            time.sleep(0.01)  # the child starts
+        site.jobs.user_begin()
+        busy = not job.done.is_set()
+        time.sleep(0.3)
+        stopped = site.worker.stopped
+        site.jobs.user_end()
+        assert job.done.wait(30) and job.result is not None and job.result.status == 200
+        if busy:  # the child was still computing when the page came: it was stopped
+            assert stopped >= 1 and job.paused > 0
+    finally:
+        site.worker.close()
