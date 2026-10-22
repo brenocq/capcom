@@ -19,6 +19,21 @@ the standard library modules it needs (no index, no prices), and holds a lock on
 while appending. Concurrent sessions are serialized by `flock` on a lock file; a
 writer that cannot get the lock within a few milliseconds skips this refresh (the
 next one records the value).
+
+Each sample is labeled with the account it belongs to (`account`, the account's
+`oauthAccount.accountUuid`), so a user who switches accounts gets one timeline per
+account. The account comes from Claude Code's own config, `~/.claude.json`, of which
+capcom reads exactly two keys, `oauthAccount.accountUuid` and
+`oauthAccount.emailAddress`, and drops the rest at once (the file can hold MCP
+configs with secrets); it is parsed again only when its modification time or size
+changes. A session started before a `/login` switch may still run on the old
+account while the config already names the new one, so a session keeps the account
+it first reported with, unless its weekly reset time says otherwise: each account's
+weekly window resets at its own time of the week, so a reading whose weekly reset
+falls on another account's cycle belongs to that account. The emails are kept in
+`limits.accounts.json` (with the current account), and the account each session
+was first seen on, and each switch, in `limits.sessions.jsonl`. Any error there
+leaves the sample without an account; the status line is never affected.
 """
 
 from __future__ import annotations
@@ -36,6 +51,12 @@ WINDOWS = ("five_hour", "seven_day")
 SAMPLES_FILE = "limits.jsonl"
 STATE_FILE = "limits.state.json"
 LOCK_FILE = "limits.lock"
+ACCOUNTS_FILE = "limits.accounts.json"  # {"current": uuid, "emails": {uuid: email}}
+SESSIONS_FILE = "limits.sessions.jsonl"  # session first seen on an account; switches
+CONFIG_FILE = ".claude.json"
+MAX_CONFIG = 64 << 20  # a larger config is not parsed
+MAX_SESSIONS = 256  # sessions whose account the state remembers
+WEEK_S = 7 * 86400
 MAX_INPUT = 1 << 20  # larger stdin is passed through but not parsed
 RESET_SLACK_S = 600  # reset times closer than this are the same reset (they drift)
 READ_DEADLINE_S = 1.0  # stdin still open after this: pass through what arrived
@@ -103,6 +124,166 @@ def _instance(prev: Any, resets: float | None) -> tuple[float, float | None] | N
     if p_resets is None or abs(resets - p_resets) >= RESET_SLACK_S:
         return None
     return p_max, p_resets
+
+
+def config_path(env: Mapping[str, str]) -> str:
+    """Claude Code's config file: `$CLAUDE_CONFIG_DIR/.claude.json`, or
+    `~/.claude.json`."""
+    home = env.get("HOME") or os.path.expanduser("~")
+    folder = env.get("CLAUDE_CONFIG_DIR")
+    return os.path.join(os.path.expanduser(folder) if folder else home, CONFIG_FILE)
+
+
+def _uuid(v: Any) -> str | None:
+    if not isinstance(v, str) or not 8 <= len(v) <= 64:
+        return None
+    return v.lower() if all(c in "0123456789abcdefABCDEF-" for c in v) else None
+
+
+def _email(v: Any) -> str | None:
+    if not isinstance(v, str) or not 3 <= len(v) <= 254 or "@" not in v:
+        return None
+    return v if v.isprintable() and not any(c.isspace() for c in v) else None
+
+
+def read_account(path: str) -> tuple[str, str | None] | None:
+    """The account Claude Code is logged in with: `oauthAccount.accountUuid` and
+    `oauthAccount.emailAddress` of the config at `path`, and nothing else from it;
+    None when there is none (or the file cannot be read). Raises nothing."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(MAX_CONFIG + 1)
+        if len(raw) > MAX_CONFIG:
+            return None
+        doc = json.loads(raw)
+        del raw
+        acct = doc.get("oauthAccount") if isinstance(doc, dict) else None
+        uuid = _uuid(acct.get("accountUuid")) if isinstance(acct, dict) else None
+        email = _email(acct.get("emailAddress")) if isinstance(acct, dict) else None
+        del doc, acct  # the rest of the file is never kept
+    except BaseException:  # never fail the status line
+        return None
+    return None if uuid is None else (uuid, email)
+
+
+def same_cycle(a: float, b: float, slack: float = RESET_SLACK_S) -> bool:
+    """Whether two weekly reset times (epoch seconds) fall at the same time of the
+    week, whole weeks apart allowed: one account's weekly cycle."""
+    d = (a - b) % WEEK_S
+    return d < slack or WEEK_S - d < slack
+
+
+def _anchor(state: Mapping[str, Any], account: str) -> float | None:
+    acct = state.get("acct")
+    st = acct.get(account) if isinstance(acct, dict) else None
+    prev = st.get("seven_day") if isinstance(st, dict) else None
+    return _number(prev[1]) if isinstance(prev, list) and len(prev) == 2 else None
+
+
+def decide(
+    state: Mapping[str, Any], session: str | None, current: str | None, weekly: float | None
+) -> str | None:
+    """The account of a reading: the one its session first reported with (or the
+    config's current one for a new session), unless its weekly reset `weekly` falls
+    on another known account's cycle, or on none known while the current account has
+    no cycle yet (a session that followed a switch)."""
+    sessions = state.get("sessions")
+    cand = sessions.get(session) if isinstance(sessions, dict) and session else None
+    if not isinstance(cand, str):
+        cand = current
+    if weekly is None:
+        return cand
+    acct = state.get("acct")
+    known = [a for a in acct if isinstance(a, str)] if isinstance(acct, dict) else []
+    anchors = {a: p for a in known if (p := _anchor(state, a)) is not None}
+
+    def on(a: str | None) -> bool:
+        p = anchors.get(a) if a is not None else None
+        return p is not None and same_cycle(p, weekly)
+
+    if on(cand):
+        return cand
+    others = [a for a in anchors if a != cand and on(a)]
+    if len(others) == 1:
+        return others[0]
+    if cand is None or cand not in anchors:
+        return cand
+    if current is not None and current != cand and current not in anchors:
+        return current
+    return cand
+
+
+def _account(state: dict[str, Any], directory: str, config: str, now: float) -> str | None:
+    """The config's current account, parsed again only when the file changed (its
+    modification time and size are kept in the state with the account); the emails
+    and switches are written beside the samples. Updates `state`."""
+    st = os.stat(config)
+    stamp = [st.st_mtime_ns, st.st_size]
+    cached = state.get("config")
+    prev = cached[2] if isinstance(cached, list) and len(cached) == 3 else None
+    prev = prev if isinstance(prev, str) else None
+    if isinstance(cached, list) and cached[:2] == stamp:
+        return prev
+    found = read_account(config)
+    if found is None:
+        return prev  # being rewritten, or logged out: keep the last one seen
+    uuid, email = found
+    state["config"] = [*stamp, uuid]
+    if uuid != prev:
+        _log(directory, {"time": _iso(now), "account": uuid})
+    path = os.path.join(directory, ACCOUNTS_FILE)
+    known: dict[str, Any] = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            known = loaded
+    except (OSError, ValueError):
+        pass
+    emails = known.get("emails") if isinstance(known.get("emails"), dict) else {}
+    assert isinstance(emails, dict)
+    if known.get("current") != uuid or (email is not None and emails.get(uuid) != email):
+        if email is not None:
+            emails[uuid] = email
+        _write_json(path, {"current": uuid, "emails": emails})
+    return uuid
+
+
+def _write_json(path: str, value: Any) -> None:
+    tmp = f"{path}.{os.getpid()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(value, f)
+    os.replace(tmp, path)
+
+
+def _log(directory: str, entry: Mapping[str, Any]) -> None:
+    line = json.dumps(entry, separators=(",", ":")).encode() + b"\n"
+    fd = os.open(
+        os.path.join(directory, SESSIONS_FILE), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600
+    )
+    try:
+        os.write(fd, line)
+    finally:
+        os.close(fd)
+
+
+def _remember(
+    state: dict[str, Any], directory: str, session: str, account: str, now: float
+) -> bool:
+    """Keep `session`'s account in the state (the most recent `MAX_SESSIONS`) and log
+    it when it is new or changed; True when the state changed."""
+    sessions = state.get("sessions")
+    if not isinstance(sessions, dict):
+        sessions = state["sessions"] = {}
+    if sessions.get(session) == account:
+        return False
+    sessions.pop(session, None)
+    sessions[session] = account
+    while len(sessions) > MAX_SESSIONS:
+        sessions.pop(next(iter(sessions)))
+    _log(directory, {"time": _iso(now), "session_id": session, "account": account})
+    return True
 
 
 def _under(path: str, roots: Sequence[str]) -> bool:
@@ -180,10 +361,11 @@ def _lock(fd: int) -> bool:
     return False
 
 
-def record(data: bytes, directory: str, now: float | None = None) -> int:
+def record(data: bytes, directory: str, now: float | None = None, config: str | None = None) -> int:
     """Append a sample per window of the status line payload `data` whose value
-    changed since its last sample; return how many were appended. Raises on I/O
-    errors (the caller swallows them)."""
+    changed since its last sample of the same account; return how many were
+    appended. `config` is Claude Code's config file, which names the account (None:
+    no account). Raises on I/O errors (the caller swallows them)."""
     if not data or len(data) > MAX_INPUT:
         return 0
     try:
@@ -208,9 +390,31 @@ def record(data: bytes, directory: str, now: float | None = None) -> int:
                 state = loaded
         except (OSError, ValueError):
             pass
+        dirty = False
+        account: str | None = None
+        try:
+            before = json.dumps([state.get("config"), state.get("sessions")])
+            current = _account(state, directory, config, now) if config else None
+            weekly = next((r for w, _, r in found if w == "seven_day"), None)
+            account = decide(state, session, current, weekly)
+            if account is not None and session is not None:
+                _remember(state, directory, session, account, now)
+            dirty = before != json.dumps([state.get("config"), state.get("sessions")])
+        except Exception:  # no account rather than no sample
+            account = None
+        # each account keeps its own running maxima: after a switch the new account's
+        # low readings are not stale views of the old one's window
+        slot: dict[str, Any] = state
+        if account is not None:
+            accts = state.get("acct")
+            if not isinstance(accts, dict):
+                accts = state["acct"] = {}
+            got = accts.get(account)
+            slot = got if isinstance(got, dict) else {}
+            accts[account] = slot
         lines: list[bytes] = []
         for window, used, resets in found:
-            prev = state.get(window)
+            prev = slot.get(window)
             if _stale(prev, resets, now):
                 continue
             inst = _instance(prev, resets)
@@ -229,9 +433,13 @@ def record(data: bytes, directory: str, now: float | None = None) -> int:
                 "session_id": session,
                 "source": "statusline",
             }
+            if account is not None:
+                sample["account"] = account
             lines.append(json.dumps(sample, separators=(",", ":")).encode() + b"\n")
-            state[window] = [used, kept]  # the instance's running maximum
+            slot[window] = [used, kept]  # the instance's running maximum
         if not lines:
+            if dirty:
+                _write_json(state_path, state)
             return 0
         out = os.open(
             os.path.join(directory, SAMPLES_FILE), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600
@@ -240,10 +448,7 @@ def record(data: bytes, directory: str, now: float | None = None) -> int:
             os.write(out, b"".join(lines))  # one write: whole lines, even unlocked
         finally:
             os.close(out)
-        tmp = f"{state_path}.{os.getpid()}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(state, f)
-        os.replace(tmp, state_path)
+        _write_json(state_path, state)
         return len(lines)
     finally:
         os.close(lock)  # releases the flock
@@ -333,5 +538,5 @@ def run(
             adopt(cache_dir(environ), directory)
     with contextlib.suppress(BaseException):
         if directory is not None:
-            record(data, directory)
+            record(data, directory, config=config_path(environ))
     return 0

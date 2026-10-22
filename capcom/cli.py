@@ -107,7 +107,7 @@ def _limits(args: argparse.Namespace) -> int:
         return run_install(load_config(), sys.stdout, remove=args.uninstall, yes=args.yes)
     from capcom.limits.cli import run_limits
 
-    return run_limits(load_config(), seed=args.seed, dry_run=args.dry_run)
+    return run_limits(load_config(), seed=args.seed, dry_run=args.dry_run, account=args.account)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -208,6 +208,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     limits.add_argument(
         "-y", "--yes", action="store_true", help="with --install or --uninstall: do not ask"
+    )
+    limits.add_argument(
+        "--account", metavar="EMAIL", help="only this account (its email, or its id)"
     )
     limits.set_defaults(func=_limits)
 
