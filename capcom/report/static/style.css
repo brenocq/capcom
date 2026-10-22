@@ -464,3 +464,56 @@ table.data.narrow { min-width: 0; }
 .runlab.left { transform: translateX(calc(-100% - 10px)); align-items: flex-end; }
 .runlab .v { font-family: var(--serif); font-size: 22px; line-height: 1.05; color: var(--text); }
 .runlab .r { font-size: 12px; color: var(--muted); }
+
+/* ------------------------------------------------------------------ responsive
+   One breakpoint, 900 px. Above it the sidebar sits beside the page and scrolls on
+   its own; below it a top bar (app.js, "responsive shell") takes its place and the
+   sidebar opens as a sheet under the bar. Controls are at least 24 px everywhere
+   and 44 px below the breakpoint; phones get a 16 px gutter. Nothing may make the
+   page scroll sideways: wide content scrolls inside its own box. */
+.topbar, .scrim { display: none; }
+a.link, a.note, .crumb a { display: inline-flex; align-items: center; min-height: 24px; }
+table.data th button, .causechip, button.tag { min-height: 24px; }
+.daychart { overflow-x: auto; }
+.daychart > .days, .daychart > .daylabs { min-width: calc(var(--days, 0) * 30px); }
+.daylabs span { overflow: visible; }
+h1, h2, .sub, .story { overflow-wrap: break-word; }
+code, .mono, pre { overflow-wrap: anywhere; }
+
+@media (min-width: 900px) {
+  .frame { flex-wrap: nowrap; }
+  .sidebar { flex: 0 0 248px; width: 248px; max-height: 100vh; overflow-y: auto; overscroll-behavior: contain; }
+}
+
+@media (max-width: 899.98px) {
+  .frame { display: block; min-height: 0; }
+  .topbar { display: flex; align-items: center; gap: 12px; position: sticky; top: 0; z-index: 30; height: 56px; padding: 0 8px 0 16px;
+    background: var(--ground); border-bottom: 0.5px solid var(--l15); }
+  .topbar .brand { min-height: 44px; padding: 0; }
+  .topbar .where { flex: 1; min-width: 0; padding-left: 12px; border-left: 0.5px solid var(--l25); color: var(--muted); font-size: 15px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .topbar .menu { flex: 0 0 44px; height: 44px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 10px;
+    background: transparent; color: var(--text); cursor: pointer; }
+  .topbar .menu:hover, .topbar .menu[aria-expanded="true"] { background: var(--sel); }
+  .sidebar { display: none; }
+  .menu-open { overflow: hidden; }
+  .menu-open .sidebar { display: flex; position: fixed; z-index: 40; top: 56px; left: 0; bottom: 0; width: min(360px, 100%); max-width: none;
+    padding: 16px 16px 24px; overflow-y: auto; overscroll-behavior: contain; background: var(--ground);
+    border-right: 0.5px solid var(--l15); box-shadow: 0 12px 32px rgba(0,0,0,0.22); }
+  .menu-open .sidebar > .brand { display: none; }
+  .menu-open .scrim { display: block; position: fixed; inset: 56px 0 0 0; z-index: 35; background: rgba(20,20,19,0.4); }
+  .panel { margin: 0 8px 8px; min-height: calc(100vh - 64px); }
+  /* touch-size targets */
+  .nav a, .live a, .toggle { min-height: 44px; }
+  .find input { height: 44px; font-size: 16px; }
+  .seg { flex-wrap: wrap; }
+  .seg button, button.copy, .sortbar .sortdir, table.data th button, .causechip, button.tag, button.cause.pick { min-height: 44px; min-width: 44px; }
+}
+
+@media (max-width: 599.98px) {
+  .panel { margin: 0; border-radius: 0; border-width: 0; padding: 20px 16px 40px; min-height: calc(100vh - 56px); }
+  .card { padding: 16px; }
+  .card.tight { padding: 14px 16px; }
+  h1 { font-size: 30px; }
+  .bitem .top span:first-child { white-space: normal; overflow-wrap: anywhere; }
+}

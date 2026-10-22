@@ -59,11 +59,32 @@ function yGrid(plot, ticks, ymax, left, fmt) {
 
 export function xAxis(ticks, x0, x1, left, xOf) {
   const pos = xOf || ((t) => (t - x0) / (x1 - x0));
-  return h('div.xaxis', { style: `margin-left:${left}px` }, ticks.map((tk, i) => {
+  return thinned(h('div.xaxis', { style: `margin-left:${left}px` }, ticks.map((tk, i) => {
     const f = pos(tk.t);
     const shift = f < 0.03 ? '0' : f > 0.97 ? '-100%' : '-50%';
     return h('span', { style: `left:${(f * 100).toFixed(2)}%;transform:translateX(${shift})`, text: tk.label });
-  }));
+  })));
+}
+
+// Axis labels that would run into each other when the chart is narrow: whenever the
+// row's width changes, every label is shown again and then, left to right, each one
+// too close to the last one kept is hidden (a `.today` label is always kept).
+const thinner = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver((entries) => entries.forEach((e) => thin(e.target)));
+
+export function thinned(row) {
+  if (thinner) thinner.observe(row);
+  return row;
+}
+
+function thin(row) {
+  const labels = [...row.children].filter((el) => el.textContent);
+  labels.forEach((el) => { el.style.visibility = ''; });
+  const range = document.createRange();
+  const boxes = labels.map((el) => { range.selectNodeContents(el); return range.getBoundingClientRect(); });
+  const kept = labels.map((el) => el.classList.contains('today'));
+  const clear = (i) => kept.every((k, j) => !k || j === i || boxes[i].right + 6 <= boxes[j].left || boxes[j].right + 6 <= boxes[i].left);
+  labels.forEach((el, i) => { if (!kept[i] && clear(i)) kept[i] = true; });
+  labels.forEach((el, i) => { if (!kept[i]) el.style.visibility = 'hidden'; });
 }
 
 // ------------------------------------------------------------------ band chart
@@ -192,14 +213,15 @@ export function dayBars(days, members, todayIso) {
   const step = many ? 7 : days.length > 14 ? 3 : 1;
   // a regular label too close to today's (always shown, at the end) would run into it
   const clear = (i) => days.length - 1 - i >= Math.ceil(step * 0.8);
-  const labs = h('div.daylabs', { style: many ? 'gap:2px' : '' }, days.map((d, i) => {
+  const labs = thinned(h('div.daylabs', { style: many ? 'gap:2px' : '' }, days.map((d, i) => {
     const today = d.iso === todayIso;
     const text = (i % step === 0 && clear(i)) || today ? (step === 1 ? 'SMTWTFS'[d.date.getDay()] + ' ' + d.date.getDate() : monthDay(d.date)) : '';
     // a label wider than its bar runs to the right; the last one runs left, inside the chart
     const last = i === days.length - 1 ? ';display:flex;justify-content:flex-end' : '';
     return h('span', { class: today ? 'today' : null, text, style: step > 1 ? 'overflow:visible' + last : null });
-  }));
-  return h('div', null, bars, labs);
+  })));
+  // a few days keep bars wide enough to tap, scrolling inside the card when narrow
+  return h('div.daychart', { style: many ? null : `--days:${days.length}` }, bars, labs);
 }
 
 // ------------------------------------------------------------------ heatmap
