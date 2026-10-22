@@ -292,14 +292,28 @@ export function barList(rows, valueOf, noteOf) {
 
 export function sessionHref(id) { return '/session/' + encodeURIComponent(id); }
 
-// Change the page's query without a reload; the frame redraws the page.
+// Change the page's query without a reload; the frame redraws the page. A new
+// range (`days`, Overview's `range`) is its own step in the history, so Back goes
+// 30 -> 14 -> 7 days before it leaves the page; other changes (a sort, a filter,
+// a picked spike) replace the current step.
+const RANGE_KEYS = ['days', 'range'];
+
 export function setQuery(params) {
   const q = new URLSearchParams(location.search);
   for (const [k, v] of Object.entries(params)) {
     if (v === null || v === '') q.delete(k); else q.set(k, v);
   }
   const qs = q.toString();
-  history.replaceState(history.state, '', location.pathname + (qs ? '?' + qs : ''));
+  const href = location.pathname + (qs ? '?' + qs : '');
+  const before = new URLSearchParams(location.search);
+  const step = RANGE_KEYS.some((k) => k in params && before.get(k) !== q.get(k));
+  if (step) {
+    // the step left keeps its scroll, for Back; the new one starts where we are
+    try { history.replaceState({ ...(history.state || {}), scrollY: window.scrollY }, ''); } catch (e) { /* state too large */ }
+    history.pushState({ scrollY: window.scrollY }, '', href);
+  } else {
+    history.replaceState(history.state, '', href);
+  }
   window.dispatchEvent(new Event('capcom-route'));
 }
 
