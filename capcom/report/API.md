@@ -149,7 +149,10 @@ member, labeled `temporary folders`, and all OpenClaw folders as one, labeled
 the later modification time of `index.sqlite` and `index.sqlite-wal`. `scanning` is
 true while serve's first scan has not finished: totals may be partial until then.
 
-### `GET /api/overview`
+### `GET /api/overview?group=category|project|model|agent`
+
+`group` (default `category`, the same names as `/api/spend`) splits today's
+cumulative chart only.
 
 ```
 {now, running_sessions,
@@ -157,7 +160,8 @@ true while serve's first scan has not finished: totals may be partial until then
  previous_7_days: {since, daily_average_usd,     # the 7 days before today
                    same_hour_average_usd, same_hour},
  spending_now: {usd_last_hour, spark: {step_s, times, values} | null},
- cumulative_today: Cumulative (by category, 5-minute steps) | null,
+ cumulative_today: Cumulative (by `group`, 5-minute steps, top 6) | null,
+ group,
  spikes_today: Spikes | null,
  regime: Regime | null,                          # a change in the last 14 days
  limits: Limits without segments,                # see /api/limits
