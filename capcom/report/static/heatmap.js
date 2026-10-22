@@ -141,7 +141,9 @@ export function heatCard(heat, now, sentence) {
     const views = hours ? h('div.seg', { role: 'group', 'aria-label': 'Heatmap view' },
       VIEWS.map(([v, text]) => h('button', {
         type: 'button', text, 'aria-pressed': String(v === state.view),
-        onclick: () => { state.view = v; writeUrl({ heat: v === 'week' ? 'week' : null }); draw(); },
+        // a new view starts with nothing picked: the other view's open hour (its panel and
+        // its cell's outline) would otherwise carry over
+        onclick: () => { state.view = v; state.hour = null; writeUrl({ heat: v === 'week' ? 'week' : null, hour: null }); draw(); },
       }))) : null;
     const panel = h('div.hm-panel', { 'aria-live': 'polite' });
     const open = (cell, row) => {
