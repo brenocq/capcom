@@ -150,9 +150,9 @@ export function bandChart(opts) {
     const pos = `left:${(fx * 100).toFixed(2)}%;top:${(fy * 100).toFixed(2)}%`;
     const lab = h('span.endlab' + place + (fx < 0.15 ? '.leftward' : ''), { style: pos, text: usd(end, end >= 100 ? 0 : 2) });
     plot.append(h('span.enddot', { style: pos }), lab);
-    // once laid out, move the label to the first place no marker covers
-    if (placed.length && typeof ResizeObserver !== 'undefined') {
-      const ro = new ResizeObserver(() => clearOfMarks(plot, lab));
+    // once laid out, move the label clear of the spike markers and the "now" label
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(() => clearOfMarks(plot, lab, fx, fy, left));
       ro.observe(plot);
     }
   }
@@ -175,23 +175,48 @@ export function bandChart(opts) {
   return h('div', null, plot, xAxis(xt, x0, x1, left));
 }
 
-// The end label's places, tried in order until one overlaps no spike marker and
-// stays inside the plot (the first one when none does).
-const END_PLACES = [[], ['below'], ['beside'], ['leftward'], ['below', 'leftward']];
+// Where the total's label goes beside the end of the total line (`pt`, px in the
+// plot): the first of a few offsets whose box overlaps no obstacle (the spike
+// markers, the "now" label; boxes in the same px) and stays inside `box`, else the
+// one that overlaps least. size: {w, h}. Returns the label's top-left offset from pt.
+const END_OFFSETS = (w, hh) => [
+  [-w - 6, -hh - 6], // above the end, to its left
+  [-w - 10, -hh / 2], // beside it
+  [-w - 8, 8], // below it
+  [-w - 8, 30], // further below
+  [-w - 8, 54],
+  [8, -hh - 6], // to the right (a line ending near the left edge)
+  [10, 8],
+];
 
-function clearOfMarks(plot, lab) {
-  const marks = [...plot.querySelectorAll('.spikemark')].map((m) => m.getBoundingClientRect());
+export function placeEndLabel(pt, size, obstacles, box) {
+  let best = null;
+  for (const [dx, dy] of END_OFFSETS(size.w, size.h)) {
+    const r = { left: pt.x + dx, top: pt.y + dy, right: pt.x + dx + size.w, bottom: pt.y + dy + size.h };
+    const outside = r.left < box.left || r.right > box.right || r.top < box.top || r.bottom > box.bottom;
+    let overlap = 0;
+    for (const o of obstacles) {
+      const ox = Math.min(r.right, o.right + 2) - Math.max(r.left, o.left - 2);
+      const oy = Math.min(r.bottom, o.bottom + 2) - Math.max(r.top, o.top - 2);
+      if (ox > 0 && oy > 0) overlap += ox * oy;
+    }
+    const cost = overlap + (outside ? 1e6 : 0);
+    if (cost === 0) return { dx, dy };
+    if (!best || cost < best.cost) best = { dx, dy, cost };
+  }
+  return { dx: best.dx, dy: best.dy };
+}
+
+function clearOfMarks(plot, lab, fx, fy, axis) {
   const box = plot.getBoundingClientRect();
   if (!box.width) return;
-  const hits = (r) => marks.some((m) => r.left < m.right + 2 && r.right > m.left - 2 && r.top < m.bottom + 2 && r.bottom > m.top - 2);
-  const inside = (r) => r.left >= box.left - 40 && r.right <= box.right + 4 && r.top >= box.top - 24 && r.bottom <= box.bottom + 4;
-  for (const place of END_PLACES) {
-    lab.classList.remove('below', 'beside', 'leftward');
-    lab.classList.add(...place);
-    const r = lab.getBoundingClientRect();
-    if (!hits(r) && inside(r)) return;
-  }
-  lab.classList.remove('below', 'beside', 'leftward');
+  const rel = (r) => ({ left: r.left - box.left, top: r.top - box.top, right: r.right - box.left, bottom: r.bottom - box.top });
+  const obstacles = [...plot.querySelectorAll('.spikemark, .nowlab')].map((m) => rel(m.getBoundingClientRect()));
+  const pt = { x: fx * box.width, y: fy * box.height };
+  const { dx, dy } = placeEndLabel(pt, { w: lab.offsetWidth, h: lab.offsetHeight }, obstacles,
+    { left: -axis, top: -24, right: box.width + 4, bottom: box.height + 4 });
+  lab.className = 'endlab';
+  lab.style.transform = `translate(${dx}px, ${dy}px)`;
 }
 
 // ------------------------------------------------------------------ per-day bars
@@ -201,15 +226,23 @@ function clearOfMarks(plot, lab) {
 export function dayBars(days, members, todayIso) {
   const max = Math.max(...days.map((d) => d.total), 1e-9);
   const many = days.length > 31;
-  const bars = h('div.days', { style: many ? 'gap:2px' : '' }, days.map((d) => {
-    const bar = h('div.bar', { style: `height:${(d.total / max * 85).toFixed(1)}%` },
+  // every day's amount sits above its bar: level when it fits the bar's width,
+  // turned upright when it does not; on a phone, or with bars too thin even for
+  // that, only the highest day and today keep theirs (every day's is on hover)
+  const top = days.reduce((a, d, i) => (d.total > days[a].total ? i : a), 0);
+  const bars = h('div.days.hl.' + (many ? 'key' : 'flat'), { style: many ? 'gap:2px' : '' }, days.map((d, i) => {
+    const f = `--f:${(d.total / max).toFixed(4)}`;
+    const bar = h('div.bar', null,
       d.values.map((v, j) => (v > 0 ? h('div', { style: `flex:${v} 1 0px;background:${members[j].color}` }) : null)));
-    const col = h('a.day', { href: `/day/${d.iso}`, 'aria-label': `${monthDay(d.date)}: ${usd(d.total)}, open the day` },
-      many ? null : h('span.amt', { text: d.total > 0 ? usdShort(d.total) : '' }), bar);
-    return tipOn(col, `${monthDay(d.date)}: ${usd(d.total)}`, () => members
+    const key = i === top || i === days.length - 1;
+    const amt = d.total > 0 ? h('span.amt' + (key ? '.key' : ''), { text: usdShort(d.total), 'aria-hidden': 'true' }) : null;
+    const col = h('a.day', { href: `/day/${d.iso}`, style: f }, amt, bar);
+    const rows = () => members
       .map((m, j) => ({ label: m.label, value: usd(d.values[j]), color: m.color }))
-      .filter((r, j) => d.values[j] > 0).reverse());
+      .filter((r, j) => d.values[j] > 0).reverse();
+    return tipOn(col, `${monthDay(d.date)}: ${usd(d.total)}`, rows, { native: true, aria: `${monthDay(d.date)}: ${usd(d.total)}, open the day` });
   }));
+  fitAmounts(bars, days.map((d) => (d.total > 0 ? usdShort(d.total).length : 0)));
   const step = many ? 7 : days.length > 14 ? 3 : 1;
   // a regular label too close to today's (always shown, at the end) would run into it
   const clear = (i) => days.length - 1 - i >= Math.ceil(step * 0.8);
@@ -222,6 +255,27 @@ export function dayBars(days, members, todayIso) {
   })));
   // a few days keep bars wide enough to tap, scrolling inside the card when narrow
   return h('div.daychart', { style: many ? null : `--days:${days.length}` }, bars, labs);
+}
+
+// Choose how the per-day amounts show for the bars' width now: "flat" (level),
+// "rot" (upright) or "key" (highest day and today only). A label is about 6 px a
+// character at 10 px; upright, it needs a bar at least 11 px wide.
+const PHONE = '(max-width: 599.98px)';
+function fitAmounts(bars, lengths) {
+  if (typeof ResizeObserver === 'undefined' || typeof window === 'undefined') return;
+  const n = lengths.length;
+  const need = Math.max(...lengths, 0) * 6 + 4;
+  const phone = window.matchMedia ? window.matchMedia(PHONE) : null;
+  const fit = () => {
+    const w = bars.clientWidth;
+    if (!w) return;
+    const gap = parseFloat(getComputedStyle(bars).columnGap) || 0;
+    const col = (w - gap * (n - 1)) / n;
+    const mode = phone && phone.matches ? 'key' : col >= need ? 'flat' : col >= 11 ? 'rot' : 'key';
+    for (const m of ['flat', 'rot', 'key']) bars.classList.toggle(m, m === mode);
+  };
+  new ResizeObserver(fit).observe(bars);
+  if (phone && phone.addEventListener) phone.addEventListener('change', fit);
 }
 
 // ------------------------------------------------------------------ heatmap
@@ -253,7 +307,7 @@ export function heatmap(cells, max, weekdays) {
   return h('div.scroll', null, h('div.heat', null,
     cells.map((row, r) => h('div.hr', null, h('span', { text: weekdays[r] }),
       row.map((v, hr) => tipOn(h('span.cell', { style: `background:${v > 0 ? heatColor(v / max) : 'var(--subtle)'}` }),
-        `${weekdays[r]} ${two(hr)}:00 to ${two((hr + 1) % 24)}:00`, [{ label: 'Spent', value: usd(v) }])))),
+        `${weekdays[r]} ${two(hr)}:00 to ${two((hr + 1) % 24)}:00`, [{ label: 'Spent', value: usd(v) }], { focus: false })))),
     h('div.hx', null, ['00', '06', '12', '18'].map((t) => h('span', { text: t })))));
 }
 

@@ -428,6 +428,10 @@ class Chrome:
             "--disable-features=Translate,MediaRouter,OptimizationHints",
             "about:blank",
         ]
+        if os.environ.get("CI"):
+            # CI runners (Ubuntu 24.04) block the user namespaces Chrome's sandbox needs,
+            # so Chrome exits at once; it only loads this suite's synthetic local pages
+            args[1:1] = ["--no-sandbox", "--disable-dev-shm-usage"]
         # a shell puts the pipe ends on fds 3 and 4, where Chrome expects them
         wire = f'exec "$@" 3<&{hi_r} 4>&{hi_w} {hi_r}<&- {hi_w}>&-'
         self.proc = subprocess.Popen(

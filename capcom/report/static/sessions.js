@@ -1,7 +1,7 @@
 // The sessions table (Spend and the Sessions page), and the block shown for a
 // part whose analysis module is not built yet.
 
-import { h, api, usd, tokens, pct, duration, stamp, seg, empty, setQuery, sessionHref, ApiError, LOWER_TITLE } from './lib.js';
+import { h, api, usd, tokens, pct, duration, stamp, seg, empty, setQuery, sessionHref, ApiError, LOWER_TITLE, tipOn } from './lib.js';
 
 export function sessionsTable(rows, sort, onSort) {
   const th = (key, label, cls) => {
@@ -20,8 +20,9 @@ export function sessionsTable(rows, sort, onSort) {
       h('td.num', { text: r.active_seconds ? duration(r.active_seconds) : '<1 min' }),
       h('td.num', { text: tokens(r.peak_context) }),
       h('td', null, h('div', { style: 'display:flex;align-items:center;gap:8px' },
-        h('div.track', { style: 'width:80px' }, h('div', { style: `width:${(r.cache_read_share * 100).toFixed(1)}%;background:var(--s1)` })),
-        h('span.note', { text: pct(r.cache_read_share) + ' of tokens' }))),
+        tipOn(h('div.track', { style: 'width:80px' }, h('div', { style: `width:${(r.cache_read_share * 100).toFixed(1)}%;background:var(--s1)` })),
+          'Cache reads', [{ label: 'Share of tokens', value: pct(r.cache_read_share, 1), color: 'var(--s1)' }], { focus: false }),
+        h('span.note.mono', { text: pct(r.cache_read_share) }))),
       h('td.num', { text: r.last ? stamp(new Date(r.last)) : '' }),
       h('td.cost', { text: (r.estimated_output ? '≥ ' : '') + usd(r.usd), title: r.estimated_output ? LOWER_TITLE : null }),
     )))));
