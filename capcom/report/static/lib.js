@@ -307,10 +307,14 @@ export function tipOn(el, title, rows, opts = {}) {
 // A bar split into colored parts, each with its details on hover, focus or tap.
 // parts: [{color, share (0..1 of the bar), title, rows}]; the parts sit 2 px apart
 // on the surface, and hovering one dims the others.
+// With `opts.focus` false (a bar inside a control, such as a row's summary) the parts
+// show their details on hover and tap only, and the bar is one image named by
+// `opts.aria`: the same numbers must then be readable elsewhere.
 export function segBar(parts, opts = {}) {
-  return h('div.stackbar.hl' + (opts.tall ? '.tall' : ''), { role: 'group', 'aria-label': opts.aria || null },
+  const focus = opts.focus !== false;
+  return h('div.stackbar.hl' + (opts.tall ? '.tall' : ''), { role: focus ? 'group' : 'img', 'aria-label': opts.aria || null },
     parts.filter((p) => p.share > 0).map((p) => tipOn(
-      h('span', { style: `flex:${p.share.toFixed(5)} 1 0px;background:${p.color}` }), p.title, p.rows)));
+      h('span', { style: `flex:${p.share.toFixed(5)} 1 0px;background:${p.color}` }), p.title, p.rows, { focus })));
 }
 
 // A table of the numbers a chart shows, behind a "Show as a table" toggle, so

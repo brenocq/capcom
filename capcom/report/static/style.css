@@ -366,6 +366,8 @@ details.rollup > summary::before { content: '▸'; color: var(--muted); width: 1
 details.rollup[open] > summary::before { content: '▾'; }
 details.rollup > summary .mtext { flex: 1; display: flex; flex-direction: column; gap: 2px; }
 details.rollup .tags { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; margin-top: 4px; }
+details.rollup .scopes { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 4px; }
+details.rollup .scopes .stackbar { flex: 0 1 180px; min-width: 96px; }
 .tag.over { background: var(--subtle); color: var(--muted); }
 .rfind { display: flex; flex-direction: column; gap: 12px; padding: 0 0 14px; }
 .rfind > .card { box-shadow: none; border: 1px solid var(--l10); }

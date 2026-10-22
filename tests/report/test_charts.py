@@ -275,3 +275,21 @@ console.log(JSON.stringify(Object.fromEntries(labels)));
         "too_early": "Too early",
         "no_data": "Can\u2019t tell",
     }
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_a_share_bar_inside_a_control_is_one_image_without_tab_stops() -> None:
+    got = _node("""
+const m = await import('./lib.js');
+const parts = [{ color: 'red', share: 0.7, title: 'a', rows: [] },
+  { color: 'blue', share: 0.3, title: 'b', rows: [] },
+  { color: 'x', share: 0, title: 'c', rows: [] }];
+const own = m.segBar(parts, { aria: 'own' });
+const inner = m.segBar(parts, { focus: false, aria: 'inner' });
+const tabs = (b) => b.children.map((c) => c.attrs.tabindex || null);
+console.log(JSON.stringify({ own: [own.attrs.role, tabs(own)],
+  inner: [inner.attrs.role, tabs(inner)] }));
+""")
+    # a part with no share is left out; on its own each part is a tab stop
+    assert got["own"] == ["group", ["0", "0"]]
+    assert got["inner"] == ["img", [None, None]]
