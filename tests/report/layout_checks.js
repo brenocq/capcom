@@ -6,7 +6,8 @@
 //   page-scroll        the document scrolls sideways; el is an element past the edge
 //   overlap            two visible text runs or controls cover each other
 //   small-target       a control under 24 x 24 px (44 x 44 for the navigation and
-//                      buttons at touch widths); links inside running text are exempt
+//                      buttons at touch widths); links inside running text and a
+//                      chart's data marks ([data-mark], .mk) are exempt
 //   clipped            text cut by a box that hides overflow, without an ellipsis
 //   truncated-no-title text cut with an ellipsis, but no title to read it in full
 //   escapes            text running out of its card or panel
@@ -171,8 +172,14 @@
 
   // ------------------------------------------------------------ target sizes
   const TOUCH = '#sidebar a, #sidebar button, #sidebar input, .topbar a, .topbar button, button, summary, select, input';
+  // a chart's data marks (a bar segment, a heatmap cell) are exempt: they are reached
+  // by keyboard too and their numbers are shown elsewhere (a table, a sentence), the
+  // "equivalent" exception of WCAG 2.5.8; links and buttons that carry a tooltip
+  // are still checked
+  const MARK = '[data-mark], .mk:not(a, button)';
   for (const c of controls) {
     const el = c.el;
+    if (el.matches(MARK)) continue;
     const cs = getComputedStyle(el);
     if (cs.display === 'inline' && el.tagName === 'A') {
       const host = el.parentElement;
