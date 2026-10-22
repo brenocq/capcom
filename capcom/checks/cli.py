@@ -16,6 +16,7 @@ from capcom.timeline.groups import TEMPORARY_LABEL, ProjectNames
 from capcom.types import Finding, Index
 
 WIDTH = 88
+DEFAULT_DAYS = 14  # `capcom checks`' default window, where `capcom mark N` reads rows
 ROLLUP_SCOPES = 4  # scopes named on a roll-up line
 
 
@@ -58,12 +59,19 @@ def _overlapped_by(
     return [hit[0] + 1 if counted[i] is False and hit else 0 for i, hit in enumerate(blockers)]
 
 
+def finding_id(f: Finding, scope: str | None = None) -> str:
+    """A finding's stable id across windows: "kind@scope", the scope as shown
+    (`scope`, a project's name) or as the finding has it."""
+    return f"{f.kind}@{f.scope if scope is None else scope}"
+
+
 def format_findings(
     findings: list[Finding],
     limit: int,
     names: ProjectNames | None = None,
     dirs: set[str] | None = None,
     counted: list[bool | None] | None = None,
+    mark_rows: bool = False,
 ) -> str:
     """Findings as numbered blocks: saving, title and scope, summary, advice, the
     change to paste, and the first evidence lines. Project scopes (folders in `dirs`)
@@ -78,6 +86,10 @@ def format_findings(
         scope = _scope_label(f.scope, names, known)
         star = {True: " ", False: "*", None: "+"}[flags[i - 1]]
         lines = [f"{i:>2}.{star}${f.saving_usd_per_week:,.2f}/week  {f.title}  [{scope}]"]
+        # the stable id `capcom mark` takes; a row number only in the default window,
+        # the one `capcom mark N` reads its rows from
+        hint = f"  (capcom mark {i})" if mark_rows else ""
+        lines.append(f"    id {finding_id(f, scope)}{hint}")
         if flags[i - 1] is None:
             lines.append("    + a judgement call: not added to the total")
         elif not flags[i - 1]:
@@ -152,7 +164,8 @@ def run_checks_view(
     judged = [bool(f.metrics.get("judgement_call")) for f in findings]
     flags = counted_findings(findings, dirs)  # never counts a judgement call
     counted: list[bool | None] = [None if j else c for j, c in zip(judged, flags, strict=True)]
-    print(format_findings(findings, limit, names, dirs, counted), file=out)
+    rows = days == DEFAULT_DAYS
+    print(format_findings(findings, limit, names, dirs, counted, mark_rows=rows), file=out)
     print(file=out)
     if any(judged):
         print(

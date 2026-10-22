@@ -286,6 +286,9 @@ def test_live(client: Client) -> None:
     assert s["session_id"] == "s1" and s["title"] == "Alpha work"
     assert close(s["usd_last_10_min"], usd(S1_MAIN[-1:]))
     assert s["usd_per_hour"] == pytest.approx(6 * s["usd_last_10_min"], abs=1e-5)
+    # the test server never scans: it must say so and how old the index is, so the
+    # page doesn't claim that no session ran
+    assert data["watching"] is False and data["index_updated"]
 
 
 def test_spikes_and_checks(client: Client, stub_client: Client) -> None:

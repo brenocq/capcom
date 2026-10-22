@@ -1,0 +1,38 @@
+/* The "When you spend" card (heatmap.js): cells as buttons, the empty future
+   hours hatched, the hour panel under the grid. */
+.hm-sub { margin: -4px 0 10px; gap: 12px; flex-wrap: wrap; }
+.hm-scale .hm-key { display: inline-flex; align-items: center; gap: 4px; }
+.hm-scale .hm-ramp { display: inline-flex; gap: 2px; }
+.heat.hm-grid { min-width: 420px; }
+.hm-grid .hr > span:first-child { flex: 0 0 66px; white-space: nowrap; }
+.hm-grid .hr > span.hm-today { color: var(--text); font-weight: 600; }
+.hm-grid .hx { padding-left: 69px; }
+.hm-grid button.cell { border: 0; padding: 0; margin: 0; min-width: 0; cursor: pointer; font: inherit; }
+.hm-grid .cell.hm-zero { background: var(--subtle); }
+.hm-grid .cell:hover { box-shadow: inset 0 0 0 1px var(--l35); }
+.hm-grid .cell:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; position: relative; z-index: 1; }
+.hm-grid .cell.on { box-shadow: 0 0 0 2px var(--text); position: relative; z-index: 1; }
+.hm-grid .cell.hm-now { outline: 1px dashed var(--muted); outline-offset: 1px; }
+.hm-future, .hm-scale i.hm-future {
+  background: repeating-linear-gradient(135deg, transparent 0 3px, var(--l15) 3px 4px) !important;
+  box-shadow: inset 0 0 0 1px var(--l15);
+}
+.hm-grid .cell.hm-future { cursor: default; }
+.hm-grid .cell.hm-missing { background: transparent; }
+.hm-panel:not(:empty) { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--l10); display: flex; flex-direction: column; gap: 10px; }
+.hm-title { margin: 0; font-size: 16px; font-weight: 600; }
+.hm-close { border: 0; background: var(--subtle); color: var(--text); border-radius: 8px; width: 28px; height: 28px; font-size: 16px; cursor: pointer; }
+.hm-why { margin: 0; }
+.hm-kinds { display: flex; flex-direction: column; gap: 6px; }
+.hm-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.hm-cols h4, .hm-panel h4 { margin: 4px 0 6px; }
+.hm-list { display: flex; flex-direction: column; }
+.hm-row { display: flex; align-items: center; gap: 10px; padding: 6px 4px; border-radius: 6px; color: var(--text); text-decoration: none; font-size: 13px; }
+.hm-row:hover, .hm-row:focus-visible { background: var(--sel); }
+.hm-row .hm-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hm-row .tag { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; }
+.hm-row .hm-main > span:last-child, .hm-row .hm-main > b { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.hm-dates { display: flex; flex-wrap: wrap; gap: 6px; }
+.hm-date { display: inline-flex; gap: 8px; align-items: baseline; border: 1px solid var(--l15); background: var(--card); color: var(--text); border-radius: 8px; padding: 6px 10px; cursor: pointer; font: inherit; font-size: 13px; }
+.hm-date:hover, .hm-date:focus-visible { background: var(--sel); }
+@media (max-width: 720px) { .hm-cols { grid-template-columns: 1fr; } }
