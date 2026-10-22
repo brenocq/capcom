@@ -6,7 +6,8 @@ import {
   outputUsd, estimateNote, lowerMark, SERIES, OTHER_COLOR, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor,
   spikeText, spikeHref, projectChip, storyLine,
 } from './lib.js';
-import { bandChart, dayBars, heatmap, heatScale } from './charts.js';
+import { bandChart, dayBars } from './charts.js';
+import { heatCard } from './heatmap.js';
 import { sessionsTable } from './sessions.js';
 
 const RANGES = [[7, '7 days'], [14, '14 days'], [30, '30 days'], [90, '90 days']];
@@ -137,11 +138,8 @@ export async function renderSpend(main, r) {
   main.append(h('div.row-wrap', null, perDay, tokensVsDollars(t)));
 
   // heatmap + context
-  const heat = h('section.card.grow3', null, h('div.split', null, h('h2.small', { text: 'When you spend' }), d.heatmap ? heatScale() : null));
-  if (d.heatmap) {
-    heat.append(heatmap(d.heatmap.cells, d.heatmap.max, d.heatmap.weekdays));
-    heat.append(h('p.para', { text: heatSentence(d.heatmap) }));
-  } else heat.append(timelineMissing('The heatmap'));
+  const heat = d.heatmap ? heatCard(d.heatmap, until.getTime(), heatSentence)
+    : h('section.card.grow3', null, h('h2.small', { text: 'When you spend' }), timelineMissing('The heatmap'));
   main.append(h('div.row-wrap', null, heat, contextCard(d.context_buckets)));
 
   // sessions

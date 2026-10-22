@@ -184,7 +184,9 @@ main threads, else the agent type; projects as in "Projects" above.
  spikes: Spikes | null,
  regime: Regime | null,               # a change dated inside the window
  daily: {members: [{key, label}], days: [{date, values, total}]} | null,
- heatmap: {weekdays: [Mon..Sun], cells: [7][24] USD, max} | null,
+ heatmap: {weekdays: [Mon..Sun], cells: [7][24] USD, max,
+           hours: [{start, usd, project}],   # each local hour with spend, in time order
+           top_projects: [7][24] label | null} | null,
  context_buckets: [{label, requests, usd}],   # <50k, 50-100k, ..., >600k tokens of context
  sessions: [Session row] (10 costliest),
  unavailable}
@@ -195,6 +197,13 @@ midnight, folded into the same members as `cumulative`, then summed by local dat
 by local weekday and hour. The window's dates count back from today's local date, and
 each starts at its own local midnight, so a daylight-saving change inside the window
 moves no request to the wrong day.
+
+`heatmap.hours` lists the same hourly steps one by one (only those with spend): `start`
+is the local hour's start as ISO 8601 with its UTC offset (`2026-10-21T05:00:00+02:00`),
+`usd` its spend over every member, `project` its costliest project's label. A page lays
+out the past days by date from it and finds the dates behind a weekday-and-hour cell;
+its `usd` add up to the cells. `top_projects` is the costliest project of each cell
+over the window, null for a cell without spend.
 
 `sessions_count` leaves out the sessions in temporary folders (/tmp), counted apart in
 `temporary_sessions`; together they are `/api/sessions`' `total` for the same `days`
@@ -221,6 +230,35 @@ typical day, and where it went. 400 for a malformed date, 404 for a day not yet 
 those same days. Days without spend do not count: days off would pull the median
 toward zero and make any working day look expensive. `typical` is null when none of
 the 14 days had spend.
+
+### `GET /api/hour?start=<ISO 8601>`
+
+One local clock hour, the panel a cell of Spend's heatmap opens: why it cost what it
+did. `start` is the hour's start as ISO 8601, with a UTC offset (`Z` or `+02:00`; a
+`+` must be escaped as `%2B`, though one left unescaped is read back) or without one
+(a wall time in the server's zone), as in `heatmap.hours[].start`. 400 for a
+malformed time or one that is not the start of a local hour, 404 for an hour not yet
+come. Replies are cached per index generation like the others, keyed by `start`.
+
+```
+{window: {start, end, until},         # ISO 8601 with the local offset; until: end, or now
+ partial,                             # true for the current hour (until < end)
+ totals,                              # Totals: its `categories` split the hour by token kind
+ by_project: [Group], by_agent: [Group],
+ spikes: [Spike item] | null,         # those overlapping the hour, largest excess first, at most 8
+ causes: [{cause, cause_label, cause_color, excess_usd, spikes, title}] | null,
+ sessions_count, sessions: [Session row] (5 costliest),
+ unavailable}
+```
+
+The hour is the absolute span [start, start + 1 h), so on the night clocks fall back
+the two hours read 02:00 are two hours with two starts (`+02:00` and `+01:00`).
+`by_project`, `by_agent` and `totals.categories` each add up to `totals.usd`. `spikes`
+are the spikes of `/api/spikes` (same shape, with their `explanations`) that start
+before the hour ends and end after it starts, including one that began up to 12 hours
+before. `causes` sums their named causes (never the unexplained rest) by cause, largest
+first; `title` is the headline of the largest. `spikes` is null without
+`capcom.timeline`, `causes` without `capcom.explain` (both listed in `unavailable`).
 
 ### `GET /api/sessions?days=14&q=&sort=usd&limit=200`
 
