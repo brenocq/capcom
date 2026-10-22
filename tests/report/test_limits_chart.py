@@ -221,3 +221,23 @@ def test_runout_label_stays_off_the_fan_and_the_median(
         assert not _meets(box, upper + lower, closed=True)
         assert not _meets(box, [px(p[0], p[1]) for p in fan], closed=False)
         assert box[2] > h - 100 / ymax * h  # below the 100 % line
+
+
+def test_run_out_label_keeps_clear_of_the_readings() -> None:
+    # readings climbing steeply just before now, where the left-side label would sit,
+    # and the run-out late in the window, so the label can't go right: either it finds
+    # a spot no reading passes through, or it gets a solid backing
+    h, ymax = 140, 120.0
+    plot = {"x0": X0, "x1": X1, "w": 560, "h": h, "ymax": ymax}
+    now = X0 + 150 * HOUR
+    reads = [[X0 + t * HOUR, v] for t, v in [(120, 20), (140, 55), (146, 70), (150, 92)]]
+    fan = [[now, 92, 92, 92], [X0 + 168 * HOUR, 130, 110, 150]]
+    f = 152 / 168
+    args = f"{f}, {json.dumps(fan)}, {json.dumps(plot)}, m.LABEL_BOX, {json.dumps(reads)}"
+    lab = _run(f"m.runoutLabel({args})")
+    assert isinstance(lab, dict)
+    a, b = lab["x"]
+    ypx = lambda v: h - v / ymax * h  # noqa: E731
+    through = [v for t, v in reads if X0 + a / 560 * (X1 - X0) <= t <= X0 + b / 560 * (X1 - X0)]
+    passes = any(lab["top"] <= ypx(v) <= lab["top"] + 46 for v in through)
+    assert not (passes and lab["clear"])  # a reading through it means a solid backing
