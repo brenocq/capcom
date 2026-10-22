@@ -216,6 +216,23 @@ export function stopLoads(keep = new Set()) {
   }
 }
 
+// Fetch `paths` again in the background (the data changed on the server) and, once
+// every one is in, keep the new replies in place of the old: the next draw shows
+// them at once, with no loading state. Resolves to false if one failed.
+export async function renew(paths) {
+  let fresh;
+  try {
+    fresh = await Promise.all(paths.map((p) => getProgressive(p)));
+  } catch (e) { return false; }
+  paths.forEach((path, i) => {
+    const old = store.get(path);
+    if (old && !old.done) return; // a newer load started meanwhile: it wins
+    const data = fresh[i];
+    store.set(path, { path, ctrl: new AbortController(), low: false, done: true, error: null, data, partial: null, progress: 1, source: null, waiters: new Set(), promise: Promise.resolve(data) });
+  });
+  return true;
+}
+
 // Start the server on `path` ahead of a click (a hover on a link to its page):
 // the reply is followed like any other, so the click finds it loading or done.
 export function prefetch(path) { if (!store.has(path)) load(path, true); }

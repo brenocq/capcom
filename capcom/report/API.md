@@ -189,6 +189,15 @@ member, labeled `temporary folders`, and all OpenClaw folders as one, labeled
 the later modification time of `index.sqlite` and `index.sqlite-wal`. `scanning` is
 true while serve's first scan has not finished: totals may be partial until then.
 
+### `GET /api/version`
+
+`{index, samples, marks, updated}`: short digests of the index's generation, the usage
+samples' stamp and the marks file's stamp, and when the index was last written. The pages
+ask for it every 30 s while the tab is visible and redraw the view they show when a part
+it reads changed (the index for every view; the samples for Overview and Limits; the
+marks for Checks and Did it work?). It opens no index and is never a job: a few `stat`
+calls and one `PRAGMA data_version`.
+
 ### `GET /api/overview`
 
 ```

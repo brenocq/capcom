@@ -28,6 +28,7 @@ never overlap.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import hmac
 import importlib
 import io
@@ -768,6 +769,9 @@ class Handler(BaseHTTPRequestHandler):
     def _api(self, route: str, query: dict[str, str]) -> None:
         parts = route.strip("/").split("/")
         name = parts[0]
+        if route.strip("/") == "version":  # the pages' 30 s look for news: never a job
+            self._json(HTTPStatus.OK, version(self.site))
+            return
         if name in MAY_ARG and len(parts) == 2 and not parts[1]:
             parts = parts[:1]
         sizes = {1, 2} if name in MAY_ARG else {2} if name in WITH_ARG else {1}
@@ -831,6 +835,33 @@ class Handler(BaseHTTPRequestHandler):
                 partial, source = site.cache.stale(key), "stale"
             body = computing_body(job, partial, source if partial is not None else None)
             self._send(HTTPStatus.ACCEPTED, body, TYPES[".json"])
+
+
+def version(site: Site) -> dict[str, Any]:
+    """What a page compares every 30 s to know its data changed (`/api/version`):
+    short digests of the index's generation, the usage samples' stamp and the marks'
+    stamp, and when the index was last written. A few stat calls and one PRAGMA on
+    a held connection: no index is opened, nothing is computed."""
+    watch = site.cache.watch(site.index_path) if site.cache is not None else None
+    gen = generation(site.index_path, watch)
+
+    def digest(x: Any) -> str:
+        return hashlib.blake2s(repr(x).encode(), digest_size=6).hexdigest()
+
+    updated = None
+    mtimes = []
+    for p in (site.index_path, site.index_path.with_name(site.index_path.name + "-wal")):
+        with contextlib.suppress(OSError):
+            mtimes.append(os.stat(p).st_mtime)
+    if mtimes:
+        when = datetime.fromtimestamp(max(mtimes), UTC)
+        updated = when.astimezone(site.tz).isoformat(timespec="seconds")
+    return {
+        "index": digest(gen),
+        "samples": digest(_limits_stamp(site.state_dir)),
+        "marks": digest(_changes_stamp(site)),
+        "updated": updated,
+    }
 
 
 def _ctype(result: Result) -> str:

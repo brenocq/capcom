@@ -443,3 +443,23 @@ def test_the_worker_stops_its_child_while_a_page_needs_the_cpu(index_path: Path)
             assert stopped >= 1 and job.paused > 0
     finally:
         site.worker.close()
+
+
+# --------------------------------------------------------------------------- live pages
+
+
+def test_version_says_which_part_changed(index_path: Path, tmp_path: Path) -> None:
+    from capcom.limits.model import samples_path
+
+    site = _site(index_path, Gate(), state_dir=tmp_path)
+    for client in serve(site):
+        status, v1, _ = client.get("/api/version")
+        assert status == 200 and set(v1) == {"index", "samples", "marks", "updated"}
+        assert client.get("/api/version")[1] == v1  # nothing changed
+        samples = samples_path(tmp_path)
+        samples.parent.mkdir(parents=True, exist_ok=True)
+        samples.write_text("{}\n")
+        v2 = client.get("/api/version")[1]
+        assert v2["samples"] != v1["samples"]
+        assert v2["index"] == v1["index"] and v2["marks"] == v1["marks"]
+    assert site.jobs is not None and len(site.jobs) == 0  # never a job

@@ -2,7 +2,7 @@
 // theme toggle) and a router from the URL path to a page.
 
 import { h, s, api, stamp, sessionHref, forget } from './lib.js';
-import { startRouter, render, go, afterPointer } from './router.js';
+import { startRouter, render, go, afterPointer, refreshView } from './router.js';
 import { swapIn } from './morph.js';
 import { renderOverview } from './overview.js';
 import { renderSpend } from './spend.js';
@@ -270,6 +270,37 @@ async function refreshStatus() {
   }
 }
 
+// ------------------------------------------------------------------ live pages
+
+// Every 30 s while the tab is visible (and at once when it shows again): the live
+// list, and /api/version, whose parts say what changed on the server. When a part
+// the current view reads changed, the view is fetched again and swapped in place
+// (router.js refreshView), and the sidebar's "Index updated" moves on.
+const READS = { overview: ['index', 'samples', 'marks'], limits: ['index', 'samples'], checks: ['index', 'marks'], changes: ['index', 'marks'] };
+let seen = null;
+
+async function watchData() {
+  if (document.hidden) return;
+  let v;
+  try { v = await api('version', true); } catch (e) { return; }
+  const before = seen;
+  seen = v;
+  if (!before) return;
+  if (v.updated && statusData && statusData.index && statusData.index.updated !== v.updated) {
+    statusData.index.updated = v.updated;
+    drawSidebar();
+  }
+  const parts = READS[route().name] || ['index'];
+  if (parts.some((k) => before[k] !== v[k])) {
+    if (before.marks !== v.marks) forget(); // a mark shows on several pages' replies
+    refreshView();
+  }
+}
+
+function tickLive() { if (!document.hidden) { refreshLive(); watchData(); } }
+
 refreshStatus();
 refreshLive();
-setInterval(refreshLive, 30e3);
+watchData();
+setInterval(tickLive, 30e3);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) tickLive(); });
