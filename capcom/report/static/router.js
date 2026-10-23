@@ -6,7 +6,7 @@
 // content dimmed (same page) or skeleton cards (another page), a thin bar at the
 // top of each loading card, and a status line ("Loading 30 days… 62 %").
 
-import { h, hm, apiHooks, apiState, stopLoads, prefetch, preload, renew, errorBox } from './lib.js';
+import { h, apiHooks, apiState, stopLoads, prefetch, preload, renew, errorBox } from './lib.js';
 import { swapIn } from './morph.js';
 
 const GRACE_MS = 80; // a page drawn within this needs no loading state
@@ -23,7 +23,6 @@ let seq = 0;
 // ------------------------------------------------------------------ status line
 
 let statusEl = null;
-let noteTimer = 0;
 function status(text, said) {
   if (!statusEl) {
     statusEl = h('div.loadstatus', { hidden: true },
@@ -31,8 +30,6 @@ function status(text, said) {
       h('span.sr', { role: 'status', 'aria-live': 'polite' }));
     document.body.append(statusEl);
   }
-  clearTimeout(noteTimer);
-  statusEl.classList.remove('note');
   statusEl.hidden = !text;
   if (text) statusEl.children[1].textContent = text;
   if (said !== undefined && statusEl.children[2].textContent !== said) statusEl.children[2].textContent = said;
@@ -196,9 +193,7 @@ function tick(v) {
     busyCards(v, live, false);
     live.removeAttribute('data-indet');
     if (v.timer) { clearInterval(v.timer); v.timer = 0; }
-    if (v.note) { note(v.note); v.note = null; } else if (!statusEl || !statusEl.classList.contains('note')) {
-      status(null, v.wasLoading ? `${what(v.r)[0].toUpperCase() + what(v.r).slice(1)} loaded` : undefined);
-    }
+    status(null, v.wasLoading ? `${what(v.r)[0].toUpperCase() + what(v.r).slice(1)} loaded` : undefined);
   }
   v.wasLoading = v.wasLoading || loading;
   if (changed) schedule(v);
@@ -215,24 +210,16 @@ function schedule(v) {
 // The data behind the page changed on the server (app.js asks /api/version every
 // 30 s): fetch the view's replies again in the background and, once all are in,
 // draw the page from them and swap it in place, numbers tweening and charts
-// gliding, with no dimming, no scroll jump and the focus kept. Nothing happens
-// while the view is still loading, or if the user moved on meanwhile.
+// gliding, with no dimming, no scroll jump and the focus kept; the sidebar's
+// "Index updated" is the only note of it. Nothing happens while the view is
+// still loading, or if the user moved on meanwhile.
 export async function refreshView() {
   const v = view;
   if (!v || !v.loaded || v.running || v.timer) return false;
   const paths = [...v.used.keys()];
   if (!paths.length || !(await renew(paths)) || view !== v) return false;
-  v.note = `Updated ${hm(new Date())}`; // said once the new draw is in
   draw(v);
   return true;
-}
-
-// A short note in the status line's place ("Updated 14:05"), said politely.
-function note(text) {
-  if (statusEl && !statusEl.hidden && !statusEl.classList.contains('note')) return; // loading: it says more
-  status(text, text);
-  statusEl.classList.add('note');
-  noteTimer = setTimeout(() => { statusEl.hidden = true; statusEl.classList.remove('note'); }, 4000);
 }
 
 // ------------------------------------------------------------------ placeholders
