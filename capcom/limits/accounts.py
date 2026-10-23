@@ -32,6 +32,8 @@ from pathlib import Path
 from capcom.cost.top import project_label
 from capcom.limits.model import (
     BURST,
+    LENGTH,
+    SAME_RESET,
     Bins,
     Group,
     Prepared,
@@ -130,8 +132,9 @@ def attribute(samples: Sequence[LimitSample], known: Known) -> list[LimitSample]
     """Every sample with its account: its own label; else, for a weekly one, the
     account whose weekly cycle its reset time falls on; else the account of the same
     session (a sample of the same refresh, the session log, or its nearest earlier
-    reading); else UNKNOWN. With one account known and no sample evidently of
-    another, the unknown ones are that account's."""
+    reading); for a 5-hour one its session places only from later on, the one account
+    whose readings around it share its reset time; else UNKNOWN. With one account
+    known and no sample evidently of another, the unknown ones are that account's."""
     anchors: dict[str, list[float]] = {}
     for s in samples:
         if s.account and s.window == LimitWindow.SEVEN_DAY and s.resets_at is not None:
@@ -163,13 +166,28 @@ def attribute(samples: Sequence[LimitSample], known: Known) -> list[LimitSample]
         by_session.setdefault(sid, []).append((t, logged))
     for entries in by_session.values():
         entries.sort()
+    found: list[tuple[str | None, bool]] = [
+        (None, True)
+        if got is not None
+        else _session_entry(by_session.get(s.session_id or ""), s.time)
+        for s, got in zip(samples, out, strict=True)
+    ]
+    # a 5-hour reading its session cannot place (the session has no entry until later)
+    # goes with the account whose readings around it share its reset time: one
+    # account's window, not a stray window of one reading on another account
+    resets: dict[str, list[tuple[datetime, datetime]]] = {}
+    for s, got, (acct, sure) in zip(samples, out, found, strict=True):
+        a = got.account if got is not None else acct if sure else None
+        if a and s.window == LimitWindow.FIVE_HOUR and s.resets_at is not None:
+            resets.setdefault(a, []).append((s.time, s.resets_at))
     done: list[LimitSample] = []
-    for s, got in zip(samples, out, strict=True):
+    for s, got, (acct, sure) in zip(samples, out, found, strict=True):
         if got is not None:
             done.append(got)
             continue
-        found = _session_at(by_session.get(s.session_id or ""), s.time)
-        done.append(replace(s, account=found or UNKNOWN))
+        if not sure and s.window == LimitWindow.FIVE_HOUR and s.resets_at is not None:
+            acct = _same_reset(resets, s) or acct
+        done.append(replace(s, account=acct or UNKNOWN))
     named = {s.account for s in done if s.account != UNKNOWN}
     if len(named) == 1 and not other:
         only = next(iter(named))
@@ -180,10 +198,33 @@ def attribute(samples: Sequence[LimitSample], known: Known) -> list[LimitSample]
 def _session_at(entries: Sequence[tuple[datetime, str]] | None, t: datetime) -> str | None:
     """The account of a session at `t`: its latest entry at or before `t` (a moment
     of slack for one refresh's samples), else its first."""
+    return _session_entry(entries, t)[0]
+
+
+def _session_entry(
+    entries: Sequence[tuple[datetime, str]] | None, t: datetime
+) -> tuple[str | None, bool]:
+    """`_session_at`, and whether an entry at or before `t` says so (not only a later
+    one: the session may have been on another account then)."""
     if not entries:
-        return None
+        return None, False
     i = bisect.bisect_right(entries, (t + BURST, "￿")) - 1
-    return entries[max(i, 0)][1]
+    return entries[max(i, 0)][1], i >= 0
+
+
+def _same_reset(
+    resets: Mapping[str, list[tuple[datetime, datetime]]], s: LimitSample
+) -> str | None:
+    """The one account with a 5-hour reading within a window's length of `s` whose
+    reset is the same as `s`'s; None when none or several."""
+    assert s.resets_at is not None
+    span = LENGTH[LimitWindow.FIVE_HOUR]
+    hits = [
+        a
+        for a, rs in resets.items()
+        if any(abs(t - s.time) <= span and abs(r - s.resets_at) < SAME_RESET for t, r in rs)
+    ]
+    return hits[0] if len(hits) == 1 else None
 
 
 def accounts_of(samples: Sequence[LimitSample], known: Known) -> list[Account]:

@@ -3,7 +3,9 @@
 A window's samples (`limits.jsonl`) are cut into segments, one per reset: within a
 segment the percentage only rises (a lower reading from a session that had not
 refreshed yet is noise and is dropped), and it starts from 0 at the window's start
-(`resets_at` minus the window's length) when the reset time is known.
+(`resets_at` minus the window's length) when the reset time is known. A segment whose
+readings all say 0 % is dropped unless it is the latest: an idle 5-hour window is
+reported as starting at each refresh, not as a window that ran.
 
 The fit: between consecutive points of a segment, the rise in percent against what
 the index's requests spent in that interval. With enough intervals (at least
@@ -316,7 +318,16 @@ def segments(samples: Iterable[LimitSample], window: LimitWindow) -> list[Segmen
             cur.samples[-1] = s
             continue
         cur.samples.append(s)
-    return out
+    return [seg for i, seg in enumerate(out) if i == len(out) - 1 or not _unstarted(seg)]
+
+
+def _unstarted(seg: Segment) -> bool:
+    """A window whose readings never left 0 %: until something is used, Claude Code
+    reports the 5-hour window as starting at each refresh (its reset moves on ten
+    minutes at a time), so each idle refresh would look like a window of its own,
+    overlapping the one that really starts later. Only the latest such window is
+    kept (it is where the account stands now)."""
+    return all(s.used_percentage <= 0 for s in seg.samples)
 
 
 @dataclass(frozen=True, slots=True)
