@@ -4,7 +4,8 @@ Shared by the timeline series and the report, so a project, model or agent gets 
 same key and label everywhere:
 
 - CATEGORY: input, cache_read, cache_write, output, web (from the CostBreakdown);
-- PROJECT: the project folder, with every folder under /tmp grouped as "temporary"
+- PROJECT: the project folder, with every folder under a temporary root (/tmp, and
+  on macOS /private/tmp and $TMPDIR) grouped as "temporary"
   and every folder under the OpenClaw state dir grouped as "openclaw";
 - MODEL: the canonical price-table id (`<synthetic>` placeholders are left out);
 - AGENT: "main" for main threads, else the subagent's agent type: from its
@@ -55,11 +56,18 @@ TEMPORARY_LABEL = "(temporary)"  # the table label of scratch folders naming no 
 OPENCLAW_ALL = "openclaw (all folders)"  # the chart series that merges them
 
 _NOT_ALNUM = re.compile(r"[^A-Za-z0-9]")
-# A folder under /tmp that names the project it was made for: Claude Code's
-# scratchpads, /tmp/claude-<uid>/<project folder>/<session id>/..., hold the
-# project's own folder name (itself starting with "-") before a session id.
+# The temporary roots, in folder form: /tmp, macOS's /private/tmp (what /tmp links
+# to there), and macOS's per-user $TMPDIR, /var/folders/<2 chars>/<id>/T (a link
+# to /private/var/folders/...).
+_TEMP_ROOT = re.compile(
+    r"^(?:-private)?(?:-tmp|-var-folders-[A-Za-z0-9]{2}-[A-Za-z0-9-]+?-T)(?=-|$)"
+)
+# A folder under a temporary root that names the project it was made for: Claude
+# Code's scratchpads, <root>/claude-<uid>/<project folder>/<session id>/..., hold
+# the project's own folder name (itself starting with "-") before a session id;
+# it is matched from the end of the root.
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-_TEMP_OF_PROJECT = re.compile(rf"^-tmp-.+?-(-[^-].*?)-{_UUID}(?:-|$)")
+_TEMP_OF_PROJECT = re.compile(rf"-.+?-(-[^-].*?)-{_UUID}(?:-|$)")
 
 
 def folder_name(path: str | Path) -> str:
@@ -73,16 +81,18 @@ def _under(project_dir: str, prefix: str) -> bool:
 
 
 def is_temporary(project_dir: str) -> bool:
-    """A folder under /tmp (scratch sessions, forked or copied sessions)."""
-    return _under(project_dir, "-tmp")
+    """A folder under a temporary root (scratch sessions, forked or copied
+    sessions): /tmp, or on macOS /private/tmp and $TMPDIR under /var/folders."""
+    return _TEMP_ROOT.match(project_dir) is not None
 
 
 def temporary_project(project_dir: str) -> str | None:
-    """The project folder a scratch folder under /tmp was made for, if its name holds
-    one (Claude Code's scratchpads do)."""
-    if not project_dir.startswith("-tmp-"):
+    """The project folder a scratch folder under a temporary root was made for, if
+    its name holds one (Claude Code's scratchpads do)."""
+    root = _TEMP_ROOT.match(project_dir)
+    if root is None:
         return None
-    m = _TEMP_OF_PROJECT.match(project_dir)
+    m = _TEMP_OF_PROJECT.match(project_dir, root.end())
     return m.group(1) if m else None
 
 

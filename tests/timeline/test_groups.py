@@ -13,8 +13,10 @@ from capcom.timeline.groups import (
     OPENCLAW,
     TEMPORARY,
     Grouper,
+    ProjectNames,
     folder_name,
     is_temporary,
+    temporary_project,
 )
 from capcom.types import AgentInfo, Event, EventKind, GroupBy, Request, SessionInfo
 from tests.cost.fakes import T0, FakeIndex, req
@@ -126,6 +128,59 @@ def test_agent_type_falls_back_to_the_spawning_call() -> None:
     g = grouper(ix)
     assert key(req(agent="a1"), GroupBy.AGENT, g) == ("builder", "builder")
     assert key(req(agent="a2"), GroupBy.AGENT, g)[0] == "unknown"  # another session's call
+
+
+SESSION_ID = "0f0e0d0c-0b0a-4908-8706-050403020100"
+MAC_TMPDIR = "-var-folders-kx-w0m-dxbs2w78j6s684b84f8h0000gn-T"  # /var/folders/kx/w0m_.../T
+
+
+@pytest.mark.parametrize(
+    ("folder", "project"),
+    [
+        # Linux: /tmp
+        ("-tmp", None),
+        ("-tmp-lesson-bench", None),
+        (f"-tmp-claude-1000--home-u-Github-toy-{SESSION_ID}-scratchpad", "-home-u-Github-toy"),
+        # macOS: /tmp links to /private/tmp, where Claude Code keeps its scratchpads
+        ("-private-tmp", None),
+        ("-private-tmp-run-1", None),
+        (
+            f"-private-tmp-claude-501--Users-u-Github-kittex-{SESSION_ID}-scratchpad-run-kittex",
+            "-Users-u-Github-kittex",
+        ),
+        # macOS: $TMPDIR, /var/folders/<2>/<id>/T, a link to /private/var/folders/...
+        (MAC_TMPDIR, None),
+        (f"-private{MAC_TMPDIR}-build", None),
+        (f"{MAC_TMPDIR}-claude-501--Users-u-Github-kittex-{SESSION_ID}", "-Users-u-Github-kittex"),
+    ],
+)
+def test_temporary_roots(folder: str, project: str | None) -> None:
+    assert is_temporary(folder)
+    assert temporary_project(folder) == project
+
+
+@pytest.mark.parametrize(
+    "folder",
+    ["-private", "-private-tmpx", "-var-folders", "-var-folders-kx", "-Users-u-tmp", "-tmpfoo"],
+)
+def test_not_temporary_roots(folder: str) -> None:
+    assert not is_temporary(folder)
+    assert temporary_project(folder) is None
+
+
+def test_macos_scratchpad_is_named_after_its_project() -> None:
+    kittex = "-Users-u-Github-kittex"
+    scratch = f"-private-tmp-claude-501-{kittex}-{SESSION_ID}-scratchpad-run-kittex"
+    cwd = f"/private/tmp/claude-501/{kittex}/{SESSION_ID}/scratchpad/run/kittex"
+    sessions = [
+        SessionInfo("a", kittex, cwd="/Users/u/Github/kittex"),
+        SessionInfo("b", scratch, cwd=cwd),
+    ]
+    names = ProjectNames.build(sessions, OPENCLAW_ROOT, home=Path("/Users/u"))
+    assert names.label(kittex) == "kittex"  # not told apart from the scratchpad by path
+    assert names.key(scratch) == f"temporary ({kittex})"
+    assert names.label(scratch) == "temporary (kittex)"
+    assert key(req(project=scratch), GroupBy.PROJECT) == (TEMPORARY, TEMPORARY)
 
 
 # --------------------------------------------------------------------------- project names
