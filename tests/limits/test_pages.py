@@ -135,12 +135,14 @@ const segs = [
   {{ points: [[{T0 + 6 * H}, 0], [{T0 + 7 * H}, 20]], resets_at: null, reset: false }},
 ];
 const el = m.limitChart({{ segments: segs, fan: [], now: {T0 + 7 * H}, x0: {T0}, x1: {T0 + 8 * H} }});
-console.log(JSON.stringify(paths(el)));
+const bounds = walk(el, []).filter((n) => n.className === 'winbound').length;
+console.log(JSON.stringify({{ paths: paths(el), bounds }}));
 """
     )
-    drops = [p for p in got if p.get("stroke-dasharray") == "3 3"]
-    assert len(drops) == 1  # one reset in view
-    lines = [p for p in got if p.get("style") == "stroke:var(--text)"]
+    # one reset in view: a full-height boundary line, not a dotted drop
+    assert got["bounds"] == 1
+    assert not [p for p in got["paths"] if p.get("stroke-dasharray") == "3 3"]
+    lines = [p for p in got["paths"] if p.get("style") == "stroke:var(--text)"]
     assert len(lines) == 2
 
 

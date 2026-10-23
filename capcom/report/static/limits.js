@@ -146,6 +146,37 @@ function fitNote(w) {
 
 // ------------------------------------------------------------------ chart
 
+// Where a chart spanning several windows draws each window's boundary: every reset
+// (and the start of a window that began after an idle gap, not at the reset before
+// it) strictly inside the plot, as {t, f (0 to 1 across the plot), kind: 'reset' or
+// 'start', label (the time), title, labeled}. A boundary is `labeled` when the last
+// labeled one is at least `gap` of the plot away (a label is about that wide).
+// segments: oldest first, as limitChart takes them; weekly: the labels name the day.
+export function windowBounds(segments, x0, x1, weekly, gap) {
+  const room = gap ?? (weekly ? 0.13 : 0.075);
+  const at = (t) => (weekly ? `${dayName(new Date(t)).slice(0, 3)} ${hm(new Date(t))}` : hm(new Date(t)));
+  const out = [];
+  const near = (t) => out.some((b) => Math.abs(b.t - t) <= (x1 - x0) * 0.004);
+  const add = (t, kind) => {
+    if (!(t > x0 && t < x1) || near(t)) return;
+    out.push({ t, f: (t - x0) / (x1 - x0), kind, label: at(t), title: `${kind === 'reset' ? 'Window reset' : 'Window started'} ${at(t)}` });
+  };
+  for (const sg of segments) {
+    if (sg.resets_at && sg.reset !== false) add(new Date(sg.resets_at).getTime(), 'reset');
+  }
+  for (const sg of segments) {
+    const start = sg.start ? new Date(sg.start).getTime() : sg.start_known && sg.points.length ? sg.points[0][0] : null;
+    if (start !== null) add(start, 'start');
+  }
+  out.sort((a, b) => a.t - b.t);
+  let last = -Infinity;
+  for (const b of out) {
+    b.labeled = b.f - last >= room && b.f <= 1 - room / 2;
+    if (b.labeled) last = b.f;
+  }
+  return out;
+}
+
 // Usage windows over time: each window's readings as a rising line that drops to
 // 0 at its reset, a dashed line at 100%, and the current window's forecast as a
 // fan (the 80% range, filled, with hairline edges, and the median dashed).
@@ -189,11 +220,7 @@ export function limitChart(opts) {
     const seen = pts.slice(unseen);
     let d = seen.map((p, i) => (i ? 'L' : 'M') + X(p[0]) + ' ' + Y(p[1])).join('');
     const last = pts[pts.length - 1];
-    if (sg.reset && sg.resets_at) {
-      const rt = new Date(sg.resets_at).getTime();
-      d += 'L' + X(rt) + ' ' + Y(last[1]);
-      svg.append(s('path', { d: 'M' + X(rt) + ' ' + Y(last[1]) + 'L' + X(rt) + ' ' + Y(0), ...stroke, 'stroke-width': 1, 'stroke-dasharray': '3 3', style: 'stroke:var(--muted)' }));
-    }
+    if (sg.reset && sg.resets_at) d += 'L' + X(new Date(sg.resets_at).getTime()) + ' ' + Y(last[1]);
     if (seen.length > 1 || (sg.reset && sg.resets_at)) svg.append(s('path', { d, ...stroke, style: 'stroke:var(--text)' }));
     for (const p of seen) hover.push({ t: p[0], v: p[1], hit: sg.hit_limit && p[1] >= 100 });
   }
@@ -214,7 +241,14 @@ export function limitChart(opts) {
       svg.append(s('path', { d: `M${X(lp[0])} ${Y(lp[1])}L${X(fan[0][0])} ${Y(fan[0][1])}`, ...stroke, 'stroke-dasharray': '2 3', style: 'stroke:var(--text)' }));
     }
   }
-  const plot = h('div.chart', { style: `height:${H}px;margin:12px 0 0 ${left}px` });
+  // the fitted percent of what was spent, adding up (the window page)
+  const fitted = opts.fitted || [];
+  if (fitted.length > 1) {
+    svg.append(s('path', { d: fitted.map((p, i) => (i ? 'L' : 'M') + X(p[0]) + ' ' + Y(p[1])).join(''), ...stroke, 'stroke-dasharray': '5 4', style: 'stroke:var(--accent)' }));
+  }
+  const bounds = windowBounds(opts.segments, x0, x1, opts.weekly && opts.kind !== 'five_hour');
+  const labeled = bounds.some((b) => b.labeled);
+  const plot = h('div.chart', { style: `height:${H}px;margin:${labeled ? 20 : 12}px 0 0 ${left}px` });
   for (const v of [0, 50, 100]) {
     const t = ((1 - v / ymax) * 100).toFixed(2) + '%';
     plot.append(h('div.gridline', { style: `top:${t}` + (v === 100 ? ';border-top:1px dashed var(--accent)' : '') }),
@@ -233,10 +267,20 @@ export function limitChart(opts) {
     const v = g.a[1] + (g.b[1] - g.a[1]) * (mid - g.a[0]) / (g.b[0] - g.a[0]);
     plot.append(h('span.gaplab', { style: `left:${xp(mid)};top:${yp(v)}`, text: g.label }));
   }
-  if (opts.now && opts.now < x1 && opts.now > x0) {
-    const f = ((opts.now - x0) / (x1 - x0) * 100).toFixed(2) + '%';
+  const nowF = opts.now && opts.now < x1 && opts.now > x0 ? (opts.now - x0) / (x1 - x0) : null;
+  for (const b of bounds) {
+    const left = (b.f * 100).toFixed(2) + '%';
+    plot.append(h('div.winbound', { style: `position:absolute;top:0;bottom:0;left:${left};border-left:1.5px solid var(--muted);opacity:0.55;pointer-events:none`, title: b.title }));
+    // a label clear of the "now" label, above the plot
+    if (b.labeled && (nowF === null || Math.abs(nowF - b.f) > 0.06)) {
+      plot.append(h('span.winlab', { style: `position:absolute;top:-18px;left:${left};transform:translateX(-50%);font-size:11px;line-height:14px;color:var(--muted);white-space:nowrap;pointer-events:none`, text: b.label, title: b.title }));
+    }
+  }
+  if (nowF !== null) {
+    const f = (nowF * 100).toFixed(2) + '%';
     plot.append(h('div.nowline', { style: `left:${f}` }), h('span.nowlab', { style: `left:${f}`, text: 'now' }));
   }
+  if (labeled) fitLabels(plot);
   if (runout) {
     const y100 = yp(100), fx = (f) => (f * 100).toFixed(2) + '%';
     // the plot's width is not known until it is laid out: a narrow one (the
@@ -256,6 +300,11 @@ export function limitChart(opts) {
     let best = null;
     for (const p of hover) if (!best || Math.abs(p.t - t) < Math.abs(best.t - t)) best = p;
     if (best && Math.abs(best.t - t) < (x1 - x0) / 40) rows.push({ label: `Reading at ${label(best.t)}`, value: pctText(best.v), color: 'var(--text)' });
+    if (fitted.length > 1 && t >= fitted[0][0]) {
+      let q = fitted[0];
+      for (const p of fitted) if (p[0] <= t) q = p;
+      rows.push({ label: 'Fitted from the spend', value: '≈' + pctText(q[1], 1), color: 'var(--accent)' });
+    }
     if (fan.length > 1 && t >= fan[0][0]) {
       let q = fan[0];
       for (const p of fan) if (p[0] <= t) q = p;
@@ -265,6 +314,27 @@ export function limitChart(opts) {
   });
   plot.addEventListener('mouseleave', hideTip);
   return h('div', null, plot, xAxis(timeTicks(x0, x1, 6), x0, x1, left));
+}
+
+// Once laid out (and on every resize), hide the boundary labels that would touch
+// the one before them or the "now" label: how much room a label has depends on the
+// plot's width, known only in the browser.
+function fitLabels(plot) {
+  if (typeof requestAnimationFrame !== 'function') return;
+  const fit = () => {
+    const labs = [...plot.querySelectorAll('span.winlab')];
+    const now = plot.querySelector('span.nowlab');
+    let last = null;
+    for (const el of labs) {
+      el.style.visibility = '';
+      const r = el.getBoundingClientRect();
+      const hits = (o) => o && r.left < o.right + 6 && o.left < r.right + 6;
+      const hide = hits(last) || (now && hits(now.getBoundingClientRect())) || r.left < plot.getBoundingClientRect().left - 8;
+      if (hide) el.style.visibility = 'hidden'; else last = r;
+    }
+  };
+  requestAnimationFrame(fit);
+  if (typeof ResizeObserver === 'function') new ResizeObserver(fit).observe(plot);
 }
 
 // ------------------------------------------------------------------ overview cards
@@ -412,6 +482,65 @@ export function chartStart(segs, now, days) {
   return Number.isFinite(x0) && x0 < now ? x0 : now - days * 864e5;
 }
 
+// "What 1% costs": how many tokens of each kind make 1% of the window and their
+// dollars, from the fit's own uncertainty (capcom/limits/view.py costs_json): each
+// kind with its 80% range ("rough" when it spans more than 2×), the small kinds
+// together in dollars, and the kinds the readings cannot tell from zero named apart.
+const TOKEN_WORDS = { input: 'input tokens', cache_write: 'cache-write tokens', cache_read: 'cache-read tokens', output: 'output tokens' };
+// The merged kinds in few words: "all fable-5 and haiku-5-5 tokens, and opus-5-5
+// input" (labels are "<model> <kind>", as costs_json writes them).
+export function kindsText(kinds) {
+  const by = new Map();
+  for (const k of kinds) {
+    const i = k.indexOf(' ');
+    const m = i < 0 ? k : k.slice(0, i);
+    if (!by.has(m)) by.set(m, []);
+    by.get(m).push(i < 0 ? '' : k.slice(i + 1));
+  }
+  const and = (xs) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
+  const whole = [...by].filter(([, ks]) => ks.length >= 4).map(([m]) => m);
+  const parts = [...by].filter(([, ks]) => ks.length < 4).map(([m, ks]) => `${m} ${and(ks)}`);
+  return and([...(whole.length ? [`all ${and(whole)} tokens`] : []), ...parts]);
+}
+const money = (x) => (x === null || x === undefined ? '–' : usd(x, x >= 100 ? 0 : 2));
+export function costsBlock(w) {
+  const c = w.fit && w.fit.costs;
+  if (!c || (!c.rows.length && !c.merged)) return null;
+  const model = (m) => m.replace(/^claude-/, '');
+  const out = [h('h3', { text: 'What 1% costs, by model and token type' })];
+  const lead = [`How many tokens of each kind use up 1% of your ${w.label}, and what they would cost at API prices.`];
+  const byTok = [...c.rows].sort((a, b) => b.tokens - a.tokens);
+  if (byTok.length > 1) {
+    const lo = byTok[0], hi = byTok[byTok.length - 1];
+    const name = (r) => `${model(r.model)} ${TOKEN_WORDS[r.category] || r.category}`;
+    const cap = (t) => t[0].toUpperCase() + t.slice(1);
+    lead.push(`${cap(name(lo))} count the least: ${tokens(lo.tokens)} of them make 1%. ${cap(name(hi))} count the most: ${tokens(hi.tokens)} make 1%.`);
+  }
+  out.push(h('p.note', { style: 'margin:0 0 8px', text: lead.join(' ') }));
+  const list = h('div.blist');
+  for (const r of byTok) {
+    const range = `${tokens(r.tokens_low)} and ${tokens(r.tokens_high)}`;
+    list.append(h('div.bitem', null,
+      h('div.top', null, h('span', { text: r.label }),
+        h('span.mono', { text: `${tokens(r.tokens)} tokens · ${money(r.usd)}` })),
+      h('span.note', { text: r.rough ? `Rough: between ${range} tokens (${money(r.usd_low)} to ${money(r.usd_high)}).` : `Likely between ${range} tokens.` })));
+  }
+  const mg = c.merged;
+  if (mg && mg.usd !== null) {
+    const share = mg.share === null ? '' : `, ${pctText(mg.share * 100, mg.share < 0.1 ? 1 : 0)} of the spend`;
+    list.append(h('div.bitem', null,
+      h('div.top', null, h('span', { text: `Everything else (${mg.kinds.length} kind${mg.kinds.length === 1 ? '' : 's'}${share})` }), h('span.mono', { text: money(mg.usd) })),
+      h('span.note', { text: `${mg.rough ? `Rough: between ${money(mg.usd_low)} and ${money(mg.usd_high)}. ` : ''}That is ${kindsText(mg.kinds)}.`, title: mg.kinds.join(', ') })));
+  }
+  out.push(list);
+  const rule = [`A kind with less than ${pctText(c.min_share * 100)} of the spend has too few tokens to measure alone, so those are counted together, by their dollars.`];
+  if (mg && mg.usd === null) rule.push(`Even together (${kindsText(mg.kinds)}), the readings cannot tell their cost from zero.`);
+  if (c.left_out.length) rule.push(`Left out, as the readings cannot tell their cost from zero: ${c.left_out.join(', ')}.`);
+  rule.push('The ranges are 80% ranges.');
+  out.push(h('p.note', { style: 'margin:8px 0 0', text: rule.join(' ') }));
+  return out;
+}
+
 function windowSection(w, now, days, since) {
   const weekly = isWeekly(w);
   const card = h('section.card', null, h('div.split', null, h('h2', { text: w.label[0].toUpperCase() + w.label.slice(1) }),
@@ -425,16 +554,12 @@ function windowSection(w, now, days, since) {
   const x1 = Math.max(end, now);
   card.append(limitChart({
     segments: segs,
-    fan: fc ? fc.fan : [], now, x0, x1, height: 180, weekly: true, since, runout: runoutMark(fc, x0, x1, weekly),
+    fan: fc ? fc.fan : [], now, x0, x1, height: 180, weekly: true, kind: w.window, since, runout: runoutMark(fc, x0, x1, weekly),
   }));
   const fit = fitNote(w);
   if (fit) card.append(h('p.note', { text: fit }));
-  if (w.fit && w.fit.method === 'per_type' && w.fit.weights.length > 1) {
-    card.append(h('h3', { text: 'What 1% costs, by model and token type' }));
-    card.append(h('div.blist', null, w.fit.weights.slice(0, 8).map((x) => h('div.bitem', null, h('div.top', null,
-      h('span', { text: `${x.model.replace(/^claude-/, '')} ${x.category.replace('_', ' ')}` }),
-      h('span.mono', { text: `${tokens(Math.round(1 / x.percent_per_mtok * 1e6))} tokens` }))))));
-  }
+  const costs = costsBlock(w);
+  if (costs) card.append(...costs);
   // what spent each window, newest first: one bar per window, a color per project
   // (the same project keeps its color in every window); each part's dollars and
   // share of the limit on hover, all of them in the table
@@ -455,9 +580,11 @@ function windowSection(w, now, days, since) {
         rows: [{ label: 'Spent', value: usd(p.usd) }, { label: 'Of the window', value: pctText(p.usd / total * 100, 1) },
           p.percent === null ? null : { label: 'Of the limit', value: '≈' + pctText(p.percent, 1) }].filter(Boolean),
       }));
-      rows.append(h('div.bitem', null,
-        h('div.top', null, h('span', { text: `${span} · peak ${pctText(sg.peak)}${sg.hit_limit ? ' · limit hit' : ''}` }), h('span.mono', { text: usd(sg.usd) })),
-        segBar(parts, { aria: `${span}: ${usd(sg.usd)}` }),
+      // the row opens the window on its own page
+      const text = `${span} · peak ${pctText(sg.peak)}${sg.hit_limit ? ' · limit hit' : ''}`;
+      rows.append(h(sg.path ? 'a.bitem.winrow' : 'div.bitem', sg.path ? { href: sg.path, style: 'display:block;color:inherit;text-decoration:none', title: 'Open this window' } : null,
+        h('div.top', null, h('span', null, text, sg.path ? h('span', { style: 'color:var(--clay)', text: ' →' }) : null), h('span.mono', { text: usd(sg.usd) })),
+        segBar(parts, { aria: `${span}: ${usd(sg.usd)}`, focus: !sg.path }),
         sg.inferred_usd >= 0.005 ? h('span.note', { text: `Of which ${usd(sg.inferred_usd)} from sessions with no reading, put on this account by time (inferred).` }) : null));
       for (const p of sg.by_project) table.push([span, p.project, usd(p.usd), p.percent === null ? '' : '≈' + pctText(p.percent, 1)]);
     }

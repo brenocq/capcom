@@ -16,7 +16,7 @@ const POLL_MS = 200; // how often the frame looks at the replies still loading
 const REDRAW_MS = 350; // at most one redraw per this while partial replies come
 
 const LABELS = { overview: 'Overview', spend: 'Spend', sessions: 'Sessions', spikes: 'Spikes', checks: 'Checks', changes: 'Did it work?', limits: 'Limits', session: 'Session', day: 'Day' };
-const PAGE_PATH = /^\/(?:(?:spend|sessions|spikes|checks|changes|limits)\/?|(?:session|day|changes)\/[^/]+)?$/;
+const PAGE_PATH = /^\/(?:(?:spend|sessions|spikes|checks|changes|limits)\/?|(?:session|day|changes)\/[^/]+|limits\/window(?:\/[^/]+){3})?$/;
 
 let cfg = null; // {pages, route, decorate, onNavigate}
 let view = null;

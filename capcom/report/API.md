@@ -112,7 +112,7 @@ Anything else is a plain-text `500 internal error` that says nothing more; the
 traceback goes to the terminal only. A static name that cannot be a file (a NUL byte,
 a name too long) or that resolves outside `static/` is a 404.
 Page paths (`/`, `/spend`, `/sessions`, `/session/<id>`, `/spikes`, `/checks`, `/changes`,
-`/changes/<id>`, `/limits`) serve `static/index.html` with this launch's write token in
+`/changes/<id>`, `/limits`, `/limits/window/<id>/<kind>/<start>`) serve `static/index.html` with this launch's write token in
 `<meta name="capcom-token">` (and `<meta name="capcom-read-only" content="1">` under
 `--read-only`, `<meta name="capcom-ask" content="off">` under `--no-ask`), or a 503 page saying to run `capcom scan` when the index is
 missing or old. Static files are under `/static/`.
@@ -468,7 +468,8 @@ Window = {window, label, samples, current,
           reading: {percent, time, resets_at, source} | null,
           fit: {method, note, percent_per_usd, usd_per_percent, intervals, readings, rough,
                 rate_factor, mean_abs_error, r2,
-                weights: [{model, category, percent_per_mtok}]} | null,
+                weights: [{model, category, percent_per_mtok}],
+                costs: Costs | null} | null,   # per_type fits only
           forecast: {reading, now, median, low, high, resets_at, runs_out_at,
                      runs_out_early, runs_out_late, rough, readings, rate_factor, line,
                      bucket_minutes, buckets, fan: [[ms, median, low, high]]} | null,
@@ -477,7 +478,12 @@ Window = {window, label, samples, current,
           start, start_known,           # start_known: history's first point is the reset, not a reading
           segments: [{start, start_known, resets_at, peak, hit_limit, reset,
                       points: [[ms, percent]], usd, inferred_usd,
-                      by_project: [{project, usd, percent}] | null}]}   # newest first
+                      by_project: [{project, usd, percent}] | null,
+                      path}]}           # newest first; path: the window's own page
+Costs = {rows: [{model, category, label, tokens, tokens_low, tokens_high,
+                 usd, usd_low, usd_high, rough}],   # tokens (and dollars) per 1 %
+         merged: {kinds: [label], share, usd, usd_low, usd_high, rough} | null,
+         left_out: [label], min_share, rough_ratio}
 ```
 
 `available` is false without any sample (`windows` both null); `recording` is true
@@ -499,6 +505,18 @@ percent against time through the window's readings (`line` says it widened it).
 `runs_out_at` is when the median path reaches 100 %, `runs_out_early` and
 `runs_out_late` the range's ends (null: never before the reset).
 `recording_since` is the first status line sample's time.
+A segment whose readings all say 0 % is dropped unless it is the latest: until
+something is used, Claude Code reports the 5-hour window as starting at each refresh
+(its reset moving on ten minutes at a time), which is no window that ran. A 5-hour
+reading with no recorded account whose session is placed only by a later entry goes
+with the one account whose readings around it share its reset time.
+`costs` ("what 1% costs"): a kind of token (model and category) with under
+`min_share` (1 %) of the fitted spend has too few tokens to measure alone, so those
+kinds are fitted as one column of their dollars (`merged`, in dollars per 1 %); each
+other kind has a weight with an 80 % range from the least-squares covariance of the
+kept weights. A row is left out (`left_out`) when that range reaches zero; it is
+`rough` when its high end is more than `rough_ratio` (2) times its low end. A row's
+dollars are its tokens per 1 % at the average price its tokens had.
 `by_project` (the last 8 segments; up to 6 projects plus `(other)`) is what the
 index's requests spent in the segment, and their fitted percent (null without a fit).
 Usage from other machines or claude.ai counts toward the limits but is not in the
@@ -521,6 +539,36 @@ spent at `pace_usd_per_hour` (all accounts' spend over the last `pace_hours`), n
 with nothing spent or nothing left; `reset_first` is an account whose weekly
 window resets before then. The website's account filter (Overview and Limits) is applied
 in the browser and kept there (localStorage), never in the URL.
+
+### `GET /api/limit-window?account=<id>&window=5-hour&start=2026-10-22T1820`
+
+One window of one account, for its page (`/limits/window/<id>/<5-hour|weekly>/<start>`,
+linked from each segment's `path`). `window` is `5-hour` or `weekly` (or the
+`five_hour`/`seven_day` names); `start` is the window's start in local time
+(`YYYY-MM-DDTHHMM`, or ISO 8601): the segment starting in that minute, else the one
+holding that time. 404 for an unknown account or no such window, 400 for a bad query.
+Its cache key holds the samples' stamp, as `/api/limits`.
+
+```
+{account: {id, label, current, several}, window, label, start, start_known, resets_at,
+ until, current, peak, hit_limit, readings,
+ points: [[ms, percent]],                       # the segment's line (0 % at a known start)
+ fitted: {times: [ms], percent: [p], usd: [u]}, # the fit's percent of the spend, adding up
+ step_minutes, bucket_minutes,
+ fit: {method, usd_per_percent, rough, intervals, note} | null,
+ own_usd_per_percent,                           # this window's spend / its rise; null under 1 point
+ fitted_percent, inferred_usd,
+ totals: Tally,                                 # its categories carry `percent` too
+ by_project, by_agent, by_model: [Group + {percent}],
+ sessions: [Session + {percent}], sessions_count,  # the 10 costliest
+ spikes: Spikes | null,                         # as /api/day's
+ before, after,                                 # the pages of the windows around it, or null
+ unavailable}
+```
+
+The spend is the account's (as the window's `usd` on `/api/limits`); `percent` is
+the fit's percent of a part's spend (null without a fit). `fitted.percent` starts at
+0 at a known start, else at the first reading.
 
 ### `GET /api/checks?days=14`
 

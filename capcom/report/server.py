@@ -65,6 +65,7 @@ from capcom.limits.record import ACCOUNTS_FILE, SESSIONS_FILE
 from capcom.report import api, ask, didit
 from capcom.report.analysis import Analysis, Unavailable, default_analysis
 from capcom.report.jobs import Job, Jobs, Result, computing_body
+from capcom.report.limit_window import limit_window
 from capcom.report.worker import Worker
 from capcom.store.index import open_index
 from capcom.types import GroupBy, PriceTable
@@ -319,7 +320,7 @@ def _limits_stamp(state_dir: Path | None) -> tuple[int, int]:
 
 
 # the endpoints whose replies read the usage samples (their limits cards)
-SAMPLED = frozenset({"limits", "overview"})
+SAMPLED = frozenset({"limits", "overview", "limit-window"})
 
 # the query parameters each endpoint reads: the cache key holds only these
 PARAMS: dict[str, tuple[str, ...]] = {
@@ -332,6 +333,7 @@ PARAMS: dict[str, tuple[str, ...]] = {
     "spikes": ("days", "spike", "project", "cause"),
     "checks": ("days",),
     "limits": ("days",),
+    "limit-window": ("account", "window", "start"),
     "changes": ("days",),
 }
 
@@ -875,7 +877,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _page(self, path: str) -> None:
         parts = path.strip("/").split("/")
-        if parts[0] not in PAGES or len(parts) > (2 if parts[0] in WITH_ARG | MAY_ARG else 1):
+        window = len(parts) == 5 and parts[:2] == ["limits", "window"]  # a usage window
+        if not window and (
+            parts[0] not in PAGES or len(parts) > (2 if parts[0] in WITH_ARG | MAY_ARG else 1)
+        ):
             self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
             return
         try:
@@ -1229,6 +1234,7 @@ ENDPOINTS: dict[str, Endpoint] = {
     "spikes": lambda c, _, q: api.spikes(c, q),
     "checks": lambda c, _, q: api.checks(c, q),
     "limits": lambda c, _, q: api.limits(c, q),
+    "limit-window": lambda c, _, q: limit_window(c, q),
     "changes": lambda c, arg, q: didit.route(c, arg, q),
 }
 
