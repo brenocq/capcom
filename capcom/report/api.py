@@ -20,7 +20,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from itertools import pairwise
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from capcom.config import load_config
 from capcom.cost.model import price
@@ -66,6 +66,9 @@ from capcom.types import (
     SessionInfo,
     Spike,
 )
+
+if TYPE_CHECKING:
+    from capcom.limits.model import Split
 
 LIVE_WINDOW = timedelta(minutes=10)
 TOP_MEMBERS = 6  # series beyond these are folded into "other"
@@ -1622,9 +1625,9 @@ MAX_SQUARES = 120  # past this many tools or skills, a bar instead of squares
 MAX_DOTS = 200
 
 
-def _limits(ctx: Context, days: int | None, full: bool) -> dict[str, Any]:
+def _limits(ctx: Context, days: int | None, full: bool, split: Split = "project") -> dict[str, Any]:
     """The usage windows from capcom.limits: the samples in the state folder, projects
-    named as everywhere else."""
+    named as everywhere else, each window's spend split by `split`."""
     from capcom.limits.view import limits_json
 
     names = ctx.names()
@@ -1637,14 +1640,30 @@ def _limits(ctx: Context, days: int | None, full: bool) -> dict[str, Any]:
         days=days,
         full=full,
         label=lambda d: project_display(d, names),
+        split=split,
     )
+
+
+# /api/limits?group=: the groups a window's spend splits by (capcom.limits.model.SPLITS),
+# in the names of /api/spend's groups (no split by session)
+LIMIT_SPLITS: dict[str, Split] = {
+    GroupBy.CATEGORY.value: "category",
+    GroupBy.PROJECT.value: "project",
+    GroupBy.MODEL.value: "model",
+    GroupBy.AGENT.value: "agent",
+}
 
 
 def limits(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     days = _int(query, "days", 14, 1, 366)
     if days not in LIMITS_DAYS:
         raise ApiError(400, "bad_query", f"days must be one of {', '.join(map(str, LIMITS_DAYS))}")
-    return {"days": days} | _limits(ctx, days, full=True)
+    raw = query.get("group") or GroupBy.CATEGORY.value
+    split = LIMIT_SPLITS.get(GROUP_ALIASES.get(raw, raw))
+    if split is None:
+        names = ", ".join(LIMIT_SPLITS)
+        raise ApiError(400, "bad_query", "group must be one of: " + names)
+    return {"days": days, "group": split} | _limits(ctx, days, full=True, split=split)
 
 
 def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:

@@ -342,6 +342,14 @@ def test_warmer_forgets_views_not_opened_lately() -> None:
     assert warmer.order() == [("a", {"days": "14"})]
 
 
+def test_warmer_warms_limits_as_the_page_asks_for_it() -> None:
+    # the Limits page always sends its range and group (lib.js limitsPath)
+    warmer = Warmer(Site(Path("/nonexistent"), TABLE, FAKE), recent=60)
+    assert ("limits", {"days": "14", "group": "category"}) in warmer.order()
+    warmer.saw("spend", {"days": "14", "group": "model"})
+    assert ("limits", {"days": "14", "group": "model"}) in warmer.order()
+
+
 def test_warmer_warms_the_defaults_in_the_group_picked_last() -> None:
     site = Site(Path("/nonexistent"), TABLE, FAKE)
     views = {

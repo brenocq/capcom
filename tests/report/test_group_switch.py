@@ -207,3 +207,55 @@ def test_day_chart_splits_by_the_group_in_the_url(tmp_path: Path) -> None:
             assert "Cache reads" in got["legend"]
         finally:
             chrome.close()
+
+
+# each "What spent each window" block on Limits: its pressed "Split by" button, its
+# legend, its table's member column; and the query and the limits replies asked for
+LIMITS_STATE = """(() => {
+  const blocks = [...document.querySelectorAll('#main h3')]
+    .filter((e) => e.textContent === 'What spent each window').map((h3) => {
+      const head = h3.parentElement;
+      return {
+        pressed: head.querySelector('.seg[aria-label="Split by"] button[aria-pressed="true"]')
+          ?.textContent,
+        legend: [...head.nextElementSibling.querySelectorAll('span')]
+          .map((s) => s.textContent),
+        column: head.parentElement.querySelectorAll('details.astable th')[1]?.textContent,
+      };
+    });
+  return {
+    blocks, search: location.search,
+    asked: performance.getEntriesByType('resource').map((e) => new URL(e.name))
+      .filter((u) => u.pathname === '/api/limits').map((u) => u.search),
+  };
+})()"""
+
+
+def test_limits_split_what_spent_each_window_by_the_group_in_the_url(tmp_path: Path) -> None:
+    binary = layout.find_chrome()
+    assert binary is not None
+    with layout.synthetic_site(tmp_path) as base:
+        chrome = layout.Chrome(binary, tmp_path / "profile")
+        try:
+            assert layout.load(chrome, f"{base}/limits?group=agent")
+            got = chrome.js(LIMITS_STATE)
+            assert got["asked"] == ["?days=14&group=agent"]
+            assert len(got["blocks"]) == 4  # the 5-hour and weekly windows of 2 accounts
+            for b in got["blocks"]:
+                assert b["pressed"] == "Agent type" and b["column"] == "Agent type"
+                assert "main" in b["legend"]
+
+            chrome.js(
+                "[...document.querySelectorAll('#main .seg[aria-label=\"Split by\"] button')]"
+                ".find((b) => b.textContent.trim() === 'Category').click()"
+            )
+            time.sleep(0.1)
+            assert chrome.js(layout.READY, timeout=30)
+            got = chrome.js(LIMITS_STATE)
+            assert got["search"] == "?group=category"
+            assert got["asked"][-1] == "?days=14&group=category"
+            for b in got["blocks"]:
+                assert b["pressed"] == "Category" and b["column"] == "Category"
+                assert "Cache reads" in b["legend"]
+        finally:
+            chrome.close()

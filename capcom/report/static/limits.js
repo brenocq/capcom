@@ -2,8 +2,12 @@
 // (the reading, the forecast fan) and the Limits page (each window's sawtooth over
 // time, and what spent each window by project). Data from /api/limits.
 
-import { h, s, api, usd, tokens, seg, empty, setQuery, hm, monthDay, dayName, showTip, hideTip, entityColors, segBar, tableToggle } from './lib.js';
+import {
+  h, s, api, usd, tokens, seg, empty, setQuery, hm, monthDay, dayName, showTip, hideTip, entityColors, segBar, tableToggle,
+  GROUPS, pickedGroup, rememberGroup, limitsPath,
+} from './lib.js';
 import { timeTicks, xAxis } from './charts.js';
+import { withColors } from './spend.js';
 
 let uid = 0;
 const DAY_OPTIONS = [[7, '7 days'], [14, '14 days'], [30, '30 days'], [90, '90 days']];
@@ -541,7 +545,7 @@ export function costsBlock(w) {
   return out;
 }
 
-function windowSection(w, now, days, since) {
+function windowSection(w, now, days, since, group) {
   const weekly = isWeekly(w);
   const card = h('section.card', null, h('div.split', null, h('h2', { text: w.label[0].toUpperCase() + w.label.slice(1) }),
     h('span.note', { text: `${w.samples} sample${w.samples === 1 ? '' : 's'}` })));
@@ -560,14 +564,14 @@ function windowSection(w, now, days, since) {
   if (fit) card.append(h('p.note', { text: fit }));
   const costs = costsBlock(w);
   if (costs) card.append(...costs);
-  // what spent each window, newest first: one bar per window, a color per project
-  // (the same project keeps its color in every window); each part's dollars and
-  // share of the limit on hover, all of them in the table
-  const spent = w.segments.filter((sg) => sg.by_project && sg.by_project.length).slice(0, weekly ? 3 : 6);
+  // what spent each window, newest first: one bar per window split by the page's
+  // group, a color per member (the same member keeps its color in every window);
+  // each part's dollars and share of the limit on hover, all of them in the table
+  const spent = w.segments.filter((sg) => sg.by && sg.by.length).slice(0, weekly ? 3 : 6);
   if (spent.length) {
-    const names = [...new Set(spent.flatMap((sg) => sg.by_project.map((p) => p.project)))];
-    const colors = entityColors(names);
-    const order = names.filter((n) => n !== '(other)').concat(names.includes('(other)') ? ['(other)'] : []);
+    const keys = [...new Set(spent.flatMap((sg) => sg.by.map((p) => p.key)))];
+    const order = keys.filter((k) => k !== '(other)').concat(keys.includes('(other)') ? ['(other)'] : []);
+    const members = new Map(withColors(order.map((key) => ({ key, label: key })), group).map((m) => [m.key, m]));
     const rows = h('div.blist');
     const table = [];
     for (const sg of spent) {
@@ -575,8 +579,8 @@ function windowSection(w, now, days, since) {
       const to = sg.reset && sg.resets_at ? hm(new Date(sg.resets_at)) : 'now';
       const span = `${from} → ${to}`;
       const total = sg.usd || 1e-9;
-      const parts = sg.by_project.map((p) => ({
-        color: colors.get(p.project), share: p.usd / total, title: p.project,
+      const parts = sg.by.map((p) => ({
+        color: members.get(p.key).color, share: p.usd / total, title: members.get(p.key).label,
         rows: [{ label: 'Spent', value: usd(p.usd) }, { label: 'Of the window', value: pctText(p.usd / total * 100, 1) },
           p.percent === null ? null : { label: 'Of the limit', value: '≈' + pctText(p.percent, 1) }].filter(Boolean),
       }));
@@ -586,11 +590,13 @@ function windowSection(w, now, days, since) {
         h('div.top', null, h('span', null, text, sg.path ? h('span', { style: 'color:var(--clay)', text: ' →' }) : null), h('span.mono', { text: usd(sg.usd) })),
         segBar(parts, { aria: `${span}: ${usd(sg.usd)}`, focus: !sg.path }),
         sg.inferred_usd >= 0.005 ? h('span.note', { text: `Of which ${usd(sg.inferred_usd)} from sessions with no reading, put on this account by time (inferred).` }) : null));
-      for (const p of sg.by_project) table.push([span, p.project, usd(p.usd), p.percent === null ? '' : '≈' + pctText(p.percent, 1)]);
+      for (const p of sg.by) table.push([span, members.get(p.key).label, usd(p.usd), p.percent === null ? '' : '≈' + pctText(p.percent, 1)]);
     }
-    card.append(h('h3', { text: 'What spent each window' }),
-      h('div.legend', { style: 'margin:0 0 10px' }, order.map((n) => h('span', null, h('i', { style: `background:${colors.get(n)}` }), n))),
-      rows, tableToggle(['Window', 'Project', 'Spent', 'Of the limit'], table));
+    const groupName = GROUPS.find(([v]) => v === group)[1];
+    card.append(h('div.split', null, h('h3', { text: 'What spent each window' }),
+      seg('Split by', GROUPS, group, (v) => { rememberGroup(v); setQuery({ group: v }); })),
+    h('div.legend', { style: 'margin:0 0 10px' }, order.map((k) => h('span', null, h('i', { style: `background:${members.get(k).color}` }), members.get(k).label))),
+    rows, tableToggle(['Window', groupName, 'Spent', 'Of the limit'], table));
   }
   return card;
 }
@@ -609,7 +615,8 @@ export function dayTabs(days, since, now) {
 
 export async function renderLimits(main, r) {
   const days = DAY_OPTIONS.map((o) => o[0]).includes(+r.query.get('days')) ? +r.query.get('days') : 14;
-  const d = await api(`limits?days=${days}`);
+  const group = pickedGroup(r.query);
+  const d = await api(limitsPath(r.query));
   const now = Date.now();
   const since = d.recording_since ? new Date(d.recording_since) : null;
   main.append(h('header.head', null,
@@ -625,7 +632,7 @@ export async function renderLimits(main, r) {
   const chosen = chosenAccount(d);
   const tabs = accountTabs(d, chosen);
   if (tabs) main.append(h('div.split', null, h('span.label', { text: 'Account' }), tabs));
-  const sections = (wins) => ['five_hour', 'seven_day'].filter((k) => wins[k]).map((k) => windowSection(wins[k], now, days, since ? since.getTime() : null));
+  const sections = (wins) => ['five_hour', 'seven_day'].filter((k) => wins[k]).map((k) => windowSection(wins[k], now, days, since ? since.getTime() : null, group));
   if (chosen === 'all') {
     const comb = combinedCard(d);
     if (comb) main.append(h('div.grid', null, comb));

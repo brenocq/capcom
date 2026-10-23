@@ -40,6 +40,7 @@ from capcom.limits.model import (
     Spend,
     WindowView,
     _dt,
+    agent_types,
     prepare,
     scan_groups,
     scan_spend,
@@ -380,6 +381,7 @@ def analyze_accounts(
     owners = Owners(tagged, known) if len(accounts) > 1 else None
     # every account's windows and the combined pace in one read of the requests
     preps: list[tuple[Account, list[LimitSample], dict[LimitWindow, Prepared]]] = []
+    types = agent_types(index)
     for acct in accounts:
         own = [s for s in tagged if s.account == acct.id]
         keep: Callable[[Request], bool] | None = None
@@ -388,7 +390,10 @@ def analyze_accounts(
             o, aid = owners, acct.id
             keep = lambda r, o=o, aid=aid: o(r)[0] == aid  # noqa: E731
             inferred = lambda r, o=o: o(r)[1]  # noqa: E731
-        prep = {w: prepare(own, w, now, label, keep=keep, inferred=inferred) for w in LimitWindow}
+        prep = {
+            w: prepare(own, w, now, label, keep=keep, inferred=inferred, agent_types=types)
+            for w in LimitWindow
+        }
         preps.append((acct, own, prep))
     spent = Spend()
     # one group per account: its windows' bins take the same requests

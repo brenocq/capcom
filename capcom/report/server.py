@@ -359,7 +359,7 @@ PARAMS: dict[str, tuple[str, ...]] = {
     "hour": ("start",),
     "spikes": ("days", "spike", "project", "cause"),
     "checks": ("days",),
-    "limits": ("days",),
+    "limits": ("days", "group"),
     "limit-window": ("account", "window", "start"),
     "changes": ("days",),
 }
@@ -473,11 +473,11 @@ WARM_VIEWS: dict[str, list[dict[str, str]]] = {
     "spend": [{"days": d, "group": "category"} for d in ("14", "7", "30", "90")],
     "sessions": [{"days": d, "sort": "usd", "limit": "300"} for d in ("14", "1", "7", "30", "0")],
     "checks": [{"days": d} for d in ("14", "7", "30")],
-    "limits": [{"days": d} for d in ("14", "7", "30", "90")],
+    "limits": [{"days": d, "group": "category"} for d in ("14", "7", "30", "90")],
 }
 # the pages whose default view follows the group picked last (their shared "Split
 # by" switch): the warmer warms those defaults with the group the pages ask for
-GROUPED = frozenset({"overview", "spend"})
+GROUPED = frozenset({"overview", "spend", "limits"})
 WARM_IDLE = 1800.0  # seconds without a page request after which the warmer rests
 WARM_REST = 3.0  # after each reply, rest this many times as long as it took (~1/4 core)
 WARM_RECENT = 1800.0  # a view a page opened this many seconds ago is still warmed
@@ -487,7 +487,7 @@ class Warmer:
     """One low-priority thread that fills the cache with the pages' usual views
     after startup and whenever the index's generation (or the date) changes: the
     views a page asked for in the last `recent` seconds, newest first, then every
-    page's default view (Overview's and Spend's split by the group a page picked
+    page's default view (Overview's, Spend's and Limits' split by the group a page picked
     last, as the pages ask for it). Its jobs run as background jobs (`capcom.report.jobs`),
     so a page's request never waits for it; a new generation stops its job and
     starts the round over. It rests `rest` times as long as each reply took, so
@@ -516,7 +516,7 @@ class Warmer:
         self._seen = time.monotonic()
         self._warm: tuple[Any, ...] | None = None  # the (generation, date) last warmed
         self.computed = 0  # replies the warmer computed
-        self.group: str | None = None  # the group Overview or Spend asked for last
+        self.group: str | None = None  # the group a page with the switch asked for last
 
     def saw(self, name: str, query: dict[str, str]) -> None:
         """A page asked for `name` with `query`: that view is warmed first for the

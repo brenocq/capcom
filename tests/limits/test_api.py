@@ -14,7 +14,20 @@ from capcom.limits.model import NOT_ENOUGH, sample_json
 from capcom.limits.view import NOT_RECORDING
 from capcom.report.server import Site
 from capcom.types import LimitSample, LimitWindow
-from tests.report.conftest import FAKE, NOW, TABLE, Client, ago, build_index, serve
+from tests.report.conftest import (
+    FAKE,
+    NOW,
+    S1_AGENT,
+    S1_MAIN,
+    S2,
+    S3,
+    TABLE,
+    Client,
+    ago,
+    build_index,
+    serve,
+    usd,
+)
 
 H5, D7 = LimitWindow.FIVE_HOUR, LimitWindow.SEVEN_DAY
 
@@ -78,10 +91,58 @@ def test_empty_state(client: Client) -> None:
     assert ov["limits"]["available"] is False and ov["limits"]["message"] == NOT_RECORDING
 
 
+WEEK_SPEND = S1_MAIN + S1_AGENT + S2 + S3  # the newest weekly window's requests
+
+
+@pytest.mark.parametrize(
+    ("group", "members"),
+    [
+        ("category", None),  # the four kinds, web tools counted with output
+        ("project", {"alpha": usd(S1_MAIN + S1_AGENT), "(temporary)": usd(S2), "beta": usd(S3)}),
+        ("model", {"claude-opus-5-5": usd(WEEK_SPEND)}),
+        ("agent", {"main": usd(S1_MAIN + S2 + S3), "scout": usd(S1_AGENT)}),
+    ],
+)
+def test_each_window_splits_its_spend_by_group(
+    state: Path, client: Client, group: str, members: dict[str, float] | None
+) -> None:
+    write(state, samples())
+    status, data, _ = client.get(f"/api/limits?days=14&group={group}")
+    assert status == 200 and data["group"] == group
+    by_project = client.get("/api/limits?days=14&group=project")[1]
+    assert by_project["group"] == "project"  # its own reply, not the one cached before
+    project = by_project["windows"]["seven_day"]["segments"][0]
+    seg = data["windows"]["seven_day"]["segments"][0]
+    got = {r["key"]: r["usd"] for r in seg["by"]}
+    if members is None:
+        assert set(got) == {"input", "cache_write", "cache_read", "output"}
+    else:
+        assert got == pytest.approx(members, abs=1e-4)
+    # every split adds up to the window's spend and to the same share of the limit
+    assert sum(got.values()) == pytest.approx(usd(WEEK_SPEND), abs=1e-3)
+    assert seg["usd"] == pytest.approx(usd(WEEK_SPEND), abs=1e-4)
+    percent = sum(r["percent"] for r in project["by"])
+    assert percent > 0
+    assert sum(r["percent"] for r in seg["by"]) == pytest.approx(percent, abs=0.05)
+
+
+@pytest.mark.parametrize("group", ["session", "nope"])
+def test_limits_refuse_a_group_they_cannot_split_by(
+    state: Path, client: Client, group: str
+) -> None:
+    write(state, samples())
+    status, err, _ = client.get(f"/api/limits?group={group}")
+    assert status == 400 and err["error"] == "bad_query"
+    assert err["message"] == "group must be one of: category, project, model, agent"
+    # the default is by category, as on Spend; agent_type names the agent split too
+    assert client.get("/api/limits")[1]["group"] == "category"
+    assert client.get("/api/limits?group=agent_type")[1]["group"] == "agent"
+
+
 def test_limits_with_samples(state: Path, client: Client) -> None:
     write(state, samples())
-    status, data, _ = client.get("/api/limits?days=14")
-    assert status == 200 and data["days"] == 14
+    status, data, _ = client.get("/api/limits?days=14&group=project")
+    assert status == 200 and data["days"] == 14 and data["group"] == "project"
     assert data["available"] and data["recording"] and data["message"] is None
     week = data["windows"]["seven_day"]
     assert week["reading"]["percent"] == 45.0 and week["current"]
@@ -95,7 +156,7 @@ def test_limits_with_samples(state: Path, client: Client) -> None:
     assert week["history"][0] == [int(start.timestamp() * 1000), 0.0]
     segs = week["segments"]
     assert len(segs) == 2 and segs[0]["peak"] == 45.0 and segs[1]["hit_limit"]
-    projects = {p["project"] for p in segs[0]["by_project"]}
+    projects = {p["key"] for p in segs[0]["by"]}
     assert "alpha" in projects and segs[0]["usd"] > 0
     # two readings, the first at the window's start: one rise, a rough and wide forecast
     five = data["windows"]["five_hour"]

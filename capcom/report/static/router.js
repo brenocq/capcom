@@ -7,7 +7,7 @@
 // placeholders and chart ghosts are skeleton.js), a thin bar at the top of each
 // loading card, and a status line ("Loading 30 days… 62 %").
 
-import { h, apiHooks, apiState, stopLoads, prefetch, preload, renew, outdate, errorBox, overviewPath, spendPath, dayPath } from './lib.js';
+import { h, apiHooks, apiState, stopLoads, prefetch, preload, renew, outdate, errorBox, overviewPath, spendPath, dayPath, limitsPath } from './lib.js';
 import { swapIn } from './morph.js';
 import { skeletonMain, skeletonTail, grow } from './skeleton.js';
 
@@ -317,7 +317,7 @@ export function go(href, { replace = false } = {}) {
 }
 
 // The API paths a link's page asks for first, to prefetch on hover and to start
-// at once on a click. Overview's, Spend's and Day's follow the page's query and the
+// at once on a click. Overview's, Spend's, Day's and Limits' follow the page's query and the
 // group picked last, as the pages do: another path would start a second job,
 // which the page never shows, beside the one it waits for.
 export function apiFor(url) {
@@ -327,10 +327,11 @@ export function apiFor(url) {
   if (m) return [`${m[1]}/${encodeURIComponent(decodeURIComponent(m[2]))}`];
   if (p === '/') return [overviewPath(url.searchParams), 'checks?days=14'];
   if (p === '/spend') return [spendPath(url.searchParams)];
+  if (p === '/limits') return [limitsPath(url.searchParams)];
   if (url.search) return [];
   return {
     '/sessions': ['sessions?days=14&sort=usd&limit=300'], '/spikes': ['spikes?days=14'],
-    '/checks': ['checks?days=14', 'changes', 'changes/noticed?days=14'], '/changes': ['changes'], '/limits': ['limits?days=14'],
+    '/checks': ['checks?days=14', 'changes', 'changes/noticed?days=14'], '/changes': ['changes'],
   }[p] || [];
 }
 
