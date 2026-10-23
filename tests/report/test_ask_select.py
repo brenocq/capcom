@@ -261,7 +261,7 @@ def test_a_selection_asks_without_the_private_parts(
         assert left == "(session names, evidence rows and pasted config left out)"
         # a follow-up keeps the selection as the topic
         chrome.js("document.querySelector('.asksugg .askchip').click()")
-        until(chrome, "document.querySelectorAll('.askmsg.bot').length === 2")
+        until(chrome, "document.querySelectorAll('.askmsg.bot').length === 3")  # hello, 2 answers
         time.sleep(0.3)
         assert "<selection>" in prompts(runs)[1]
 
@@ -280,7 +280,7 @@ def test_a_selection_asks_without_the_private_parts(
         chrome.js("document.querySelector('.asksel').click()")
         until(
             chrome,
-            "document.querySelectorAll('.askmsg.bot').length === 1"
+            "document.querySelectorAll('.askmsg.bot').length === 2"  # the greeting, the answer
             " && !!document.querySelector('.asksugg')",
         )
         # spikes: the detail names its session in a note
@@ -290,7 +290,7 @@ def test_a_selection_asks_without_the_private_parts(
         chrome.js("document.querySelector('.asksel').click()")
         until(
             chrome,
-            "document.querySelectorAll('.askmsg.bot').length === 1"
+            "document.querySelectorAll('.askmsg.bot').length === 2"  # the greeting, the answer
             " && !!document.querySelector('.asksugg')",
         )
         # the whole sessions list
@@ -304,7 +304,7 @@ def test_a_selection_asks_without_the_private_parts(
         chrome.js("document.querySelector('.asksel').click()")
         until(
             chrome,
-            "document.querySelectorAll('.askmsg.bot').length === 1"
+            "document.querySelectorAll('.askmsg.bot').length === 2"  # the greeting, the answer
             " && !!document.querySelector('.asksugg')",
         )
         sent = prompts(runs)

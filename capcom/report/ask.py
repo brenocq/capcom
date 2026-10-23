@@ -57,12 +57,12 @@ SYSTEM = (
     "You are the helper inside capcom, a local tool that shows a person where their "
     "Claude Code tokens and dollars go. The person reads English as a second language. "
     "Answer in plain, everyday words and short sentences: two to four sentences, under "
-    "80 words. No headings, lists, tables or markdown. If you need a technical word, say "
-    "what it means in a few words. Use only the numbers you are given and never make "
-    "numbers up. Keep what each number means exactly as given: a total over many "
-    "requests stays a total, never an amount per request. If the numbers do not answer "
-    "the question, say so in one sentence. capcom's "
-    "dollars are API-equivalent cost at list prices, not the person's bill. A finding's "
+    "80 words, unless the message says otherwise. No headings, lists, tables or "
+    "markdown. If you need a technical word, say what it means in a few words. Use "
+    "only the numbers you are given and never make numbers up. Keep what each number "
+    "means exactly as given: a total over many requests stays a total, never an amount "
+    "per request. If the numbers do not answer the question, say so in one sentence. "
+    "capcom's dollars are API-equivalent cost at list prices, not the person's bill. A finding's "
     "saving is an estimate of what a change would save in a week at this pace. "
     "When the person selected some text on the page, explain what that text means, "
     "using the part of the page around it as context. Pieces marked [left out] were "
@@ -72,8 +72,18 @@ SYSTEM = (
     "words, written the way the person would ask them."
 )
 
-EXPLAIN = "Explain this part to me very shortly and simply."
+EXPLAIN = "What does this show, and what stands out?"
 EXPLAIN_SELECTION = "Explain the text I selected, very shortly and simply."
+# How to answer an "Explain" mark (EXPLAIN on a part): the card, then its main
+# insights, from its own numbers.
+EXPLAIN_HOW = (
+    "How to answer: first say in one plain sentence what this part shows. Then say the "
+    "one to three most important things its numbers tell: for example the biggest item "
+    "and its share of the total, what changed, anything unusual, and what it means for "
+    "the person's spend or limits. Quote the real numbers from the part, and never make "
+    'one up. A row named only "a session" is a session whose title was left out: never '
+    "guess its name. Up to five short sentences, under 110 words."
+)
 
 # What a selection may have crossed and lost (static/ask.js, PRIVATE): only these
 # names come in, so the page cannot send anything else in their place.
@@ -81,7 +91,6 @@ LEFT_OUT = (
     "session names",
     "agent names",
     "evidence rows",
-    "table rows",
     "your notes",
     "pasted config",
 )
@@ -204,6 +213,8 @@ def build_prompt(q: Question) -> str:
         lines = [f"{who[role]}: {_fence(text)}" for role, text in q.history]
         out.append("The chat so far:\n<chat>\n" + "\n".join(lines) + "\n</chat>")
     out.append(f"Their message:\n<message>\n{_fence(q.question)}\n</message>")
+    if q.question == EXPLAIN and q.part and not (q.selection or q.left_out):
+        out.append(EXPLAIN_HOW)
     return "\n\n".join(out) + "\n"
 
 
