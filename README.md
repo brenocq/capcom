@@ -78,7 +78,7 @@ that cost you the most, with the change to make.
 
 | Command | What it does |
 | --- | --- |
-| `capcom serve` | The website on 127.0.0.1 (`--open` opens it); rescans the logs in the background. |
+| `capcom serve` | The website on 127.0.0.1 (`--open` opens it); rescans the logs in the background. Its Ask Claude chat explains a card in a few plain words (`--no-ask` turns it off). |
 | `capcom scan` | Reads new log lines into the index. |
 | `capcom top` | What changed, then totals by project, session, agent type, model or day (`--by`). |
 | `capcom spikes` | What changed, then each spend spike with its cause. |
@@ -106,7 +106,11 @@ and spikes. The prices ship with capcom, with the date they were checked.
 <br>
 
 No. capcom makes no network requests and uses only Python's standard library.
-It opens Claude Code's logs read-only, never reads credentials, writes only its
+The one exception is yours to turn on: the website's Ask Claude chat runs your
+own `claude` CLI (Haiku, with every tool and MCP server off and no session
+saved) when you ask a question, and sends only the numbers and labels of the
+card you asked about, never text from your logs. It opens Claude Code's logs
+read-only, never reads credentials, writes only its
 own files (the index in `~/.cache/capcom`, and the usage-limit samples in
 `~/.local/state/capcom`), and serves the website on 127.0.0.1 only. The one
 change it makes to Claude Code's own files is the status line entry

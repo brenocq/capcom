@@ -1,0 +1,118 @@
+/* Ask Claude (ask.js): the mascot button, the chat panel and the "Explain" marks.
+   Colors come from style.css's tokens, so both themes follow. */
+:root, [data-theme="light"] {
+  --mz-body: #D97757; --mz-face: #FFF7EF; --mz-ink: #2B2A27; --mz-cheek: #F2A0A0; --mz-band: #3D3D3A;
+  --ask-me: #A84E2D; --ask-me-text: #FFFFFF;
+}
+[data-theme="dark"] {
+  --mz-body: #E08462; --mz-face: #FFF3E8; --mz-ink: #2B2A27; --mz-cheek: #F2A0A0; --mz-band: #DEDCD1;
+  --ask-me: #F0A07E; --ask-me-text: #141413;
+}
+
+/* the mascot */
+.mascot { display: block; overflow: visible; }
+.mascot .mz-body { fill: var(--mz-body); }
+.mascot .mz-body-stroke { stroke: var(--mz-body); }
+.mascot .mz-face { fill: var(--mz-face); }
+.mascot .mz-ink { fill: var(--mz-ink); }
+.mascot .mz-glint { fill: #FFFFFF; }
+.mascot .mz-cheek { fill: var(--mz-cheek); opacity: 0.75; }
+.mascot .mz-ink-stroke { stroke: var(--mz-ink); }
+/* the headset over the head: the band and cups read on either ground */
+.mascot .mz-band { fill: var(--mz-band); }
+.mascot .mz-band-stroke { stroke: var(--mz-band); }
+.mascot .mz-arm { transform-origin: 46px 43px; transform-box: view-box; }
+.mascot .mz-eyes { transform-origin: 32px 32px; transform-box: view-box; }
+.mascot.waving .mz-arm { animation: mz-wave 1.8s ease-in-out; }
+.mascot.waving .mz-eyes { animation: mz-blink 1.8s ease-in-out; }
+@keyframes mz-wave {
+  0%, 100% { transform: rotate(0); }
+  15% { transform: rotate(-14deg); } 30% { transform: rotate(16deg); }
+  45% { transform: rotate(-14deg); } 60% { transform: rotate(16deg); } 75% { transform: rotate(-6deg); }
+}
+@keyframes mz-blink { 0%, 40%, 50%, 100% { transform: scaleY(1); } 45% { transform: scaleY(0.12); } }
+
+/* the button */
+.ask { position: fixed; right: 20px; bottom: 20px; z-index: 25; display: flex; flex-direction: column; align-items: flex-end; gap: 12px; pointer-events: none; }
+.ask > * { pointer-events: auto; }
+.askbtn { width: 60px; height: 60px; border-radius: 999px; border: 0.5px solid var(--l25); background: var(--card); color: var(--text);
+  display: flex; align-items: center; justify-content: center; padding: 0; cursor: pointer;
+  box-shadow: 0 6px 20px rgba(20,20,19,0.18), 0 1px 3px rgba(20,20,19,0.12); transition: transform 0.15s ease; }
+.askbtn:hover { transform: translateY(-2px); }
+.askbtn .mascot { margin-top: 2px; }
+.ask.open .askbtn { box-shadow: 0 2px 8px rgba(20,20,19,0.16); }
+
+/* the panel */
+.askpanel { width: min(380px, calc(100vw - 32px)); height: min(580px, calc(100vh - 112px)); display: flex; flex-direction: column;
+  background: var(--panel); border: 0.5px solid var(--l25); border-radius: 18px; overflow: hidden;
+  box-shadow: 0 18px 48px rgba(20,20,19,0.22), 0 2px 6px rgba(20,20,19,0.1); }
+.askpanel[hidden] { display: none; }
+.askhead { display: flex; align-items: center; gap: 10px; padding: 10px 8px 10px 14px; background: var(--card); border-bottom: 0.5px solid var(--l15); }
+.asktitle { display: flex; flex-direction: column; flex: 1; min-width: 0; line-height: 1.25; }
+.asktitle strong { font-family: var(--serif); font-size: 18px; font-weight: 500; }
+.asktitle span { font-size: 12px; color: var(--muted); }
+.askicon { width: 36px; height: 36px; border: 0; border-radius: 10px; background: transparent; color: var(--muted); display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.askicon:hover { background: var(--sel); color: var(--text); }
+
+.asklog { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 14px 12px; display: flex; flex-direction: column; gap: 10px; }
+.askrow { display: flex; gap: 8px; align-items: flex-end; }
+.askrow.me { justify-content: flex-end; }
+.askav { flex: 0 0 28px; width: 28px; height: 28px; border-radius: 999px; background: var(--card); border: 0.5px solid var(--l15); display: flex; align-items: center; justify-content: center; }
+.askmsg { max-width: 82%; padding: 9px 13px; border-radius: 18px; font-size: 14px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.askmsg.bot { background: var(--card); color: var(--text); border: 0.5px solid var(--l15); border-bottom-left-radius: 6px; }
+.askmsg.me { background: var(--ask-me); color: var(--ask-me-text); border-bottom-right-radius: 6px; display: flex; flex-direction: column; gap: 4px; }
+.askmsg.err { background: var(--warn-bg); color: var(--warn-text); border-color: transparent; }
+.askpart { font-size: 12px; opacity: 0.85; white-space: normal; }
+.asktyping { display: inline-flex; gap: 4px; padding: 4px 0; }
+.asktyping i { width: 7px; height: 7px; border-radius: 999px; background: var(--muted); opacity: 0.4; animation: ask-dot 1.2s infinite ease-in-out; }
+.asktyping i:nth-child(2) { animation-delay: 0.15s; }
+.asktyping i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes ask-dot { 0%, 60%, 100% { opacity: 0.35; transform: none; } 30% { opacity: 0.9; transform: translateY(-3px); } }
+.askhello { display: flex; flex-direction: column; gap: 10px; }
+
+.asksugg { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; margin-top: 8px; padding-left: 36px; }
+.askchip { min-height: 32px; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--clay); background: transparent; color: var(--clay);
+  font-size: 13px; line-height: 1.3; text-align: left; cursor: pointer; }
+.askchip:hover { background: var(--ask-me); border-color: var(--ask-me); color: var(--ask-me-text); }
+
+.askoptin { margin: auto 4px; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 18px; background: var(--card); border: 0.5px solid var(--l15); border-radius: 14px; }
+.askoptin strong { font-family: var(--serif); font-size: 19px; font-weight: 500; }
+.askoptin p { margin: 0; color: var(--ink); line-height: 1.45; font-size: 14px; }
+.askoptin p.note { font-size: 12.5px; color: var(--muted); }
+.askoptin .btnrow { display: flex; gap: 8px; margin-top: 6px; }
+
+.askfoot { padding: 10px 12px 8px; border-top: 0.5px solid var(--l15); background: var(--card); }
+.askfoot[hidden] { display: none; }
+.askform { display: flex; align-items: flex-end; gap: 8px; }
+.askinput { flex: 1; min-width: 0; min-height: 40px; max-height: 96px; resize: none; padding: 9px 14px; border: 0.5px solid var(--l25); border-radius: 20px;
+  background: var(--panel); color: var(--text); font: inherit; font-size: 14px; line-height: 1.4; }
+.asksend { flex: 0 0 40px; width: 40px; height: 40px; border-radius: 999px; border: 0; background: var(--text); color: var(--inv); display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.asksend:hover { background: var(--ink); }
+.asknote { margin: 6px 4px 0; font-size: 11.5px; color: var(--muted); }
+.asklink { border: 0; background: none; padding: 0; color: var(--clay); font: inherit; text-decoration: underline; cursor: pointer; min-height: 24px; }
+
+/* the marks on dense parts */
+.askmark { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; min-height: 26px; margin-left: 8px; padding: 1px 10px 1px 3px;
+  border: 0.5px solid var(--l25); border-radius: 999px; background: var(--card); color: var(--muted);
+  font: 500 12px/1 var(--sans); letter-spacing: 0; white-space: nowrap; cursor: pointer; }
+.askmark:hover { color: var(--clay); border-color: var(--clay); }
+.askmark .mascot { width: 20px; height: 20px; }
+h2 .askmark, h1 .askmark { position: relative; top: -2px; }
+
+@media (max-width: 899.98px) {
+  .ask { right: 16px; bottom: 16px; }
+  .askpanel { height: min(580px, calc(100vh - 160px)); }
+  .askicon, .askchip, .asklink { min-height: 44px; min-width: 44px; }
+  .askmark { min-height: 44px; padding: 1px 12px 1px 6px; }
+  .askinput { font-size: 16px; min-height: 44px; }
+  .asksend { flex-basis: 44px; width: 44px; height: 44px; }
+}
+@media (max-width: 599.98px) {
+  .askbtn { width: 56px; height: 56px; }
+  .asktitle span { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mascot.waving .mz-arm, .mascot.waving .mz-eyes, .asktyping i { animation: none; }
+  .askbtn { transition: none; }
+  .askbtn:hover { transform: none; }
+}

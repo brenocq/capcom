@@ -32,9 +32,16 @@ modules. Never add or commit anything under `docs/`.
   or a report built from them. Test fixtures are synthetic, written by hand or
   by a generator in `tests/`. In chat and reports, quote no conversation text
   beyond a tool name, a file path or a short label.
-- **No network.** capcom makes no network requests at run time. Never read
-  `~/.claude/.credentials.json`, `~/.openclaw/credentials/`, auth profiles or
-  any token. The one read of account data: `oauthAccount.emailAddress` and
+- **No network.** capcom makes no network requests at run time. The one
+  exception is Ask Claude (`capcom/report/ask.py`): when the user asks in a
+  page of `capcom serve` (after turning it on there once), capcom starts the
+  user's own `claude` CLI headless (Haiku; every tool, MCP server, slash
+  command and setting source off; no session saved), which makes the request.
+  It sends only the page's name, the asked-about part's numbers and labels in
+  capcom's own wording, the chat's earlier turns and the question: never text
+  from the logs beyond tool names, file paths and short labels. `--no-ask`
+  turns it off. Never read `~/.claude/.credentials.json`,
+  `~/.openclaw/credentials/`, auth profiles or any token. The one read of account data: `oauthAccount.emailAddress` and
   `oauthAccount.accountUuid` from `~/.claude.json`, only those two keys, to tell
   accounts apart in the limits (`capcom/limits/`); nothing else in that file.
 - **One reply, one count.** Claude Code writes an assistant message several

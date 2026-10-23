@@ -59,6 +59,7 @@ def _serve(args: argparse.Namespace) -> int:
         open_browser=args.open,
         scan=not args.no_scan,
         read_only=args.read_only,
+        ask_claude=not args.no_ask,
     )
 
 
@@ -148,6 +149,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--read-only",
         action="store_true",
         help="the website cannot mark changes as applied (no writes at all)",
+    )
+    serve.add_argument(
+        "--no-ask",
+        action="store_true",
+        help="no Ask Claude chat: the website never starts your claude CLI",
     )
     serve.set_defaults(func=_serve)
 
