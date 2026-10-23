@@ -355,7 +355,7 @@ PARAMS: dict[str, tuple[str, ...]] = {
     "spend": ("days", "group"),
     "sessions": ("days", "limit", "sort", "q"),
     "session": (),
-    "day": (),
+    "day": ("group",),
     "hour": ("start",),
     "spikes": ("days", "spike", "project", "cause"),
     "checks": ("days",),
@@ -1234,10 +1234,12 @@ def compute(
 
 
 # Replies made from the cached reply of the same view split by another group, at a
-# fraction of the cost: only Overview's chart of today depends on its group, so a
-# click on its group switch computes that chart, not the whole page again.
+# fraction of the cost: only Overview's chart of today and Day's chart depend on
+# their group, so a click on a group switch computes that chart, not the whole
+# page again.
 REGROUP: dict[str, Callable[[api.Context, dict[str, str], dict[str, Any]], Any]] = {
     "overview": api.overview_regroup,
+    "day": api.day_regroup,
 }
 
 
@@ -1269,7 +1271,7 @@ ENDPOINTS: dict[str, Endpoint] = {
     "spend": lambda c, _, q: api.spend(c, q),
     "sessions": lambda c, _, q: api.sessions(c, q),
     "session": lambda c, sid, q: api.session(c, sid),
-    "day": lambda c, d, q: api.day(c, d),
+    "day": lambda c, d, q: api.day(c, d, q),
     "hour": lambda c, _, q: api.hour(c, q),
     "live": lambda c, _, q: api.live(c),
     "spikes": lambda c, _, q: api.spikes(c, q),

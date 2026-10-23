@@ -99,7 +99,7 @@ def test_tween_mixed_moves_every_number_of_a_text() -> None:
 
 
 def test_router_starts_the_paths_the_pages_ask_for() -> None:
-    # Overview and Spend follow the group picked last (kept in localStorage): the
+    # Overview, Spend and Day follow the group picked last (kept in localStorage): the
     # router's preload must start that view's job, not a second one for the default
     # group beside it (which once tripled Spend's time after a group switch)
     script = """
@@ -107,7 +107,8 @@ globalThis.localStorage = { getItem: () => 'project', setItem() {} };
 const r = await import('./router.js');
 const at = (p) => r.apiFor(new URL('http://127.0.0.1' + p));
 console.log(JSON.stringify([at('/spend'), at('/'), at('/spend?days=30&group=model'),
-  at('/?group=category&range=7d'), at('/sessions')]));
+  at('/?group=category&range=7d'), at('/sessions'), at('/day/2026-10-20'),
+  at('/day/2026-10-20?group=agent'), at('/day/2026-10-20?group=category')]));
 """
     out = subprocess.run(
         ["node", "--input-type=module", "-e", script],
@@ -123,6 +124,9 @@ console.log(JSON.stringify([at('/spend'), at('/'), at('/spend?days=30&group=mode
         ["spend?days=30&group=model"],
         ["overview", "checks?days=14"],
         ["sessions?days=14&sort=usd&limit=300"],
+        ["day/2026-10-20?group=project"],  # Day follows the group picked last too
+        ["day/2026-10-20?group=agent"],
+        ["day/2026-10-20"],  # by category: the default path, no second job
     ]
 
 

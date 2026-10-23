@@ -132,3 +132,67 @@ def test_group_switch_never_shows_older_totals(tmp_path: Path) -> None:
             assert seen[-1] > shown
         finally:
             chrome.close()
+
+
+# the Day chart's state: the pressed "Split by" button, the legend's labels, the
+# query in the address bar and the day replies the page asked for
+DAY_STATE = """(() => {
+  const card = [...document.querySelectorAll('#main section.card')]
+    .find((c) => c.querySelector('h2')?.textContent === 'The day, adding up');
+  const seg = card.querySelector('.seg[aria-label="Split by"]');
+  return {
+    pressed: seg && seg.querySelector('button[aria-pressed="true"]').textContent,
+    legend: [...card.querySelectorAll('.legend > span:not(.total)')]
+      .map((s) => s.childNodes[1].textContent),
+    search: location.search,
+    asked: performance.getEntriesByType('resource').map((e) => new URL(e.name))
+      .filter((u) => u.pathname.startsWith('/api/day/')).map((u) => u.pathname + u.search),
+  };
+})()"""
+
+
+def test_day_chart_splits_by_the_group_in_the_url(tmp_path: Path) -> None:
+    binary = layout.find_chrome()
+    assert binary is not None
+    day = (datetime.now(UTC) - timedelta(days=1)).date().isoformat()
+    with layout.synthetic_site(tmp_path) as base:
+        chrome = layout.Chrome(binary, tmp_path / "profile")
+        try:
+            # Spend's day bars, split by model, open their day split the same way
+            assert layout.load(chrome, f"{base}/spend?group=model")
+            hrefs = chrome.js("[...document.querySelectorAll('a.day')].map((a) => a.search)")
+            assert hrefs and set(hrefs) == {"?group=model"}
+
+            assert layout.load(chrome, f"{base}/day/{day}?group=model")
+            got = chrome.js(DAY_STATE)
+            assert got["pressed"] == "Model"
+            assert got["asked"] == [f"/api/day/{day}?group=model"]
+            assert got["legend"] and all(x.startswith("claude-") for x in got["legend"])
+
+            chrome.js(
+                "[...document.querySelectorAll('#main .seg button')]"
+                ".find((b) => b.textContent.trim() === 'Agent type').click()"
+            )
+            time.sleep(0.1)
+            assert chrome.js(layout.READY, timeout=30)
+            got = chrome.js(DAY_STATE)
+            assert got["pressed"] == "Agent type" and got["search"] == "?group=agent"
+            assert got["asked"][-1] == f"/api/day/{day}?group=agent"
+            assert "main" in got["legend"]
+            # the day before and after keep the split
+            nav = "[...document.querySelectorAll('#main .head a.link')].map((a) => a.search)"
+            assert chrome.js(nav) == ["?group=agent", "?group=agent"]
+
+            # back to the default: the plain path, and the kinds of tokens again
+            chrome.js(
+                "[...document.querySelectorAll('#main .seg button')]"
+                ".find((b) => b.textContent.trim() === 'Category').click()"
+            )
+            time.sleep(0.1)
+            assert chrome.js(layout.READY, timeout=30)
+            got = chrome.js(DAY_STATE)
+            assert got["pressed"] == "Category" and got["search"] == ""
+            assert got["asked"][-1] == f"/api/day/{day}"
+            assert "Cache reads" in got["legend"]
+        finally:
+            chrome.close()

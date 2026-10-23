@@ -582,13 +582,15 @@ TYPICAL_DAYS = 14  # a typical day: the median of the days before it
 DAY_STEP = timedelta(minutes=10)  # a day's cumulative chart
 
 
-def day(ctx: Context, raw: str) -> dict[str, Any]:
-    """One local day: its spend adding up with its spikes, by project, agent type and
-    model, its sessions, and the typical day before it to measure it against."""
+def day(ctx: Context, raw: str, query: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """One local day: its spend adding up (split by the query's `group`, default by
+    category) with its spikes, by project, agent type and model, its sessions, and
+    the typical day before it to measure it against."""
     try:
         when = date.fromisoformat(raw)
     except ValueError:
         raise ApiError(400, "bad_query", "the day must be YYYY-MM-DD") from None
+    group = _group(query or {})
     if when > ctx.today():
         raise ApiError(404, "not_found", "that day has not come yet")
     since = ctx.at_midnight(when)
@@ -599,15 +601,7 @@ def day(ctx: Context, raw: str) -> dict[str, Any]:
         w.add(req)
 
     unavailable: list[str] = []
-    cum = _try(
-        lambda: ctx.analysis.cumulative(
-            ctx.index, ctx.table, since, until, GroupBy.CATEGORY, DAY_STEP
-        ),
-        unavailable,
-    )
-    cum_json = None
-    if cum is not None:
-        cum_json = _cumulative_json(_tidy(cum, GroupBy.CATEGORY, w.names), DAY_STEP, until)
+    cum_json = _day_chart(ctx, since, until, group, w.names, unavailable)
     typical = _typical(ctx, when, w)
     projects = w.groups_json(w.by_project)
     for p in projects:
@@ -623,6 +617,7 @@ def day(ctx: Context, raw: str) -> dict[str, Any]:
         if typical is None
         else {k: v for k, v in typical.items() if k != "by_project"},
         "cumulative": cum_json,
+        "group": group.value,
         "spikes": _spike_marks(ctx, since, until, w.infos, w.names, unavailable),
         "by_project": projects,
         "by_agent": w.groups_json(w.by_agent),
@@ -632,6 +627,37 @@ def day(ctx: Context, raw: str) -> dict[str, Any]:
         "sessions": rows[:10],
         "unavailable": unavailable,
     }
+
+
+def _day_chart(
+    ctx: Context,
+    since: datetime,
+    until: datetime,
+    group: GroupBy,
+    names: ProjectNames,
+    unavailable: list[str],
+) -> dict[str, Any] | None:
+    """A day's cumulative chart, split by `group`: the one part of its reply that
+    depends on the group."""
+    cum = _try(
+        lambda: ctx.analysis.cumulative(
+            ctx.index, ctx.table, since, until, group, DAY_STEP, top=TOP_MEMBERS
+        ),
+        unavailable,
+    )
+    return None if cum is None else _cumulative_json(_tidy(cum, group, names), DAY_STEP, until)
+
+
+def day_regroup(ctx: Context, query: Mapping[str, str], base: Mapping[str, Any]) -> dict[str, Any]:
+    """A day's reply for the `group` of `query`, made from `base`, its reply for
+    another group at the same state of the index: only the chart is computed again,
+    over the base's own window, so the chart and the totals describe the same span."""
+    group = _group(query)
+    since = datetime.fromisoformat(base["window"]["since"])
+    until = datetime.fromisoformat(base["window"]["until"])
+    unavailable = list(base.get("unavailable") or [])
+    chart = _day_chart(ctx, since, until, group, ctx.names(), unavailable)
+    return {**base, "cumulative": chart, "group": group.value, "unavailable": unavailable}
 
 
 def _typical(ctx: Context, when: date, w: Window) -> dict[str, Any] | None:

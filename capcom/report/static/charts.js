@@ -222,8 +222,8 @@ function clearOfMarks(plot, lab, fx, fy, axis) {
 // ------------------------------------------------------------------ per-day bars
 
 // days: [{date (Date), iso, values, total}], members: [{label, color}]; each day
-// links to its own page
-export function dayBars(days, members, todayIso) {
+// links to its own page, with `query` (the split the bars show) after its path
+export function dayBars(days, members, todayIso, query = '') {
   const max = Math.max(...days.map((d) => d.total), 1e-9);
   const many = days.length > 31;
   // every day's amount sits above its bar: level when it fits the bar's width,
@@ -236,7 +236,7 @@ export function dayBars(days, members, todayIso) {
       d.values.map((v, j) => (v > 0 ? h('div', { style: `flex:${v} 1 0px;background:${members[j].color}` }) : null)));
     const key = i === top || i === days.length - 1;
     const amt = d.total > 0 ? h('span.amt' + (key ? '.key' : ''), { text: usdShort(d.total), 'aria-hidden': 'true' }) : null;
-    const col = h('a.day', { href: `/day/${d.iso}`, style: f }, amt, bar);
+    const col = h('a.day', { href: `/day/${d.iso}${query}`, style: f }, amt, bar);
     const rows = () => members
       .map((m, j) => ({ label: m.label, value: usd(d.values[j]), color: m.color }))
       .filter((r, j) => d.values[j] > 0).reverse();

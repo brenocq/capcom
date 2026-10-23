@@ -134,7 +134,7 @@ export function entityColors(keys) {
   return out;
 }
 
-// The "Split by" choice shared by Spend and Overview: the URL's ?group= first, then
+// The "Split by" choice shared by Overview, Spend and Day: the URL's ?group= first, then
 // the last one picked (kept in localStorage), else by category.
 export const GROUPS = [['category', 'Category'], ['project', 'Project'], ['model', 'Model'], ['agent', 'Agent type']];
 export function pickedGroup(query) {
@@ -149,7 +149,7 @@ export function rememberGroup(g) {
   try { localStorage.setItem('capcom-group', g); } catch (e) { /* storage off */ }
 }
 
-// The API path Overview and Spend ask for first, for a page's query (a
+// The API path Overview, Spend and Day ask for first, for a page's query (a
 // URLSearchParams): the pages and the router's preload use the same one, so a
 // click never starts a second job for a view the page does not show.
 export function overviewPath(query) {
@@ -158,6 +158,13 @@ export function overviewPath(query) {
 }
 export function spendPath(query) {
   return `spend?days=${Number(query.get('days')) || 14}&group=${pickedGroup(query)}`;
+}
+export function dayPath(day, query) {
+  return `day/${encodeURIComponent(day)}${groupQuery(pickedGroup(query))}`;
+}
+// The query a link to a Day page carries to keep a split ('' by category, the default).
+export function groupQuery(group) {
+  return group === 'category' ? '' : `?group=${group}`;
 }
 
 // ------------------------------------------------------------------ API

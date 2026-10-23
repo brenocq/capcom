@@ -232,6 +232,42 @@ def test_day_against_the_days_with_spend_before_it(client: Client) -> None:
     assert {a["key"] for a in d["by_agent"]} == {"main", "scout"}
 
 
+@pytest.mark.parametrize(
+    ("group", "finals"),
+    [
+        ("category", None),  # checked below: the four kinds, output with web tools
+        ("project", {"-home-user-alpha": usd(TODAY)}),
+        ("model", {"claude-opus-5-5": usd(TODAY)}),
+        ("agent", {"main": usd(S1_MAIN), "scout": usd(S1_AGENT)}),
+    ],
+)
+def test_day_splits_its_chart_by_group(
+    client: Client, group: str, finals: dict[str, float] | None
+) -> None:
+    status, d, _ = client.get(f"/api/day/{NOW.date()}?group={group}")
+    assert status == 200 and d["group"] == group
+    cum = d["cumulative"]
+    got = {m["key"]: m["final"] for m in cum["members"]}
+    if finals is None:
+        assert set(got) == {"cache_read", "cache_write", "output", "input"}
+    else:
+        assert set(got) == set(finals)
+        assert all(close(got[k], v) for k, v in finals.items())
+    assert close(cum["total"][-1], usd(TODAY))
+    # the rest of the page does not depend on the split
+    assert close(d["totals"]["usd"], usd(TODAY))
+    assert [p["label"] for p in d["by_project"]] == ["alpha"]
+
+
+def test_day_split_defaults_to_category_and_refuses_an_unknown_group(client: Client) -> None:
+    assert client.get(f"/api/day/{NOW.date()}")[1]["group"] == "category"
+    status, err, _ = client.get(f"/api/day/{NOW.date()}?group=nope")
+    assert status == 400 and err["error"] == "bad_query"
+    # a past day splits by its own members: beta alone on s3's day
+    past = client.get("/api/day/2026-10-18?group=project")[1]["cumulative"]
+    assert [m["label"] for m in past["members"]] == ["beta"]
+
+
 def test_a_past_day_and_its_projects_typical_day(client: Client) -> None:
     status, d, _ = client.get("/api/day/2026-10-18")  # s3, beta
     assert status == 200 and d["today"] is False
