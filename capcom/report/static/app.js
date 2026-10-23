@@ -12,6 +12,7 @@ import { renderSessions } from './sessions.js';
 import { renderSpikes } from './spikes.js';
 import { renderChecks } from './checks.js';
 import { renderLimits } from './limits.js';
+import { renderLimitWindow } from './limitwindow.js';
 import { renderChanges, renderChange } from './changes.js';
 import { freshToken } from './marks.js';
 
@@ -48,7 +49,7 @@ function mark() {
 function route() {
   const parts = location.pathname.replace(/^\/+|\/+$/g, '').split('/');
   const name = parts[0] || 'overview';
-  return { name, arg: parts[1] ? decodeURIComponent(parts[1]) : null, query: new URLSearchParams(location.search) };
+  return { name, arg: parts[1] ? decodeURIComponent(parts[1]) : null, rest: parts.slice(1).map(decodeURIComponent), query: new URLSearchParams(location.search) };
 }
 
 // ------------------------------------------------------------------ theme
@@ -221,7 +222,7 @@ const PAGES = {
   spikes: renderSpikes,
   checks: renderChecks,
   changes: (main, r, live) => (r.arg ? renderChange(main, r, live) : renderChanges(main, r, live)),
-  limits: renderLimits,
+  limits: (main, r) => (r.arg === 'window' ? renderLimitWindow(main, r) : renderLimits(main, r)),
 };
 
 // Draw the page of the URL (router.js: at once, from the first data there is,

@@ -16,6 +16,7 @@ from capcom.limits.accounts import (
     analyze_accounts,
     load_known,
 )
+from capcom.limits.detail import window_path
 from capcom.limits.model import (
     MERGED,
     MIN_SHARE,
@@ -141,8 +142,15 @@ def costs_json(f: Fit) -> dict[str, Any] | None:
 
 
 def window_json(
-    v: WindowView, now: datetime, tz: tzinfo | None, since: datetime | None, full: bool
+    v: WindowView,
+    now: datetime,
+    tz: tzinfo | None,
+    since: datetime | None,
+    full: bool,
+    account: str | None = None,
 ) -> dict[str, Any]:
+    """One window of one account (`account`: its id, for the links to each window's
+    own page)."""
     reading = v.reading
     f = v.fit
     fc = v.forecast
@@ -227,6 +235,7 @@ def window_json(
                     "inferred_usd": None if sv is None else _r(sv.inferred_usd, 4),
                     "by_project": None if sv is None else _projects(sv.by_project),
                 }
+                | ({} if account is None else {"path": window_path(account, seg, tz)})
             )
         out["segments"] = segs
     return out
@@ -273,7 +282,8 @@ def limits_json(
             "current": a.account.current,
             "samples": len(a.samples),
             "windows": {
-                w.value: window_json(a.views[w], now, tz, since, full) for w in LimitWindow
+                w.value: window_json(a.views[w], now, tz, since, full, a.account.id)
+                for w in LimitWindow
             },
         }
         for a in accounts

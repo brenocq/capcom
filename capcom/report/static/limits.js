@@ -241,6 +241,11 @@ export function limitChart(opts) {
       svg.append(s('path', { d: `M${X(lp[0])} ${Y(lp[1])}L${X(fan[0][0])} ${Y(fan[0][1])}`, ...stroke, 'stroke-dasharray': '2 3', style: 'stroke:var(--text)' }));
     }
   }
+  // the fitted percent of what was spent, adding up (the window page)
+  const fitted = opts.fitted || [];
+  if (fitted.length > 1) {
+    svg.append(s('path', { d: fitted.map((p, i) => (i ? 'L' : 'M') + X(p[0]) + ' ' + Y(p[1])).join(''), ...stroke, 'stroke-dasharray': '5 4', style: 'stroke:var(--accent)' }));
+  }
   const bounds = windowBounds(opts.segments, x0, x1, opts.weekly && opts.kind !== 'five_hour');
   const labeled = bounds.some((b) => b.labeled);
   const plot = h('div.chart', { style: `height:${H}px;margin:${labeled ? 20 : 12}px 0 0 ${left}px` });
@@ -295,6 +300,11 @@ export function limitChart(opts) {
     let best = null;
     for (const p of hover) if (!best || Math.abs(p.t - t) < Math.abs(best.t - t)) best = p;
     if (best && Math.abs(best.t - t) < (x1 - x0) / 40) rows.push({ label: `Reading at ${label(best.t)}`, value: pctText(best.v), color: 'var(--text)' });
+    if (fitted.length > 1 && t >= fitted[0][0]) {
+      let q = fitted[0];
+      for (const p of fitted) if (p[0] <= t) q = p;
+      rows.push({ label: 'Fitted from the spend', value: '≈' + pctText(q[1], 1), color: 'var(--accent)' });
+    }
     if (fan.length > 1 && t >= fan[0][0]) {
       let q = fan[0];
       for (const p of fan) if (p[0] <= t) q = p;
@@ -570,9 +580,11 @@ function windowSection(w, now, days, since) {
         rows: [{ label: 'Spent', value: usd(p.usd) }, { label: 'Of the window', value: pctText(p.usd / total * 100, 1) },
           p.percent === null ? null : { label: 'Of the limit', value: '≈' + pctText(p.percent, 1) }].filter(Boolean),
       }));
-      rows.append(h('div.bitem', null,
-        h('div.top', null, h('span', { text: `${span} · peak ${pctText(sg.peak)}${sg.hit_limit ? ' · limit hit' : ''}` }), h('span.mono', { text: usd(sg.usd) })),
-        segBar(parts, { aria: `${span}: ${usd(sg.usd)}` }),
+      // the row opens the window on its own page
+      const text = `${span} · peak ${pctText(sg.peak)}${sg.hit_limit ? ' · limit hit' : ''}`;
+      rows.append(h(sg.path ? 'a.bitem.winrow' : 'div.bitem', sg.path ? { href: sg.path, style: 'display:block;color:inherit;text-decoration:none', title: 'Open this window' } : null,
+        h('div.top', null, h('span', null, text, sg.path ? h('span', { style: 'color:var(--clay)', text: ' →' }) : null), h('span.mono', { text: usd(sg.usd) })),
+        segBar(parts, { aria: `${span}: ${usd(sg.usd)}`, focus: !sg.path }),
         sg.inferred_usd >= 0.005 ? h('span.note', { text: `Of which ${usd(sg.inferred_usd)} from sessions with no reading, put on this account by time (inferred).` }) : null));
       for (const p of sg.by_project) table.push([span, p.project, usd(p.usd), p.percent === null ? '' : '≈' + pctText(p.percent, 1)]);
     }

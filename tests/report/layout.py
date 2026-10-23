@@ -617,7 +617,7 @@ class Result:
 
 def discover(chrome: Chrome, base: str) -> list[tuple[str, str]]:
     """The pages to check: every link of the navigation, plus a session, a day and a
-    spike found by following the site's own links. A page added to the navigation
+    usage window found by following the site's own links. A page added to the navigation
     is checked without a change here."""
     load(chrome, base + "/")
     nav = chrome.js("""[...document.querySelectorAll('#sidebar .nav a[href]')]
@@ -627,6 +627,7 @@ def discover(chrome: Chrome, base: str) -> list[tuple[str, str]]:
     for name, list_page, selector in (
         ("session", "/sessions", "#main a[href^='/session/']"),
         ("day", "/spend", "#main a[href^='/day/']"),
+        ("limit window", "/limits", "#main a[href^='/limits/window/']"),
     ):
         load(chrome, base + list_page)
         href = chrome.js(
