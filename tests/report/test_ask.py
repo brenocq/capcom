@@ -29,8 +29,9 @@ import json, os, sys, time
 out = os.environ["FAKE_CLAUDE_DIR"]
 mode = os.environ.get("FAKE_CLAUDE_MODE", "ok")
 prompt = sys.stdin.read()
-n = len([f for f in os.listdir(out) if f.startswith("run-")])
-with open(os.path.join(out, f"run-{{n}}.json"), "w") as f:
+# named by start time and PID: two started at once never share a name, and the
+# names sort in the order the runs started
+with open(os.path.join(out, f"run-{{time.time_ns():020d}}-{{os.getpid()}}.json"), "w") as f:
     json.dump({{"argv": sys.argv[1:], "prompt": prompt, "cwd": os.getcwd(),
                "files": os.listdir("."), "pid": os.getpid(),
                "mcp_env": os.environ.get("ENABLE_CLAUDEAI_MCP_SERVERS")}}, f)
@@ -401,6 +402,20 @@ def test_prompt_defaults_and_limits() -> None:
         ask.parse({"page": "Checks", "question": "x" * (ask.MAX_QUESTION + 1)})
     with pytest.raises(ask.AskError):
         ask.parse([1, 2])
+
+
+def test_an_explain_mark_says_how_to_answer() -> None:
+    part = {"label": "Costliest sessions", "text": "a session: Cost $42.10"}
+    explained = ask.build_prompt(ask.parse({"page": "Spend", "part": part}))
+    assert explained.rstrip().endswith(ask.EXPLAIN_HOW)
+    assert "what this part shows" in ask.EXPLAIN_HOW and "never make" in ask.EXPLAIN_HOW
+    # a question the person typed, or a selection, is answered as asked
+    typed = ask.build_prompt(ask.parse({"page": "Spend", "part": part, "question": "Why?"}))
+    assert ask.EXPLAIN_HOW not in typed
+    picked = ask.build_prompt(ask.parse(SELECTED | {"question": ask.EXPLAIN}))
+    assert ask.EXPLAIN_HOW not in picked
+    # nothing to explain from: no instruction about its numbers
+    assert ask.EXPLAIN_HOW not in ask.build_prompt(ask.parse({"page": "Spend"}))
 
 
 def test_prompt_text_cannot_close_its_block() -> None:

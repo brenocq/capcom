@@ -7,8 +7,9 @@
 // question (POST /api/ask, capcom/report/ask.py), streamed as they are written.
 // Off until the user turns it on once in the panel; the choice is kept in this
 // browser. What a question sends: the page's name, the part's label and its
-// numbers and labels in capcom's own words (partText below leaves out evidence
-// rows, session links and titles, notes the user wrote and pasted config), the
+// numbers and labels in capcom's own words (partText below keeps a table's
+// numbers but leaves out evidence rows, session links and titles, notes the user
+// wrote and pasted config), the
 // earlier turns of this chat and the question. A selection sends its text without
 // the private pieces it crosses (PRIVATE below: only what kind they were), where it
 // sits and its card's text as partText builds it. Never a session's text.
@@ -25,13 +26,17 @@ const MAX_SELECTION = 1000;
 const MAX_WHERE = 200;
 const MAX_TURNS = 8;
 const MAX_QUESTION = 600;
-const EXPLAIN = 'Explain this part to me very shortly and simply.';
+// the question an Explain mark asks (capcom/report/ask.py, EXPLAIN, adds how to answer it)
+const EXPLAIN = 'What does this show, and what stands out?';
 const EXPLAIN_SELECTION = 'Explain the text I selected, very shortly and simply.';
 export const NOTICE = 'Ask Claude sends the numbers and labels on this part of the page, or the text you select, to Claude through your own claude CLI. No text from your logs is sent.';
 // The mascot's name ("Roger that", on the radio): the greeting, the panel's
-// subtitle and the round button's label say it. The feature stays "Ask Claude".
+// title and the round button's label say it. The opt-in notice and the sidebar
+// still say Ask Claude, since Claude is what answers.
 export const MASCOT_NAME = 'Roger';
 const named = (yes, no) => (MASCOT_NAME ? yes : no);
+// The first message of every chat, written by capcom (instant, and nothing sent).
+export const GREETING = `Hi${named(`, I’m ${MASCOT_NAME}`, '')}! I explain what you see here in a few short, plain words. Tap “Explain” on a card, select any text and tap “${named(`Ask ${MASCOT_NAME}`, 'Ask Claude')}”, or ask me anything about this page.`;
 
 // The sidebar's promise (app.js draws it): true with Ask Claude off, and saying
 // what goes out while it is on in this browser.
@@ -88,7 +93,7 @@ export function mascot(size, mini = false) {
 // ------------------------------------------------------------------ what a part says
 
 // What a part shows, as lines of text: its numbers and labels in capcom's own
-// words. Left out: controls, charts' drawings (their aria-labels, numbers and
+// words, tables as lines (tableLines). Left out: controls, charts' drawings (their aria-labels, numbers and
 // labels, are kept), evidence rows (they quote the logs), links to sessions
 // (their titles come from the logs), the user's own notes, pasted config.
 const DROP = [
@@ -104,8 +109,7 @@ const DROP = [
 const PRIVATE = [
   ['a[href^="/session/"], a[href^="/session?"], .spikelist .meta, .spikerow .meta, .detail .tags > .note', 'session names'],
   ['.lab .what', 'agent names'],
-  ['.facts, .evidence, details.astable', 'evidence rows'],
-  ['table', 'table rows'],
+  ['.facts, .evidence', 'evidence rows'],
   ['.usernote, .markform, input, textarea, select, [contenteditable]', 'your notes'],
   ['pre', 'pasted config'],
 ];
@@ -119,6 +123,45 @@ function privateOf(el) {
 }
 const BLOCK = /^(DIV|P|LI|UL|OL|H1|H2|H3|H4|SECTION|ASIDE|HEADER|FOOTER|DETAILS|SUMMARY|FIGURE|BR|DL|DT|DD)$/;
 
+// A table, as lines: how many rows, then each row (the first ten) as its first
+// cell, then the other cells after their column headers, such as "a
+// session: Active 2h 10m, Peak context 312k, Cost $42.10". A cell holding a
+// private piece (a session's title and link, a spawn description, evidence, a
+// note) is said only by its kind: "a session", "an agent", "[left out]".
+const MAX_ROWS = 10;
+const CELL_DROP = '.tip, [hidden], script, style, svg, .askmark';
+const PRIVATE_CELL = [
+  ['a[href^="/session/"], a[href^="/session?"], .spikelist .meta, .spikerow .meta, .detail .tags > .note', 'a session'],
+  ['.lab .what', 'an agent'],
+  ['.facts, .evidence, .usernote, .markform, input, textarea, select, [contenteditable], pre', '[left out]'],
+];
+function cellText(c) {
+  for (const [sel, say] of PRIVATE_CELL) if (c.matches(sel) || c.querySelector(sel)) return say;
+  const x = c.cloneNode(true);
+  for (const d of x.querySelectorAll(CELL_DROP)) d.remove();
+  return x.textContent.replace(/\s+/g, ' ').trim();
+}
+
+export function tableLines(table) {
+  const cells = (tr) => [...tr.children].filter((c) => c.matches('th, td'));
+  const headRow = table.querySelector('thead tr');
+  const head = headRow ? cells(headRow).map(cellText) : [];
+  const rows = [...table.querySelectorAll('tr')].filter((tr) => tr !== headRow && !tr.closest('thead'));
+  if (!rows.length) return [];
+  const out = [`A table of ${rows.length} row${rows.length === 1 ? '' : 's'}${rows.length > MAX_ROWS ? `, the first ${MAX_ROWS}` : ''}:`];
+  for (const tr of rows.slice(0, MAX_ROWS)) {
+    const vals = cells(tr).map(cellText);
+    const name = vals[0] || '';
+    const rest = vals.slice(1).map((v, i) => (!v ? '' : head[i + 1] ? `${head[i + 1]} ${v}` : v)).filter(Boolean);
+    out.push(rest.length ? `${name || 'a row'}: ${rest.join(', ')}` : name);
+  }
+  return out.filter(Boolean);
+}
+
+// Any container that partText drops, whatever is inside it (a table in an
+// evidence block goes with it).
+const DROP_BOX = DROP.split(',').filter((x) => x !== 'table' && x !== 'details.astable').join(',');
+
 export function partText(el, extra = []) {
   const lines = [];
   for (const root of [el, ...extra]) {
@@ -127,6 +170,14 @@ export function partText(el, extra = []) {
       if (!img.closest(DROP.replace(/\[hidden\],?/, ''))) lines.push(img.getAttribute('aria-label'));
     }
     const copy = root.cloneNode(true);
+    // tables first, as lines of capcom's numbers (their private cells said by kind)
+    for (const t of copy.querySelectorAll('table')) {
+      const box = t.closest('details.astable') || t;
+      if (box.parentElement && box.parentElement.closest(DROP_BOX)) continue; // dropped with its container
+      const div = document.createElement('div');
+      for (const l of tableLines(t)) { const p = document.createElement('p'); p.textContent = l; div.append(p); }
+      box.replaceWith(div);
+    }
     for (const a of copy.querySelectorAll('a[href^="/session/"], a[href^="/session?"]')) a.replaceWith(document.createTextNode('a session'));
     for (const x of copy.querySelectorAll(DROP)) x.remove();
     if (route().name === 'session') for (const x of copy.querySelectorAll('h1')) x.remove();
@@ -154,38 +205,57 @@ export function partText(el, extra = []) {
 const textOf = (el) => (el ? el.textContent.replace(/\s+/g, ' ').trim() : '');
 const headingText = (el) => { if (!el) return ''; const c = el.cloneNode(true); for (const m of c.querySelectorAll('.askmark')) m.remove(); return textOf(c); };
 
-// The dense parts of each page that get a mark: where (the route), which element,
-// where the mark goes inside it, and its label.
+// The dense parts of each page that get a mark: where (the route; `arg`: true
+// only on a page with an argument, false only on one without), which element,
+// where the mark goes inside it, and its label (the part's own heading). A part
+// whose text has no numbers beyond its label gets no mark (`worth`).
 const PARTS = [
   { route: 'checks', sel: 'section.card.check', anchor: 'h2',
     label: (el) => { const kind = el.closest('details.rollup'); const k = kind ? headingText(kind.querySelector('summary b')) : ''; const t = headingText(el.querySelector('h2')); return k && k !== t ? `${k}, in ${t}` : t; } },
   { route: 'spikes', sel: 'section.card.detail', anchor: 'h2', label: (el) => headingText(el.querySelector('h2')) },
   { route: 'overview', sel: 'aside.card', anchor: 'h2', label: (el) => headingText(el.querySelector('h2')) },
-  { route: 'overview', sel: 'section.card', anchor: '.label', has: 'a[href="/limits"]', label: (el) => `${headingText(el.querySelector('.label'))} forecast` },
-  { route: 'limits', sel: 'section.card', anchor: '.split > h2', label: (el) => `${headingText(el.querySelector('h2'))} forecast` },
+  { route: 'overview', sel: 'section.card', anchor: '.label', has: 'a[href="/limits"]', label: (el) => headingText(el.querySelector('.label')) },
+  // the Limits page: each window's card; a window's own page: each card under a heading
+  { route: 'limits', arg: false, sel: 'section.card', anchor: ':scope > .split > h2', label: (el) => headingText(el.querySelector(':scope > .split > h2')) },
+  // (a card with two lists, such as By project and By agent type, says both)
+  { route: 'limits', arg: true, sel: 'section.card', anchor: ':scope > .split > h2, :scope > h2',
+    label: (el) => [...el.querySelectorAll(':scope > .split > h2, :scope > h2')].map(headingText).filter(Boolean)
+      .map((t, i) => (i ? t[0].toLowerCase() + t.slice(1) : t)).join(' and ') },
   { route: 'spend', sel: 'section.card.grow2b', anchor: 'h2', label: (el) => headingText(el.querySelector('h2')) },
+  { route: 'spend', sel: 'section.card', has: 'table.data', anchor: ':scope > .split > h2', label: (el) => headingText(el.querySelector(':scope > .split > h2')) },
   { route: 'session', sel: 'section.card.banner', anchor: '.msg > strong', label: () => 'Cost check of this session' },
   { route: 'changes', arg: true, sel: 'header.head.top', anchor: '.chips', label: (el) => `Did it work: ${headingText(el.querySelector('h1'))}`,
     extra: (el) => [el.parentElement && el.parentElement.querySelector('.tiles3')] },
 ];
 
+const unworthy = new WeakMap(); // a part -> its text length when it had nothing to explain
 function decorate() {
   const r = route();
   const main = document.getElementById('main');
   if (!main) return;
   for (const p of PARTS) {
-    if (p.route !== r.name || (p.arg && !r.arg)) continue;
+    if (p.route !== r.name || (p.arg === true && !r.arg) || (p.arg === false && r.arg)) continue;
     for (const el of main.querySelectorAll(p.sel)) {
       if (p.has && !el.querySelector(p.has)) continue;
       const anchor = el.querySelector(p.anchor);
-      if (!anchor || anchor.querySelector('.askmark')) continue;
+      if (!anchor || anchor.querySelector('.askmark') || el.querySelector('.askmark')) continue;
+      // a part judged not worth a mark is judged again only once its text changes
+      const size = el.textContent.length;
+      if (unworthy.get(el) === size) continue;
       const label = p.label(el) || 'This part';
+      if (!worth(partText(el, p.extra ? p.extra(el) : []), label)) { unworthy.set(el, size); continue; }
       anchor.append(h('button.askmark', {
-        type: 'button', title: 'Ask Claude to explain this', 'aria-label': `Ask Claude to explain: ${label}`,
+        type: 'button', title: named(`Ask ${MASCOT_NAME} to explain this`, 'Ask Claude to explain this'),
+        'aria-label': `${named(`Ask ${MASCOT_NAME}`, 'Ask Claude')} to explain: ${label}`,
         onclick: (e) => { e.preventDefault(); e.stopPropagation(); explain(el, p, label); },
       }, mascot(18, true), h('span', { 'aria-hidden': 'true', text: 'Explain' })));
     }
   }
+}
+
+// Whether a part's text says something beyond its label: a number somewhere.
+export function worth(text, label = '') {
+  return text.split('\n').some((l) => l !== label && /\d/.test(l) && !(label && label.includes(l)));
 }
 
 // The page's headline numbers, for a question asked without a mark.
@@ -214,7 +284,7 @@ function pageContext() {
 const state = {
   on: enabled(),
   open: false,
-  msgs: [], // {role: 'user'|'assistant', text, part?, suggestions?, error?, done?}
+  msgs: [], // {role: 'user'|'assistant', text, part?, suggestions?, error?, done?, hello?}
   topic: null, // {page, label, text}: the part the chat is about, sent with each question
   pending: null, // a question waiting for the opt-in
   ctrl: null, // the answer being streamed: its AbortController
@@ -246,9 +316,10 @@ function build() {
   const form = h('form.askform', null, input, sendBtn);
   const foot = h('div.askfoot', null, form,
     h('p.asknote', null, 'Haiku, through your claude CLI. ', h('button.asklink', { type: 'button', text: 'Turn off', onclick: turnOff })));
-  const panel = h('section.askpanel', { id: 'askpanel', role: 'dialog', 'aria-label': 'Ask Claude', hidden: true },
+  const title = named(`Ask ${MASCOT_NAME}`, 'Ask Claude');
+  const panel = h('section.askpanel', { id: 'askpanel', role: 'dialog', 'aria-label': title, hidden: true },
     h('header.askhead', null, mascot(34),
-      h('div.asktitle', null, h('strong', { text: 'Ask Claude' }), h('span', { text: named(`${MASCOT_NAME} · short answers`, 'Short answers about your numbers') })),
+      h('div.asktitle', null, h('strong', { text: title }), h('span', { text: 'Short answers about your numbers' })),
       h('button.askicon', { type: 'button', 'aria-label': 'New chat', title: 'New chat', onclick: newChat }, icon(ICON.fresh)),
       h('button.askicon', { type: 'button', 'aria-label': 'Close', title: 'Close', onclick: () => closePanel() }, icon(ICON.close))),
     log, foot);
@@ -334,24 +405,25 @@ function draw() {
       h('strong', { text: 'Turn on Ask Claude?' }),
       h('p', { text: NOTICE }),
       h('p.note', { text: 'It runs your claude CLI with the Haiku model, so each question counts toward your Claude usage. You can turn it off again under the chat.' }),
-      about ? h('p.note', null, 'Then Claude explains ', h('b', { text: about }), '.') : null,
+      about ? h('p.note', null, `Then ${named(MASCOT_NAME, 'Claude')} explains `, h('b', { text: about }), '.') : null,
       h('div.btnrow', null,
         h('button.btn.primary', { type: 'button', text: 'Turn on', onclick: turnOn }),
         h('button.btn', { type: 'button', text: 'Not now', onclick: () => { state.pending = null; closePanel(); } }))));
     return;
   }
-  if (!state.msgs.length) {
-    ui.log.replaceChildren(h('div.askhello', null,
-      h('div.askrow.bot', null, avatar(), h('div.askmsg.bot', { text: `Hi${named(`, I’m ${MASCOT_NAME}`, '')}! I explain what you see here in a few simple words. Tap “Explain” on a card, select any text and tap “Ask Claude”, or ask me anything about this page.` })),
-      suggestions(starters(), true)));
-    return;
-  }
+  greet();
   const last = state.msgs.length - 1;
   ui.log.replaceChildren(...state.msgs.map((m, i) => message(m, i === last)));
   ui.log.scrollTop = ui.log.scrollHeight;
 }
 
 const avatar = () => h('span.askav', null, mascot(26, true));
+
+// A chat starts with the greeting, once: on a fresh panel, after the opt-in
+// (before the question that waited for it) and after New chat.
+function greet() {
+  if (state.on && !(state.msgs.length && state.msgs[0].hello)) state.msgs.unshift({ role: 'assistant', text: GREETING, done: true, hello: true });
+}
 
 function starters() {
   const r = route().name;
@@ -360,6 +432,10 @@ function starters() {
 }
 
 function message(m, last) {
+  if (m.hello) {
+    return h('div.askhello', null, h('div.askrow.bot', null, avatar(), h('div.askmsg.bot', { text: m.text })),
+      last ? suggestions(starters(), true) : null);
+  }
   if (m.role === 'user') {
     return h('div.askrow.me', null, h('div.askmsg.me', null,
       m.part ? h('span.askpart', { title: m.part }, 'About: ', h('b', { text: m.part })) : null,
@@ -379,7 +455,7 @@ function message(m, last) {
 }
 
 const listed = (xs) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
-const typing = () => h('span.asktyping', { 'aria-label': 'Claude is writing' }, h('i'), h('i'), h('i'));
+const typing = () => h('span.asktyping', { 'aria-label': `${named(MASCOT_NAME, 'Claude')} is writing` }, h('i'), h('i'), h('i'));
 const tidy = (t) => t.replace(/\*\*/g, '').trim();
 
 function suggestions(list, start, m) {
@@ -422,7 +498,8 @@ export async function ask(question, topic = null, again = false) {
   }
   if (state.ctrl) state.ctrl.abort();
   if (topic) state.topic = topic;
-  const history = state.msgs.filter((m) => m.text && !m.error).slice(-MAX_TURNS).map((m) => ({ role: m.role, text: m.text.slice(0, 1500) }));
+  greet();
+  const history = state.msgs.filter((m) => m.text && !m.error && !m.hello).slice(-MAX_TURNS).map((m) => ({ role: m.role, text: m.text.slice(0, 1500) }));
   if (again) state.msgs.pop();
   else {
     const picked = topic && topic.selection != null;
