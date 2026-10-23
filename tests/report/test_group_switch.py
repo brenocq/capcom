@@ -168,6 +168,17 @@ def test_day_chart_splits_by_the_group_in_the_url(tmp_path: Path) -> None:
             assert got["pressed"] == "Model"
             assert got["asked"] == [f"/api/day/{day}?group=model"]
             assert got["legend"] and all(x.startswith("claude-") for x in got["legend"])
+            # where the money went lists the models too, under the agent types
+            models = chrome.js(
+                "(() => { const t = [...document.querySelectorAll('#main h2.small')]"
+                ".find((e) => e.textContent === 'By model');"
+                " return t && [...t.nextElementSibling"
+                ".querySelectorAll('.bitem .top span:first-child')]"
+                ".map((s) => s.textContent); })()"
+            )
+            # (the chart names a model by its price-table id, the list as logged)
+            assert models and len(models) == len(got["legend"])
+            assert all(m.startswith("claude-") for m in models)
 
             chrome.js(
                 "[...document.querySelectorAll('#main .seg button')]"
