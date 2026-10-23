@@ -111,10 +111,12 @@ function liveList() {
   const top = liveData.sessions[0].usd_per_hour;
   for (const sn of liveData.sessions.slice(0, 8)) {
     const hot = sn.usd_per_hour > 0 && sn.usd_per_hour === top;
-    const sub = sn.agents_active ? `main + ${sn.agents_active} agent${sn.agents_active > 1 ? 's' : ''}` : (sn.title ? sn.project : 'main');
+    // the folder (the name already is it for an untitled session), then the subagents running
+    const agents = sn.agents_active ? `${sn.agents_active} agent${sn.agents_active > 1 ? 's' : ''}` : null;
+    const sub = [sn.title ? sn.project : null, agents].filter(Boolean).join(' · ');
     box.append(h('a', { href: sessionHref(sn.session_id), title: `${sn.title || sn.project}: last record ${stamp(new Date(sn.last_seen))}` },
       h('span', { class: hot ? 'dot hot' : 'dot' }),
-      h('span.name', null, h('span', { text: sn.title || sn.project }), h('span.note', { text: sub })),
+      h('span.name', null, h('span', { text: sn.title || sn.project }), sub ? h('span.note', { text: sub }) : null),
       h('span', { class: hot ? 'rate hot' : 'rate', text: sn.usd_per_hour.toFixed(2) })));
   }
   return box;
