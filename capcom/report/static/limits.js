@@ -146,6 +146,37 @@ function fitNote(w) {
 
 // ------------------------------------------------------------------ chart
 
+// Where a chart spanning several windows draws each window's boundary: every reset
+// (and the start of a window that began after an idle gap, not at the reset before
+// it) strictly inside the plot, as {t, f (0 to 1 across the plot), kind: 'reset' or
+// 'start', label (the time), title, labeled}. A boundary is `labeled` when the last
+// labeled one is at least `gap` of the plot away (a label is about that wide).
+// segments: oldest first, as limitChart takes them; weekly: the labels name the day.
+export function windowBounds(segments, x0, x1, weekly, gap) {
+  const room = gap ?? (weekly ? 0.13 : 0.075);
+  const at = (t) => (weekly ? `${dayName(new Date(t)).slice(0, 3)} ${hm(new Date(t))}` : hm(new Date(t)));
+  const out = [];
+  const near = (t) => out.some((b) => Math.abs(b.t - t) <= (x1 - x0) * 0.004);
+  const add = (t, kind) => {
+    if (!(t > x0 && t < x1) || near(t)) return;
+    out.push({ t, f: (t - x0) / (x1 - x0), kind, label: at(t), title: `${kind === 'reset' ? 'Window reset' : 'Window started'} ${at(t)}` });
+  };
+  for (const sg of segments) {
+    if (sg.resets_at && sg.reset !== false) add(new Date(sg.resets_at).getTime(), 'reset');
+  }
+  for (const sg of segments) {
+    const start = sg.start ? new Date(sg.start).getTime() : sg.start_known && sg.points.length ? sg.points[0][0] : null;
+    if (start !== null) add(start, 'start');
+  }
+  out.sort((a, b) => a.t - b.t);
+  let last = -Infinity;
+  for (const b of out) {
+    b.labeled = b.f - last >= room && b.f <= 1 - room / 2;
+    if (b.labeled) last = b.f;
+  }
+  return out;
+}
+
 // Usage windows over time: each window's readings as a rising line that drops to
 // 0 at its reset, a dashed line at 100%, and the current window's forecast as a
 // fan (the 80% range, filled, with hairline edges, and the median dashed).
@@ -189,11 +220,7 @@ export function limitChart(opts) {
     const seen = pts.slice(unseen);
     let d = seen.map((p, i) => (i ? 'L' : 'M') + X(p[0]) + ' ' + Y(p[1])).join('');
     const last = pts[pts.length - 1];
-    if (sg.reset && sg.resets_at) {
-      const rt = new Date(sg.resets_at).getTime();
-      d += 'L' + X(rt) + ' ' + Y(last[1]);
-      svg.append(s('path', { d: 'M' + X(rt) + ' ' + Y(last[1]) + 'L' + X(rt) + ' ' + Y(0), ...stroke, 'stroke-width': 1, 'stroke-dasharray': '3 3', style: 'stroke:var(--muted)' }));
-    }
+    if (sg.reset && sg.resets_at) d += 'L' + X(new Date(sg.resets_at).getTime()) + ' ' + Y(last[1]);
     if (seen.length > 1 || (sg.reset && sg.resets_at)) svg.append(s('path', { d, ...stroke, style: 'stroke:var(--text)' }));
     for (const p of seen) hover.push({ t: p[0], v: p[1], hit: sg.hit_limit && p[1] >= 100 });
   }
@@ -214,7 +241,9 @@ export function limitChart(opts) {
       svg.append(s('path', { d: `M${X(lp[0])} ${Y(lp[1])}L${X(fan[0][0])} ${Y(fan[0][1])}`, ...stroke, 'stroke-dasharray': '2 3', style: 'stroke:var(--text)' }));
     }
   }
-  const plot = h('div.chart', { style: `height:${H}px;margin:12px 0 0 ${left}px` });
+  const bounds = windowBounds(opts.segments, x0, x1, opts.weekly && opts.kind !== 'five_hour');
+  const labeled = bounds.some((b) => b.labeled);
+  const plot = h('div.chart', { style: `height:${H}px;margin:${labeled ? 20 : 12}px 0 0 ${left}px` });
   for (const v of [0, 50, 100]) {
     const t = ((1 - v / ymax) * 100).toFixed(2) + '%';
     plot.append(h('div.gridline', { style: `top:${t}` + (v === 100 ? ';border-top:1px dashed var(--accent)' : '') }),
@@ -233,10 +262,20 @@ export function limitChart(opts) {
     const v = g.a[1] + (g.b[1] - g.a[1]) * (mid - g.a[0]) / (g.b[0] - g.a[0]);
     plot.append(h('span.gaplab', { style: `left:${xp(mid)};top:${yp(v)}`, text: g.label }));
   }
-  if (opts.now && opts.now < x1 && opts.now > x0) {
-    const f = ((opts.now - x0) / (x1 - x0) * 100).toFixed(2) + '%';
+  const nowF = opts.now && opts.now < x1 && opts.now > x0 ? (opts.now - x0) / (x1 - x0) : null;
+  for (const b of bounds) {
+    const left = (b.f * 100).toFixed(2) + '%';
+    plot.append(h('div.winbound', { style: `position:absolute;top:0;bottom:0;left:${left};border-left:1.5px solid var(--muted);opacity:0.55;pointer-events:none`, title: b.title }));
+    // a label clear of the "now" label, above the plot
+    if (b.labeled && (nowF === null || Math.abs(nowF - b.f) > 0.06)) {
+      plot.append(h('span.winlab', { style: `position:absolute;top:-18px;left:${left};transform:translateX(-50%);font-size:11px;line-height:14px;color:var(--muted);white-space:nowrap;pointer-events:none`, text: b.label, title: b.title }));
+    }
+  }
+  if (nowF !== null) {
+    const f = (nowF * 100).toFixed(2) + '%';
     plot.append(h('div.nowline', { style: `left:${f}` }), h('span.nowlab', { style: `left:${f}`, text: 'now' }));
   }
+  if (labeled) fitLabels(plot);
   if (runout) {
     const y100 = yp(100), fx = (f) => (f * 100).toFixed(2) + '%';
     // the plot's width is not known until it is laid out: a narrow one (the
@@ -265,6 +304,27 @@ export function limitChart(opts) {
   });
   plot.addEventListener('mouseleave', hideTip);
   return h('div', null, plot, xAxis(timeTicks(x0, x1, 6), x0, x1, left));
+}
+
+// Once laid out (and on every resize), hide the boundary labels that would touch
+// the one before them or the "now" label: how much room a label has depends on the
+// plot's width, known only in the browser.
+function fitLabels(plot) {
+  if (typeof requestAnimationFrame !== 'function') return;
+  const fit = () => {
+    const labs = [...plot.querySelectorAll('span.winlab')];
+    const now = plot.querySelector('span.nowlab');
+    let last = null;
+    for (const el of labs) {
+      el.style.visibility = '';
+      const r = el.getBoundingClientRect();
+      const hits = (o) => o && r.left < o.right + 6 && o.left < r.right + 6;
+      const hide = hits(last) || (now && hits(now.getBoundingClientRect())) || r.left < plot.getBoundingClientRect().left - 8;
+      if (hide) el.style.visibility = 'hidden'; else last = r;
+    }
+  };
+  requestAnimationFrame(fit);
+  if (typeof ResizeObserver === 'function') new ResizeObserver(fit).observe(plot);
 }
 
 // ------------------------------------------------------------------ overview cards
@@ -484,7 +544,7 @@ function windowSection(w, now, days, since) {
   const x1 = Math.max(end, now);
   card.append(limitChart({
     segments: segs,
-    fan: fc ? fc.fan : [], now, x0, x1, height: 180, weekly: true, since, runout: runoutMark(fc, x0, x1, weekly),
+    fan: fc ? fc.fan : [], now, x0, x1, height: 180, weekly: true, kind: w.window, since, runout: runoutMark(fc, x0, x1, weekly),
   }));
   const fit = fitNote(w);
   if (fit) card.append(h('p.note', { text: fit }));
