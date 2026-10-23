@@ -56,9 +56,10 @@ def mixed(tmp_path_factory: pytest.TempPathFactory) -> Path:
             ),
         ]
         _put(ix, _log(project, session), [SessionInfo(session, project), *reqs])
+    sonnet = "claude-sonnet-4-5-20250929"  # m0's main thread logs the alias
     builder = [
-        req("m0", ago(hours=3), "-home-user-p0", "a9", output=3_000),
-        req("m0", ago(minutes=20), "-home-user-p0", "a9", output=3_000),
+        req("m0", ago(hours=3), "-home-user-p0", "a9", model=sonnet, output=3_000),
+        req("m0", ago(minutes=20), "-home-user-p0", "a9", model=sonnet, output=3_000),
     ]
     _put(
         ix,
@@ -178,8 +179,20 @@ def test_every_split_of_the_fitted_line_adds_up_to_it(
             "claude-sonnet-4-5-20250929",
             "claude-haiku-4-5-20251001",
         }
+        # and "What spent it" lists the models by the same names
+        assert {g["key"] for g in d["by_model"]} == set(keys)
+        assert all(g["percent"] is not None for g in d["by_model"])
     if group == "agent":
         assert "builder" in keys and "main" in keys
+
+
+def test_a_session_names_its_models_by_their_price_table_ids(
+    mixed_client: tuple[Client, Path],
+) -> None:
+    c, _ = mixed_client
+    status, d, _ = c.get("/api/session/m0")
+    assert status == 200
+    assert d["session"]["models"] == ["claude-sonnet-4-5-20250929"]  # alias and dated id
 
 
 def test_the_fitted_line_splits_by_category_by_default(client: tuple[Client, Path]) -> None:

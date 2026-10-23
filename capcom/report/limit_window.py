@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta
 from typing import Any
 
-from capcom.cost.prices import canonical, normalize
+from capcom.cost.prices import canonical
 from capcom.limits.accounts import load_known
 from capcom.limits.detail import (
     START_FORMAT,
@@ -163,7 +163,7 @@ def _reply(ctx: Context, d: Detail, split: Split) -> dict[str, Any]:
         for kind, key in (
             ("project", w.names.key(req.project_dir)),
             ("agent", agent),
-            ("model", normalize(req.model)),
+            ("model", model),
             ("session", req.session_id),
         ):
             pct[kind][key] = pct[kind].get(key, 0.0) + p

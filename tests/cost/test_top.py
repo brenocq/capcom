@@ -91,6 +91,20 @@ def test_by_model_and_day() -> None:
     }
 
 
+def test_by_model_names_a_model_by_its_price_table_id() -> None:
+    # Claude Code logs one Sonnet under its alias and its dated id: one row, named as
+    # the website's charts name it
+    idx = FakeIndex(
+        reqs=[
+            req("s1", when=at(0), model="claude-sonnet-4-5", output=M),
+            req("s1", when=at(1), model="claude-sonnet-4-5-20250929", output=M),
+        ]
+    )
+    rows = rows_by("model", idx)
+    assert set(rows) == {"claude-sonnet-4-5-20250929"}
+    assert rows["claude-sonnet-4-5-20250929"].requests == 2
+
+
 def test_days_are_local(monkeypatch: pytest.MonkeyPatch) -> None:
     set_tz(monkeypatch, "UTC")
     assert list(rows_by("day")) == ["2026-10-21", "2026-10-20"]  # newest first

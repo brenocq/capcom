@@ -13,7 +13,7 @@ from typing import TextIO
 from capcom.config import Config
 from capcom.cost.calibrate import TARGET_SPREAD, calibrate
 from capcom.cost.model import price
-from capcom.cost.prices import ZERO_MODEL, is_placeholder, load_prices, normalize
+from capcom.cost.prices import ZERO_MODEL, canonical, is_placeholder, load_prices, normalize
 from capcom.timeline.groups import ProjectNames, temporary_project
 from capcom.types import Calibration, Index, PriceTable, Request
 
@@ -68,12 +68,14 @@ def project_label(project_dir: str) -> str:
 def group_key(
     req: Request,
     by: str,
+    table: PriceTable,
     titles: Mapping[str, str],
     agent_types: Mapping[str, str],
     projects: ProjectNames | None = None,
 ) -> tuple[str, str]:
     """(key, label) of the group `req` belongs to; projects are named by `projects`
-    (capcom.timeline.groups.ProjectNames, as on the website) when given."""
+    (capcom.timeline.groups.ProjectNames, as on the website) when given, models by
+    their price-table id (as on the website)."""
     if by == "project":
         if projects is not None:
             key = projects.key(req.project_dir)
@@ -88,7 +90,7 @@ def group_key(
         kind = agent_types.get(req.agent_id) or "(unknown agent)"
         return kind, kind
     if by == "model":
-        model = normalize(req.model)
+        model = canonical(table, req.model)
         return model, model
     if by == "day":
         day = req.timestamp.astimezone().date().isoformat()  # local time
@@ -111,7 +113,7 @@ def aggregate(
     for req in requests:
         if is_placeholder(req.model):
             continue  # not a model call (same rule as calibrate)
-        key, label = group_key(req, by, titles, agent_types, projects)
+        key, label = group_key(req, by, table, titles, agent_types, projects)
         row = rows.get(key)
         if row is None:
             row = rows[key] = Row(key, label)

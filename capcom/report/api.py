@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 from capcom.config import load_config
 from capcom.cost.model import price
-from capcom.cost.prices import is_placeholder, normalize
+from capcom.cost.prices import canonical, is_placeholder
 from capcom.cost.top import MAIN_THREAD, project_label
 from capcom.report.analysis import Analysis, Unavailable
 from capcom.report.calibration import calibration_json
@@ -954,7 +954,7 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
         cols["output"].append(req.usage.output)
         cols["cache_write"].append(req.usage.cache_write)
         cols["estimated"].append(1 if req.output_estimated else 0)
-        model = normalize(req.model)
+        model = canonical(ctx.table, req.model)
         models[model] = models.get(model, 0) + 1
         if req.effort:
             efforts.add(req.effort)

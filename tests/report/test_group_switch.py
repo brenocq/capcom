@@ -176,8 +176,8 @@ def test_day_chart_splits_by_the_group_in_the_url(tmp_path: Path) -> None:
                 ".querySelectorAll('.bitem .top span:first-child')]"
                 ".map((s) => s.textContent); })()"
             )
-            # (the chart names a model by its price-table id, the list as logged)
-            assert models and len(models) == len(got["legend"])
+            # by the same names: each model's price-table id
+            assert models and sorted(models) == sorted(got["legend"])
             assert all(m.startswith("claude-") for m in models)
 
             chrome.js(

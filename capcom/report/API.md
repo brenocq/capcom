@@ -130,7 +130,9 @@ missing or old. Static files are under `/static/`.
 
 **Group**: Totals plus `key`, `label`, `count` (sessions for projects, models and the
 main thread; spawned agents for an agent type); project groups add `path`, the full
-folder (`~` for home) for a tooltip.
+folder (`~` for home) for a tooltip. A model is named by its price-table id (a session's
+`models` too), as the charts split by model, so a model logged under its alias and its
+dated id is one group.
 
 **Session row**: `session_id, title, project, project_path, project_dir, temporary, git_branch,
 subagents, active_seconds, first, last, peak_context, cache_read_share, usd, requests,
