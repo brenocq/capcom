@@ -1,0 +1,108 @@
+/* Loading placeholders (skeleton.js): outlines that sweep with one shared light,
+   and faint ghosts of the charts to come. Subtle on purpose: the blocks sit one
+   step off the card, the light is soft and passes every 2.4 s. */
+:root, [data-theme="light"] {
+  --sk: #F0EEE6; --sk-sheen: rgba(255, 255, 255, 0.85); --sk-ghost: rgba(31, 30, 29, 0.16); --sk-ghost-fill: rgba(31, 30, 29, 0.045);
+}
+[data-theme="dark"] {
+  --sk: #393937; --sk-sheen: rgba(250, 249, 245, 0.07); --sk-ghost: rgba(250, 249, 245, 0.16); --sk-ghost-fill: rgba(250, 249, 245, 0.04);
+}
+
+/* one band of light across every block: the gradient is laid against the
+   viewport (fixed), and every block's animation runs in the page clock's phase
+   (--sk-t, set by skeleton.js inPhase()) */
+.sk, .sk-bars i, .sk-heat .cell, .sk-dots i {
+  background-color: var(--sk);
+  background-image: linear-gradient(105deg, transparent 44%, var(--sk-sheen) 50%, transparent 56%);
+  background-attachment: fixed; background-repeat: no-repeat; background-size: 250vw 100vh; background-position: 100% 0;
+}
+.sk { display: block; flex: none; max-width: 100%; height: 10px; border-radius: 5px;
+  animation: sk-sweep 2.4s ease-in-out infinite; animation-delay: var(--sk-t, 0s); }
+/* each block takes the height of the text line it stands for (its margins) */
+.sk-label { height: 11px; margin: 3.5px 0; }
+.sk-note { height: 9px; margin: 4px 0; }
+.sk-body { height: 11px; margin: 4px 0; }
+.sk-sub { height: 13px; margin: 4px 0; }
+.sk-h1 { height: 32px; margin: 5px 0 4px; border-radius: 8px; }
+.sk-big { height: 26px; margin: 4.5px 0; border-radius: 7px; }
+.sk-thick { height: 16px; width: 100%; border-radius: 4px; }
+.sk-pill { height: 40px; border-radius: 10px; }
+.sk-round { border-radius: 50%; }
+.sk-dot { width: 8px; height: 8px; border-radius: 50%; }
+.sk-card { min-height: 0; }
+.sk-lines { display: flex; flex-direction: column; min-width: 0; }
+.sk-split { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.sk-story { margin-top: -6px; }
+.sk-col { display: flex; flex-direction: column; gap: 12px; flex: 1 1 320px; min-width: 0; }
+.sk-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.sk-chips .sk-pill { height: 24px; border-radius: 999px; }
+.sk-legend { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+.sk-legend span { display: flex; align-items: center; gap: 6px; }
+.sk-legend i { width: 16px; height: 3px; border-radius: 2px; animation: sk-sweep 2.4s ease-in-out infinite; animation-delay: var(--sk-t, 0s); }
+.sk-brow { display: flex; flex-direction: column; gap: 3px; }
+.sk-track { background: transparent; }
+.sk-track .sk { height: 6px; border-radius: 3px; }
+.sk-table { display: flex; flex-direction: column; }
+.sk-tr { display: flex; align-items: center; gap: 4%; padding: 8px 0; border-bottom: 0.5px solid var(--l10); }
+.sk-tr > .sk { flex: none; margin-left: auto; }
+.sk-th { padding: 10px 0; border-bottom-color: var(--l15); }
+.sk-cell1 { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }
+.sk-th > .sk:first-child { margin-right: auto; }
+.sk-discs { display: flex; flex-direction: column; gap: 22px; padding-top: 14px; border-top: 0.5px solid var(--l15); }
+.sk-disc { display: flex; gap: 12px; align-items: flex-start; }
+.sk-disc .sk-lines { flex: 1; }
+.sk-limtop { display: flex; align-items: center; gap: 18px; }
+.sk-limtop .sk-lines { flex: 1; }
+.sk-sessionhead { display: flex; flex-direction: column; gap: 10px; }
+.sk-live { display: flex; flex-direction: column; gap: 4px; }
+.sk-liverow { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 4px 10px; }
+.sk-liverow .sk-lines { flex: 1; }
+.sk-hour { display: flex; flex-direction: column; gap: 14px; }
+
+/* chart ghosts */
+.sk-chart { display: flex; flex-direction: column; gap: 6px; }
+.sk-plot { position: relative; margin-left: 40px; }
+.sk-ylab { position: absolute; left: -40px; width: 26px; height: 9px; }
+.sk-xaxis { display: flex; justify-content: space-between; gap: 4px; margin-left: 40px; }
+.sk-xaxis .sk { flex: 0 1 auto; min-width: 6px; }
+.sk-controls { min-width: 0; max-width: 100%; }
+.sk-draw { position: absolute; inset: 0; animation: sk-draw 3.6s cubic-bezier(0.45, 0, 0.3, 1) infinite; animation-delay: var(--sk-t, 0s); }
+.sk-draw svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.sk-area { fill: var(--sk-ghost-fill); }
+.sk-curve { fill: none; stroke: var(--sk-ghost); stroke-width: 2; stroke-linejoin: round; }
+.sk-bars { display: flex; align-items: flex-end; gap: 6%; padding: 0 2%; border-bottom: 1px solid var(--l15); }
+.sk-bars i { flex: 1; max-width: 26px; border-radius: 4px 4px 0 0; transform-origin: 50% 100%;
+  animation: sk-sweep 2.4s ease-in-out infinite, sk-rise 2.4s ease-in-out infinite; animation-delay: var(--sk-t, 0s), calc(var(--sk-t, 0s) + var(--i) * -0.12s); }
+.sk-bars.pairs { gap: 0; justify-content: space-around; }
+.sk-bars.pairs i:nth-child(odd) { margin-left: 6%; }
+.sk-bars.pairs i:nth-child(even) { margin-right: 6%; }
+.sk-bars + .sk-xaxis { margin-left: 0; padding: 0 2%; }
+.sk-heat .cell { animation: sk-sweep 2.4s ease-in-out infinite, sk-ripple 2.4s ease-in-out infinite; animation-delay: var(--sk-t, 0s), calc(var(--sk-t, 0s) + (var(--r) + var(--c)) * -0.06s); }
+.sk-heat .hr > span:first-child { display: flex; align-items: center; }
+.sk-dots { position: absolute; inset: 0; }
+.sk-dots i { position: absolute; width: 5px; height: 5px; margin: 0 0 -2px -2px; border-radius: 50%;
+  animation: sk-sweep 2.4s ease-in-out infinite, sk-bob 2.4s ease-in-out infinite; animation-delay: var(--sk-t, 0s), calc(var(--sk-t, 0s) + var(--i) * -0.07s); }
+.sk-ring { flex: none; width: 56px; height: 56px; border-radius: 50%; border: 6px solid var(--sk); border-top-color: var(--sk-ghost);
+  animation: sk-turn 2.4s linear infinite; animation-delay: var(--sk-t, 0s); }
+
+@keyframes sk-sweep { 0% { background-position: 100% 0; } 70%, 100% { background-position: 0% 0; } }
+@keyframes sk-draw {
+  0% { clip-path: inset(0 100% 0 0); opacity: 1; }
+  60% { clip-path: inset(0 0% 0 0); opacity: 1; }
+  86% { clip-path: inset(0 0% 0 0); opacity: 1; }
+  100% { clip-path: inset(0 0% 0 0); opacity: 0; }
+}
+@keyframes sk-rise { 0%, 100% { transform: scaleY(0.55); } 50% { transform: scaleY(1); } }
+@keyframes sk-ripple { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
+@keyframes sk-bob { 0%, 100% { transform: translateY(0); opacity: 0.55; } 50% { transform: translateY(-6px); opacity: 1; } }
+@keyframes sk-turn { to { transform: rotate(360deg); } }
+
+/* the first frame of an outline: plain blocks (skeleton.js inPhase()) */
+[data-sk-wait] .sk, [data-sk-wait] .sk-legend i, [data-sk-wait] .sk-bars i, [data-sk-wait] .sk-heat .cell,
+[data-sk-wait] .sk-dots i, [data-sk-wait] .sk-ring { animation: none; background-image: none; }
+
+/* reduced motion: the same outlines, still; the ghost curve drawn whole */
+@media (prefers-reduced-motion: reduce) {
+  .sk, .sk-legend i, .sk-bars i, .sk-heat .cell, .sk-dots i, .sk-draw, .sk-ring { animation: none; }
+  .sk, .sk-bars i, .sk-heat .cell, .sk-dots i { background-image: none; }
+}

@@ -4,6 +4,7 @@
 import { h, s, api, stamp, sessionHref, forget } from './lib.js';
 import { startRouter, render, go, afterPointer, refreshView } from './router.js';
 import { swapIn } from './morph.js';
+import { liveRows, line, inPhase } from './skeleton.js';
 import { renderOverview } from './overview.js';
 import { renderSpend } from './spend.js';
 import { renderSession } from './session.js';
@@ -100,7 +101,7 @@ function drawSidebar() {
 
 function liveList() {
   const box = h('div.live', null, h('div.side-head', null, h('span', { text: 'Live now' }), h('span', { text: '$/hour' })));
-  if (!liveData) { box.append(h('span.note', { style: 'padding:0 10px', text: 'Loading…' })); return box; }
+  if (!liveData) { box.append(liveRows()); return box; }
   if (liveData.watching === false) {
     // this server never scans, so the index stops at its last update: say that, not "nothing ran"
     const at = liveData.index_updated ? new Date(liveData.index_updated).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null;
@@ -121,15 +122,16 @@ function liveList() {
 }
 
 function footer() {
-  let status = 'Reading the index…';
+  // before the status is in: lines in place of the two notes to come
+  let status = statusData ? h('span', { text: 'Reading the index…' }) : inPhase(h('span.sk-lines', { 'aria-hidden': 'true' }, line('92%', '.sk-note'), line('58%', '.sk-note'), line('86%', '.sk-note'), line('64%', '.sk-note')));
   if (statusData && statusData.index) {
     const d = new Date(statusData.index.updated);
-    status = `Index updated ${stamp(d)} · ${statusData.sessions.toLocaleString('en-US')} sessions · ${(statusData.index.size_bytes / 1e6).toFixed(0)} MB`;
+    status = h('span', { text: `Index updated ${stamp(d)} · ${statusData.sessions.toLocaleString('en-US')} sessions · ${(statusData.index.size_bytes / 1e6).toFixed(0)} MB` });
   }
   const dark = isDark();
   return h('div.foot', null,
     h('div.row', null, icon('M8 11V8a4 4 0 0 1 8 0v3M5 11h14v10H5z', 14), h('span', { text: 'Local and read-only. No network.' })),
-    h('span', { text: status }),
+    status,
     statusData ? h('span', { text: `Prices checked ${statusData.prices_checked}. API-equivalent cost, not your bill.` }) : null,
     h('button.toggle', { type: 'button', onclick: toggleTheme },
       icon(dark ? 'M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4' : 'M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z'),

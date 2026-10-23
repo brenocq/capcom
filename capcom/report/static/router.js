@@ -3,11 +3,13 @@
 // the first data there is, and drawn again as the server's job sends newer
 // partial replies (capcom/report/API.md, "Progressive replies"), each redraw
 // swapped in with its numbers tweening (morph.js). While data loads: the old
-// content dimmed (same page) or skeleton cards (another page), a thin bar at the
-// top of each loading card, and a status line ("Loading 30 days… 62 %").
+// content dimmed (same page) or the target page's outline (another page; its
+// placeholders and chart ghosts are skeleton.js), a thin bar at the top of each
+// loading card, and a status line ("Loading 30 days… 62 %").
 
 import { h, apiHooks, apiState, stopLoads, prefetch, preload, renew, outdate, errorBox, overviewPath, spendPath } from './lib.js';
 import { swapIn } from './morph.js';
+import { skeletonMain, skeletonTail, grow } from './skeleton.js';
 
 const GRACE_MS = 80; // a page drawn within this needs no loading state
 const POLL_MS = 200; // how often the frame looks at the replies still loading
@@ -126,13 +128,15 @@ function release() {
 }
 
 // The page is waiting for its first data on a path: the old content dims (same
-// page), or what the page has drawn so far goes in with skeleton cards below.
+// page), or what the page has drawn so far goes in with the outline of the rest
+// below it.
 function waiting(v, p) {
   const live = document.getElementById('main');
   if (live === p.node) return;
   if (live.hasAttribute('data-skeleton') && p.node.childElementCount) {
     clearTimeout(v.grace);
-    p.node.append(skeletonCards('skel-tail'));
+    v.tailFrom = p.node.childElementCount;
+    p.node.append(skeletonTail(v.r));
     show(v, p.node, true);
   }
 }
@@ -154,9 +158,18 @@ function busyCards(v, node, loading) {
 function show(v, next, provisional = false) {
   const live = document.getElementById('main');
   clearTimeout(v.grace);
-  const fromOld = live !== next && !live.hasAttribute('data-skeleton') && live.childElementCount > 0;
-  if (live !== next) swapIn(live, next, { animate: fromOld || live.hasAttribute('data-skeleton') });
-  if (!provisional) for (const t of next.querySelectorAll(':scope > .skel-tail')) t.remove();
+  const fromSkeleton = live !== next && live.hasAttribute('data-skeleton');
+  const fromOld = live !== next && !fromSkeleton && live.childElementCount > 0;
+  if (live !== next) swapIn(live, next, { animate: fromOld || fromSkeleton });
+  // the real charts grow out of where their ghosts were: the whole page after its
+  // outline, or the parts drawn in place of an outline below them
+  if (fromSkeleton) grow(next);
+  if (!provisional) {
+    const tails = next.querySelectorAll(':scope > .skel-tail');
+    for (const t of tails) t.remove();
+    if (tails.length && v.tailFrom != null) for (const k of [...next.children].slice(v.tailFrom)) grow(k);
+    v.tailFrom = null;
+  }
   next.removeAttribute('data-stale');
   if (!v.shown) arrive(v, next);
   v.shown = true;
@@ -237,19 +250,6 @@ export async function refreshView() {
 
 // ------------------------------------------------------------------ placeholders
 
-function skeletonCards(cls) {
-  const line = (w) => h('span.skel-line', { style: `width:${w}%` });
-  return h(`div.${cls}`, { 'aria-hidden': 'true' },
-    h('div.row-wrap', null, [0, 1, 2].map(() => h('div.card.skel', null, line(40), h('span.skel-line.big', { style: 'width:60%' })))),
-    h('div.card.skel.tall', null, line(30), line(90), line(75), line(82)));
-}
-
-function skeleton(r) {
-  return h('main', { id: 'main', class: 'panel', 'data-skeleton': '', 'aria-busy': 'true' },
-    h('header.head', null, h('div.titles', null, h('h1', { text: LABELS[r.name] || '' }), h('span.skel-line', { style: 'width:220px' }))),
-    skeletonCards('skel-body'));
-}
-
 // Nothing drawn yet after GRACE_MS: dim the old content of the same page, or
 // show the target's skeleton.
 function placeholder(v, samePage) {
@@ -262,7 +262,7 @@ function placeholder(v, samePage) {
     busyCards(v, live, true);
     live.setAttribute('data-indet', '');
   } else {
-    const sk = skeleton(v.r);
+    const sk = skeletonMain(v.r);
     live.replaceWith(sk);
     arrive(v, sk);
   }
