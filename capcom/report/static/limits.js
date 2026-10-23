@@ -295,28 +295,34 @@ export function limitCard(label, w, lim, account) {
   const fit = fitNote(w);
   if (fit) card.append(h('span.note', { text: fit }));
   if (!lim.recording) card.append(notRecording(lim));
-  const q = account && (lim.accounts || []).length > 1 ? `?account=${encodeURIComponent(accountKey(account))}` : '';
-  card.append(h('a.note', { href: '/limits' + q, text: 'Every window, and what spent it →' }));
+  card.append(h('a.note', { href: '/limits', text: 'Every window, and what spent it →' }));
   return card;
 }
 
 // ------------------------------------------------------------------ accounts
 
-// An account's key in the URL (`?account=`) and in the remembered choice: its email,
-// or its id when there is none.
+// An account's key in the remembered choice: its email, or its id when there is none.
 export const accountKey = (a) => a.email || a.id;
 const STORE = 'capcom.limits.account';
 
-// The account the page shows: 'all', or one of `lim.accounts`, from `?account=`, else
-// the choice remembered in this browser; a single account is always itself.
-export function chosenAccount(lim, query) {
+// The account Overview and Limits show: 'all', or one of `lim.accounts`, as last
+// picked in this browser (never in the URL: it holds an email); 'all' when nothing
+// is remembered, storage is off or the account is gone. A single account is always
+// itself.
+export function chosenAccount(lim) {
   const list = lim.accounts || [];
   if (list.length < 2) return list[0] || null;
-  let key = query.get('account');
-  if (key === null) {
-    try { key = localStorage.getItem(STORE); } catch { key = null; }
-  }
+  let key = null;
+  try { key = localStorage.getItem(STORE); } catch (e) { /* storage off */ }
   return list.find((a) => accountKey(a) === key || a.id === key) || 'all';
+}
+
+// Draw the page again for a new choice: the same URL, so the router redraws from
+// the replies it has (app.js renders on `capcom-route`).
+const redraw = () => window.dispatchEvent(new Event('capcom-route'));
+// a choice made in another tab shows here too
+if (typeof window !== 'undefined' && window.addEventListener) {
+  window.addEventListener('storage', (e) => { if (e.key === STORE) redraw(); });
 }
 
 export function accountTabs(lim, chosen) {
@@ -324,8 +330,8 @@ export function accountTabs(lim, chosen) {
   if (list.length < 2) return null;
   const cur = chosen === 'all' ? 'all' : accountKey(chosen);
   const el = seg('Account', [['all', 'All accounts'], ...list.map((a) => [accountKey(a), a.label])], cur, (v) => {
-    try { localStorage.setItem(STORE, v); } catch { /* private window: not remembered */ }
-    setQuery({ account: v === 'all' ? null : v });
+    try { localStorage.setItem(STORE, v); } catch (e) { /* storage off: not remembered */ }
+    redraw();
   });
   el.classList.add('acct');
   for (const b of el.querySelectorAll('button')) b.title = b.textContent;
@@ -374,9 +380,9 @@ export function combinedCard(lim) {
 
 // The Overview's limit cards: the current account's two (or the chosen one's), or
 // with "All accounts" every account's two side by side and the combined card.
-export function limitCards(lim, query) {
+export function limitCards(lim) {
   const list = lim.accounts || [];
-  const chosen = chosenAccount(lim, query);
+  const chosen = chosenAccount(lim);
   const wins = (a) => (a && a.windows) || lim.windows || {};
   const pair = (a, named) => [limitCard('5-hour window', wins(a).five_hour, lim, named ? a : null), limitCard('Weekly limit', wins(a).seven_day, lim, named ? a : null)];
   const out = [];
@@ -489,7 +495,7 @@ export async function renderLimits(main, r) {
     return;
   }
   if (!d.recording) main.append(h('section.card', null, notRecording(d)));
-  const chosen = chosenAccount(d, r.query);
+  const chosen = chosenAccount(d);
   const tabs = accountTabs(d, chosen);
   if (tabs) main.append(h('div.split', null, h('span.label', { text: 'Account' }), tabs));
   const sections = (wins) => ['five_hour', 'seven_day'].filter((k) => wins[k]).map((k) => windowSection(wins[k], now, days, since ? since.getTime() : null));

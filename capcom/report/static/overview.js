@@ -31,7 +31,7 @@ export async function renderOverview(main, r) {
   if (story) main.append(story);
 
   const lim = d.limits || {};
-  main.append(...limitCards(lim, r.query));
+  main.append(...limitCards(lim));
 
   // KPI cards
   // today so far against the previous days with history up to the same time of day

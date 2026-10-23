@@ -516,8 +516,8 @@ everything is that account's. `combined`: before each account's weekly limit,
 a fit); its `usd_left` is the sum of those known; `runs_out_at` is when that sum is
 spent at `pace_usd_per_hour` (all accounts' spend over the last `pace_hours`), null
 with nothing spent or nothing left; `reset_first` is an account whose weekly
-window resets before then. The website's account filter (`?account=` on `/` and
-`/limits`, an email or id) is applied in the browser.
+window resets before then. The website's account filter (Overview and Limits) is applied
+in the browser and kept there (localStorage), never in the URL.
 
 ### `GET /api/checks?days=14`
 
