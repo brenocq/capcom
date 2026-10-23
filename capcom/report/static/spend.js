@@ -4,7 +4,7 @@
 import {
   h, api, usd, tokens, pct, seg, legend, empty, errorBox, setQuery, monthDay, localDate, dayName, hm,
   outputUsd, estimateNote, lowerMark, SERIES, OTHER_COLOR, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor,
-  spikeText, spikeHref, projectChip, storyLine, segBar, tableToggle, tipOn, entityColors, GROUPS, pickedGroup, rememberGroup, spendPath, sessionDot,
+  spikeText, spikeHref, projectChip, storyLine, segBar, tableToggle, tipOn, entityColors, GROUPS, pickedGroup, rememberGroup, spendPath, groupQuery, sessionDot,
 } from './lib.js';
 import { bandChart, dayBars } from './charts.js';
 import { heatCard } from './heatmap.js';
@@ -144,7 +144,7 @@ export async function renderSpend(main, r) {
     const best = rows.reduce((a, b) => (b.total > a.total ? b : a), rows[0]);
     perDay.append(h('div.split', null, h('h2.small', { text: 'Per day' }),
       best && best.total > 0 ? h('span.note', { text: `Highest: ${dayName(best.date)} ${monthDay(best.date)}, ${usd(best.total, 0)}` }) : null));
-    perDay.append(dayBars(rows, members, rows[rows.length - 1].iso));
+    perDay.append(dayBars(rows, members, rows[rows.length - 1].iso, groupQuery(group)));
   } else {
     perDay.append(h('h2.small', { text: 'Per day' }), timelineMissing('The per-day chart'));
   }

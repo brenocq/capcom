@@ -402,6 +402,41 @@ def test_overview_group_switch_reuses_the_cached_reply(index_path: Path) -> None
         assert status == 200 and calls == ["cumulative"] and again == first
 
 
+@pytest.mark.parametrize("day", ["2026-10-21", "2026-10-18"])  # today, and a past day
+def test_day_group_switch_reuses_the_cached_reply(index_path: Path, day: str) -> None:
+    calls: list[str] = []
+
+    def counted(name: str, fn: Any) -> Any:
+        def wrapped(*args: Any, **kw: Any) -> Any:
+            calls.append(name)
+            return fn(*args, **kw)
+
+        return wrapped
+
+    analysis = Analysis(
+        counted("cumulative", capcom.timeline.cumulative),
+        counted("per_step", capcom.timeline.per_step),
+        counted("spikes", _spikes),
+        counted("explain", lambda *a: []),
+        fake_checks,
+    )
+    site = Site(index_path, TABLE, analysis, clock=lambda: NOW, tz=UTC, patience=10)
+    fresh = Site(index_path, TABLE, analysis, clock=lambda: NOW, tz=UTC, cache=None, jobs=None)
+    parts = ["day", day]
+    for client in serve(site):
+        status, first, _ = client.get(f"/api/day/{day}")
+        assert status == 200 and first["group"] == "category"
+        for group in ("project", "model", "agent"):
+            want = json.loads(compute(fresh, "day", parts, {"group": group}, NOW).body)
+            calls.clear()
+            status, got, _ = client.get(f"/api/day/{day}?group={group}")
+            assert status == 200
+            # only the chart is computed again: no spikes, no typical day
+            assert calls == ["cumulative"]
+            assert got == want  # the same reply as one computed whole
+        assert client.get(f"/api/day/{day}?group=nope")[0] == 400
+
+
 def test_cache_keeps_a_stale_stand_in_per_view() -> None:
     cache = ApiCache(max_bytes=1000)
     cache.put(("g1", "d", "spikes", (), ()), 0, b"old")

@@ -254,7 +254,7 @@ const PAGES = {
     head: head(null, [300]),
     body: [
       story(),
-      card('', h('div.sk-split', null, big('200px'), legend(4)), ghostLine(260, 1, 7)),
+      card('', h('div.sk-split', null, title('The day, adding up'), pill('320px')), legend(4), ghostLine(260, 1, 7)),
       h('div.row-wrap', null, card('.grow1', titleSmall('Why it jumped'), discRows(2)), card('.grow1', titleSmall('Where it went'), barRows(5))),
       card('', big('16%'), tableRows(5, 6)),
     ],

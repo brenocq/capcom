@@ -3,12 +3,12 @@
 // sessions. Reached from the per-day bars on Spend.
 
 import {
-  h, api, usd, tokens, legend, empty, longDate, localDate, monthDay, barList, lowerMark, estimateNote,
-  CATEGORY_LABELS, CATEGORY_ORDER,
+  h, api, usd, tokens, seg, legend, empty, setQuery, longDate, localDate, monthDay, barList, lowerMark, estimateNote,
+  CATEGORY_LABELS, CATEGORY_ORDER, GROUPS, pickedGroup, rememberGroup, dayPath, groupQuery,
 } from './lib.js';
 import { bandChart } from './charts.js';
 import { sessionsTable } from './sessions.js';
-import { memberColor, memberLabel, pickSpikes, spikeMarks, spikeList, timelineMissing } from './spend.js';
+import { withColors, pickSpikes, spikeMarks, spikeList, timelineMissing } from './spend.js';
 
 const isoOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const shift = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
@@ -42,15 +42,18 @@ function whyLine(d) {
 }
 
 export async function renderDay(main, r) {
-  const d = await api('day/' + encodeURIComponent(r.arg || ''));
+  const group = pickedGroup(r.query);
+  const d = await api(dayPath(r.arg || '', r.query));
   const date = localDate(d.day);
   const t = d.totals;
   const since = new Date(d.window.since).getTime(), until = new Date(d.window.until).getTime();
 
+  // the day before and after keep the split
   const prev = shift(date, -1), next = shift(date, 1);
+  const keep = groupQuery(group);
   const nav = h('div.controls', null,
-    h('a.link', { href: `/day/${isoOf(prev)}`, text: `← ${monthDay(prev)}` }),
-    d.today ? null : h('a.link', { href: `/day/${isoOf(next)}`, text: `${monthDay(next)} →` }));
+    h('a.link', { href: `/day/${isoOf(prev)}${keep}`, text: `← ${monthDay(prev)}` }),
+    d.today ? null : h('a.link', { href: `/day/${isoOf(next)}${keep}`, text: `${monthDay(next)} →` }));
   const year = date.getFullYear() !== new Date().getFullYear() ? `, ${date.getFullYear()}` : '';
   main.append(h('header.head', null,
     h('div.titles', null, h('h1', { text: longDate(date) + year }),
@@ -63,13 +66,15 @@ export async function renderDay(main, r) {
 
   // the day adding up, with its spikes marked
   const cum = h('section.card', { style: 'padding-bottom:18px' });
-  const head = h('div.split', null, h('h2', { text: 'The day, adding up' }));
+  cum.append(h('div.split', null, h('h2', { text: 'The day, adding up' }),
+    seg('Split by', GROUPS, group, (v) => { rememberGroup(v); setQuery({ group: v === 'category' ? null : v }); })));
+  const head = h('div');
   cum.append(head);
   let picked = null;
   if (d.cumulative && d.cumulative.times.length) {
     const c = d.cumulative;
-    const members = c.members.map((m, i) => ({ ...m, label: memberLabel(m, 'category'), color: memberColor(m, i, 'category'), values: c.values[i] }));
-    head.append(legend(members.map((m) => ({ label: m.label, color: m.color, value: (m.key === 'output' ? lowerMark(t) : '') + usd(m.final, m.final >= 100 ? 0 : 2) })), lowerMark(t) + usd(t.usd, t.usd >= 100 ? 0 : 2)));
+    const members = withColors(c.members, group).map((m, i) => ({ ...m, values: c.values[i] }));
+    head.append(legend(members.map((m) => ({ label: m.label, color: m.color, value: (group === 'category' && m.key === 'output' ? lowerMark(t) : '') + usd(m.final, m.final >= 100 ? 0 : 2) })), lowerMark(t) + usd(t.usd, t.usd >= 100 ? 0 : 2)));
     picked = pickSpikes(d.spikes, since, until);
     cum.append(bandChart({ times: c.times, members, total: c.total, start: since, end: until, height: 300, left: 52, marks: spikeMarks(picked) }));
   } else if (d.cumulative) {

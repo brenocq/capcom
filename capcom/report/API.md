@@ -274,16 +274,21 @@ over the window, null for a cell without spend.
 `temporary_sessions`; together they are `/api/sessions`' `total` for the same `days`
 (whose `temporary` counts the same temporary sessions).
 
-### `GET /api/day/<YYYY-MM-DD>`
+### `GET /api/day/<YYYY-MM-DD>?group=category|project|model|agent`
 
 One local day, the page a bar of Spend's per-day chart opens: what it cost against a
-typical day, and where it went. 400 for a malformed date, 404 for a day not yet come.
+typical day, and where it went. 400 for a malformed date or an unknown `group`, 404 for
+a day not yet come. `group` (default `category`, the same names as `/api/spend`) splits
+the cumulative chart only; as for Overview, `capcom serve` makes the reply for one
+group from its cached reply for another, computing only that chart again over the
+cached reply's own window.
 
 ```
 {day, today, window: {since, until},  # until: the next midnight, or now for today
  totals, sessions_count, temporary_sessions,
  typical: {days, of_days, usd, categories: {cache_read, cache_write, output, input}} | null,
- cumulative: Cumulative | null,       # by category, 10-minute steps
+ cumulative: Cumulative | null,       # by `group`, 10-minute steps, top 6
+ group,
  spikes: Spikes | null,
  by_project: [Group + {typical_usd}], by_agent: [Group], by_model: [Group],
  sessions: [Session row] (10 costliest),
