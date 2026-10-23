@@ -277,6 +277,36 @@ def test_refuses_without_the_token(fx: Fixture) -> None:
     assert len(fx.marks()) == 1
 
 
+def test_a_restart_needs_the_new_token_from_a_fresh_page(fx: Fixture) -> None:
+    """An open page keeps the token of the launch it was loaded from: after a restart
+    (a new token and launch id on the same port) its write is refused, /api/version
+    says the launch changed, and `/` read again gives the token that writes."""
+    _, page, _ = fx.client.get("/checks")
+    old = re.search(rb'<meta name="capcom-token" content="([^"]+)">', page)
+    assert old
+    _, v0, _ = fx.client.get("/api/version")
+    assert v0["launch"] == fx.site.launch and v0["launch"] != fx.site.token
+    fx.site.token, fx.site.launch = "n" * 43, "0123456789ab"  # what a restart makes
+    body = {"action": "mark", "kind": TOOL_WAIT, "scope": "all", "applied_on": "2026-10-21"}
+    status, d = fx.post(body, token=old.group(1).decode())
+    assert (status, d["error"]) == (403, "bad_token") and "reload" in d["message"].lower()
+    _, v1, _ = fx.client.get("/api/version")
+    assert v1["launch"] != v0["launch"]
+    _, page, _ = fx.client.get("/")
+    new = re.search(rb'<meta name="capcom-token" content="([^"]+)">', page)
+    assert new and new.group(1).decode() == fx.site.token
+    # the fresh token alone is not enough: still this server's own origin only
+    assert fx.post(body, token=new.group(1).decode(), origin="http://evil.example")[0] == 403
+    assert fx.marks() == []
+    assert fx.post(body, token=new.group(1).decode())[0] == 200
+    assert len(fx.marks()) == 1
+
+
+def test_launch_ids_differ_and_are_not_the_token(index_path: Path) -> None:
+    a, b = Site(index_path, TABLE, FAKE), Site(index_path, TABLE, FAKE)
+    assert a.launch != b.launch and a.launch not in (a.token, b.token)
+
+
 def test_refuses_other_origins(fx: Fixture) -> None:
     body = {"action": "mark", "kind": TOOL_WAIT, "scope": "all", "applied_on": "2026-10-21"}
     for origin in ("http://evil.example", f"http://127.0.0.1:{fx.port + 1}", "null"):

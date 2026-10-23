@@ -327,6 +327,7 @@ class Site:
     changes_path: Path | None = None  # the marks; None: capcom.changes' own file
     read_only: bool = False  # True: no POST /api/changes, no buttons that write
     token: str = field(default_factory=lambda: secrets.token_urlsafe(32))  # per launch
+    launch: str = field(default_factory=lambda: secrets.token_hex(6))  # not the token
     write_lock: threading.Lock = field(default_factory=threading.Lock)
     day_cache: Path | None = None  # capcom.changes' finished days; None: not kept
     agent_dirs: Sequence[Path] | None = None  # where noticed() reads; None: its own
@@ -688,7 +689,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         token = self.headers.get(TOKEN_HEADER) or ""
         if not hmac.compare_digest(token.encode(), site.token.encode()):
-            self._error(HTTPStatus.FORBIDDEN, "bad_token", "Reload the page and try again.")
+            self._error(
+                HTTPStatus.FORBIDDEN,
+                "bad_token",
+                "The page's write token is not this launch's: reload the page.",
+            )
             return
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
         if ctype != "application/json":
@@ -900,8 +905,9 @@ class Handler(BaseHTTPRequestHandler):
 def version(site: Site) -> dict[str, Any]:
     """What a page compares every 30 s to know its data changed (`/api/version`):
     short digests of the index's generation, the usage samples' stamp and the marks'
-    stamp, and when the index was last written. A few stat calls and one PRAGMA on
-    a held connection: no index is opened, nothing is computed."""
+    stamp, when the index was last written, and this launch's id (a restart changes
+    it, so an open page knows to fetch the new write token). A few stat calls and one
+    PRAGMA on a held connection: no index is opened, nothing is computed."""
     watch = site.cache.watch(site.index_path) if site.cache is not None else None
     gen = generation(site.index_path, watch)
 
@@ -921,6 +927,7 @@ def version(site: Site) -> dict[str, Any]:
         "samples": digest(_limits_stamp(site.state_dir)),
         "marks": digest(_changes_stamp(site)),
         "updated": updated,
+        "launch": site.launch,
     }
 
 

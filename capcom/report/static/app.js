@@ -13,6 +13,7 @@ import { renderSpikes } from './spikes.js';
 import { renderChecks } from './checks.js';
 import { renderLimits } from './limits.js';
 import { renderChanges, renderChange } from './changes.js';
+import { freshToken } from './marks.js';
 
 const ICON = {
   overview: 'M3 12h4l3-8 4 16 3-8h4',
@@ -275,7 +276,8 @@ async function refreshStatus() {
 // Every 30 s while the tab is visible (and at once when it shows again): the live
 // list, and /api/version, whose parts say what changed on the server. When a part
 // the current view reads changed, the view is fetched again and swapped in place
-// (router.js refreshView), and the sidebar's "Index updated" moves on.
+// (router.js refreshView), and the sidebar's "Index updated" moves on. A new
+// `launch` is a restarted server: its write token is new too (marks.js).
 const READS = { overview: ['index', 'samples', 'marks'], limits: ['index', 'samples'], checks: ['index', 'marks'], changes: ['index', 'marks'] };
 let seen = null;
 
@@ -286,6 +288,7 @@ async function watchData() {
   const before = seen;
   seen = v;
   if (!before) return;
+  if (v.launch !== before.launch) freshToken();
   if (v.updated && statusData && statusData.index && statusData.index.updated !== v.updated) {
     statusData.index.updated = v.updated;
     drawSidebar();
