@@ -22,7 +22,7 @@ from chrome import Chrome
 
 W, H = 1280, 640
 INSTALL = "uv tool install git+https://github.com/brenocq/capcom"
-# The banner's left part, in its own units: the mark, "capcom" and the subtitle.
+# The banner's left part, in its own units: the mark, "capcom", Roger and the subtitle.
 CROP = (10, 26, 488, 148)  # x, y, w, h
 # The demo still: a 1240 x 845 frame (in CSS pixels; demo/frame.html) whose window
 # sits at (40, 22), 1160 wide, its title bar and screen 34 + 720 tall.
@@ -56,7 +56,8 @@ body {{
 }}
 .left {{ position: absolute; left: 52px; top: 0; bottom: 0; width: {bw}px; display: flex;
   flex-direction: column; justify-content: center; gap: 34px; }}
-.left svg {{ width: {bw}px; height: auto; display: block; }}
+.left > svg {{ width: {bw}px; height: auto; display: block; }}
+.left .say {{ display: none; }}
 .install {{ align-self: flex-start; margin-left: 10px; padding: 11px 16px; border-radius: 10px;
   background: rgba(255, 255, 255, .06); border: 1px solid rgba(255, 255, 255, .10);
   color: #e6edf3; white-space: nowrap;

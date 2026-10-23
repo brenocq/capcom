@@ -1,5 +1,5 @@
 <div align="center">
-  <img alt="capcom: a radio-signal mark and the word capcom beside a two-week spend chart drawing itself, with numbered spike markers. Mission control for your Claude Code spend." src="https://github.com/brenocq/capcom/raw/assets/banner.svg" width="880">
+  <img alt="capcom: a radio-signal mark, the word capcom and Roger, a terracotta capsule in mission-control headphones, beside a two-week spend chart drawing itself, with numbered spike markers; Roger waves and says how much a week the checks would save. Mission control for your Claude Code spend." src="https://github.com/brenocq/capcom/raw/assets/banner.svg" width="880">
 
   <a href="#install">Install</a> · <a href="#what-you-get">What you get</a> · <a href="#commands">Commands</a> · <a href="#faq">FAQ</a>
 
@@ -78,7 +78,7 @@ that cost you the most, with the change to make.
 
 | Command | What it does |
 | --- | --- |
-| `capcom serve` | The website on 127.0.0.1 (`--open` opens it); rescans the logs in the background. Its Ask Claude chat explains a card in a few plain words (`--no-ask` turns it off). |
+| `capcom serve` | The website on 127.0.0.1 (`--open` opens it); rescans the logs in the background. Its Ask Claude chat, behind Roger in the corner, explains a card in a few plain words (`--no-ask` turns it off). |
 | `capcom scan` | Reads new log lines into the index. |
 | `capcom top` | What changed, then totals by project, session, agent type, model or day (`--by`). |
 | `capcom spikes` | What changed, then each spend spike with its cause. |
@@ -203,6 +203,20 @@ status line, or none. From those samples and your own requests, capcom fits what
 a percent of each window costs and forecasts where each will be at its reset,
 with an 80 % range. Usage from other machines or claude.ai counts toward the
 limits but is not in the logs, so it shows up as fit error.
+
+</details>
+
+<details>
+<summary><b>Who is Roger?</b></summary>
+<br>
+
+capcom's mascot: the terracotta capsule in mission-control headphones in the
+banner (in mission control, the CAPCOM is the one voice that talks to the crew).
+On the website he waves from the round button in the corner, which opens the
+Ask Claude chat: ask about the page, or press Explain on a dense card, and he
+answers in a few plain words through your own `claude` CLI, sent only the
+page's name and that card's numbers and labels. `capcom serve --no-ask` sends
+him off duty.
 
 </details>
 

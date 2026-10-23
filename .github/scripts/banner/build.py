@@ -1,15 +1,18 @@
-"""The README banner: capcom's mark and wordmark beside a spend chart drawing itself.
+"""The README banner: capcom's mark, wordmark and Roger beside a spend chart drawing itself.
 
     python .github/scripts/banner/build.py <data.json> <out-dir>
 
 <data.json> is demo/data.py's output (capcom run on the synthetic logs). Writes
 <out-dir>/banner.svg, 880 x 200: the radio-signal mark pulsing like a
-transmission, "capcom" as outlines (wordmark.py, no web font), the subtitle in
-the system font, and the two weeks' cumulative spend by project in the
-website's band style, drawing in from the left while the three largest
-spikes' numbered markers pop onto the total line as it reaches them, each on
-the steep step it explains; the total is labeled right of its end, inside the
-picture.
+transmission, "capcom" as outlines (wordmark.py, no web font), Roger (the
+website's mascot, read from its own code by roger.py) standing on the
+wordmark's baseline, the subtitle in the system font, and the two weeks'
+cumulative spend by project in the website's band style, drawing in from the
+left while the three largest spikes' numbered markers pop onto the total line
+as it reaches them, each on the steep step it explains; the total is labeled
+right of its end, inside the picture. Roger blinks while the chart draws, then
+waves once with the website's own wave and says, in a chat bubble like his
+replies on the website, what the checks would save a week.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import roger
 from svg import bands, eased_at, keyframes, mark, r, series_colors, spike_pins, svg, usd
 from wordmark import GLYPHS, UPM
 
@@ -29,6 +33,10 @@ LOOP = 10.0
 DRAW = (0.5, 4.8)  # the chart draws in over these seconds
 FADE = (9.2, 9.7)  # and fades out before the loop restarts
 SUBTITLE = "Mission control for your Claude Code spend"
+ROGER = (409, 80)  # left edge and width of Roger, standing on the wordmark's baseline
+BLINK = 2.6  # Roger blinks while the chart draws,
+WAVE = 5.1  # then waves once it is drawn,
+SAY = 5.5  # and his bubble pops up, gone with the chart's fade.
 
 
 def wordmark(x: float, baseline: float, size: float, tracking: float = -0.01) -> tuple[str, float]:
@@ -53,13 +61,29 @@ def pulse(peaks: list[float], lag: float) -> list[tuple[float, str]]:
     return frames
 
 
+def bubble(x: float, y: float, text: str) -> tuple[float, str]:
+    """A chat bubble like Roger's replies on the website (ask.css .askmsg.bot: the card
+    color, a hairline border, round but for the corner by him) with its lower left
+    corner at (x, y). Returns its width and markup."""
+    w, h, rr, rs = 9 + 7.3 * len(text), 26, 12, 4
+    d = (
+        f"M{r(x + rs)} {r(y)}H{r(x + w - rr)}a{rr} {rr} 0 0 0 {rr}-{rr}V{r(y - h + rr)}"
+        f"a{rr} {rr} 0 0 0-{rr}-{rr}H{r(x + rr)}a{rr} {rr} 0 0 0-{rr} {rr}V{r(y - rs)}"
+        f"a{rs} {rs} 0 0 0 {rs} {rs}Z"
+    )
+    return w, (
+        f'<g class="say"><path class="surface" d="{d}"/>'
+        f'<text class="said" x="{r(x + w / 2)}" y="{r(y - 8.5)}">{text}</text></g>'
+    )
+
+
 def build(data: dict, out: Path) -> Path:
     cum = data["spend_project"]["cumulative"]
     times = [t / 1000 for t in cum["times"]]
     members = cum["values"]
     total = cum["total"]
     colors = series_colors([m["label"] for m in cum["members"]])
-    box = (506, 34, 272, 132)  # leaves room right of the plot for the total's label
+    box = (516, 34, 266, 132)  # leaves room right of the plot for the total's label
     ymax = max(total) * 1.04
     defs, chart, points = bands(times, members, total, colors, box, ymax, "b")
     x0, y0, w, h = box
@@ -146,9 +170,45 @@ def build(data: dict, out: Path) -> Path:
         f'width="{w + 6}" height="{h + 34}"/></clipPath>'
     )
     word, _ = wordmark(104, 108, 88)
+
+    # Roger on the baseline, right of the wordmark, his raised hand toward the chart.
+    rx, rw = ROGER
+    vx, vy, vw, _ = roger.VIEWBOX
+    k = rw / vw
+    top = 108 - (roger.feet() - vy) * k  # his body's bottom on the baseline
+    weekly = round(data["checks"]["total"]["usd_per_week"])
+    said = f"Up to ${weekly}/wk to save"
+    _, say = bubble(rx + (37 - vx) * k, top + (9.5 - vy) * k, said)
+    arm = roger.on_loop("arm", [WAVE])
+    eyes = roger.on_loop("eyes", [BLINK, WAVE])
+    _, _, ease = roger.motion("arm")
+    css += [
+        roger.theme_css(),
+        f".rg-arm{{animation:rg-arm 10s {ease} infinite}}",
+        keyframes("rg-arm", LOOP, arm),
+        f".rg-eyes{{animation:rg-eyes 10s {ease} infinite}}",
+        keyframes("rg-eyes", LOOP, eyes),
+        ".said{fill:var(--fg);font-size:13px;font-weight:600;text-anchor:middle}",
+        ".say{transform-box:fill-box;transform-origin:0 100%;animation:say 10s infinite}",
+        keyframes(
+            "say",
+            LOOP,
+            [
+                (0, "transform:scale(0);opacity:1"),
+                (SAY, "transform:scale(0);opacity:1"),
+                (SAY + 0.18, "transform:scale(1.08);opacity:1"),
+                (SAY + 0.34, "transform:scale(1);opacity:1"),
+                (FADE[0], "transform:scale(1);opacity:1"),
+                (FADE[1], "transform:scale(1);opacity:0"),
+                (LOOP, "transform:scale(1);opacity:1"),
+            ],
+        ),
+    ]
     body = [
         mark(52, 84, 68, "m"),
         word,
+        roger.group(rx, top, rw),
+        say,
         f'<text class="sub" x="106" y="152">{SUBTITLE}</text>',
         '<g class="chart">',
         f'<line class="grid" x1="{x0}" y1="{y0 + h + 0.5}" x2="{x0 + w}" y2="{y0 + h + 0.5}" '
@@ -161,9 +221,10 @@ def build(data: dict, out: Path) -> Path:
         "</g>",
     ]
     label = (
-        "capcom: a radio-signal mark and the word capcom, beside a two-week spend chart "
-        "drawing itself with numbered spike markers. Mission control for your Claude "
-        "Code spend."
+        "capcom: a radio-signal mark, the word capcom and Roger, a terracotta capsule in "
+        "mission-control headphones, beside a two-week spend chart drawing itself with "
+        f"numbered spike markers; Roger waves and says: {said}. Mission control for your "
+        "Claude Code spend."
     )
     path = out / "banner.svg"
     path.write_text(svg(W, H, label, "".join(css), "".join(body), defs))
