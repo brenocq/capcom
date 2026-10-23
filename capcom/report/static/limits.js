@@ -2,7 +2,7 @@
 // (the reading, the forecast fan) and the Limits page (each window's sawtooth over
 // time, and what spent each window by project). Data from /api/limits.
 
-import { h, s, api, usd, tokens, seg, empty, setQuery, hm, monthDay, dayName, showTip, hideTip, SERIES, OTHER_COLOR } from './lib.js';
+import { h, s, api, usd, tokens, seg, empty, setQuery, hm, monthDay, dayName, showTip, hideTip, entityColors, segBar, tableToggle } from './lib.js';
 import { timeTicks, xAxis } from './charts.js';
 
 let uid = 0;
@@ -335,28 +335,36 @@ function windowSection(w, now, days, since) {
     card.append(h('h3', { text: 'What 1% costs, by model and token type' }));
     card.append(h('div.blist', null, w.fit.weights.slice(0, 8).map((x) => h('div.bitem', null, h('div.top', null,
       h('span', { text: `${x.model.replace(/^claude-/, '')} ${x.category.replace('_', ' ')}` }),
-      h('span.mono', { text: `${tokens(1 / x.percent_per_mtok * 1e6)} tokens` }))))));
+      h('span.mono', { text: `${tokens(Math.round(1 / x.percent_per_mtok * 1e6))} tokens` }))))));
   }
-  // what spent each window, newest first: one stacked bar per window, a color per project
+  // what spent each window, newest first: one bar per window, a color per project
+  // (the same project keeps its color in every window); each part's dollars and
+  // share of the limit on hover, all of them in the table
   const spent = w.segments.filter((sg) => sg.by_project && sg.by_project.length).slice(0, weekly ? 3 : 6);
   if (spent.length) {
-    const colors = new Map();
-    const colorOf = (name) => {
-      if (name === '(other)') return OTHER_COLOR;
-      if (!colors.has(name)) colors.set(name, SERIES[colors.size % SERIES.length]);
-      return colors.get(name);
-    };
+    const names = [...new Set(spent.flatMap((sg) => sg.by_project.map((p) => p.project)))];
+    const colors = entityColors(names);
+    const order = names.filter((n) => n !== '(other)').concat(names.includes('(other)') ? ['(other)'] : []);
     const rows = h('div.blist');
+    const table = [];
     for (const sg of spent) {
       const from = sg.start ? `${monthDay(new Date(sg.start))} ${hm(new Date(sg.start))}` : '';
       const to = sg.reset && sg.resets_at ? hm(new Date(sg.resets_at)) : 'now';
+      const span = `${from} → ${to}`;
       const total = sg.usd || 1e-9;
+      const parts = sg.by_project.map((p) => ({
+        color: colors.get(p.project), share: p.usd / total, title: p.project,
+        rows: [{ label: 'Spent', value: usd(p.usd) }, { label: 'Of the window', value: pctText(p.usd / total * 100, 1) },
+          p.percent === null ? null : { label: 'Of the limit', value: '≈' + pctText(p.percent, 1) }].filter(Boolean),
+      }));
       rows.append(h('div.bitem', null,
-        h('div.top', null, h('span', { text: `${from} → ${to} · peak ${pctText(sg.peak)}${sg.hit_limit ? ' · limit hit' : ''}` }), h('span.mono', { text: usd(sg.usd) })),
-        h('div.stackbar', { 'aria-hidden': 'true' }, sg.by_project.map((p) => h('span', { style: `width:${(p.usd / total * 100).toFixed(2)}%;background:${colorOf(p.project)}` }))),
-        h('span.note', { text: sg.by_project.map((p) => `${p.project} ${usd(p.usd)}${p.percent === null ? '' : ` (≈${pctText(p.percent, 1)})`}`).join(' · ') })));
+        h('div.top', null, h('span', { text: `${span} · peak ${pctText(sg.peak)}${sg.hit_limit ? ' · limit hit' : ''}` }), h('span.mono', { text: usd(sg.usd) })),
+        segBar(parts, { aria: `${span}: ${usd(sg.usd)}` })));
+      for (const p of sg.by_project) table.push([span, p.project, usd(p.usd), p.percent === null ? '' : '≈' + pctText(p.percent, 1)]);
     }
-    card.append(h('h3', { text: 'What spent each window' }), rows);
+    card.append(h('h3', { text: 'What spent each window' }),
+      h('div.legend', { style: 'margin:0 0 10px' }, order.map((n) => h('span', null, h('i', { style: `background:${colors.get(n)}` }), n))),
+      rows, tableToggle(['Window', 'Project', 'Spent', 'Of the limit'], table));
   }
   return card;
 }
