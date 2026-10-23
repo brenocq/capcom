@@ -1,7 +1,7 @@
 // The frame: sidebar (navigation, session search, live sessions, index status,
 // theme toggle) and a router from the URL path to a page.
 
-import { h, s, api, stamp, sessionHref, sessionDot, forget } from './lib.js';
+import { h, s, api, stamp, sessionHref, sessionColor, forget } from './lib.js';
 import { startRouter, render, go, afterPointer, refreshView } from './router.js';
 import { swapIn } from './morph.js';
 import { renderOverview } from './overview.js';
@@ -115,8 +115,9 @@ function liveList() {
     const agents = sn.agents_active ? `${sn.agents_active} agent${sn.agents_active > 1 ? 's' : ''}` : null;
     const sub = [sn.title ? sn.project : null, agents].filter(Boolean).join(' · ');
     box.append(h('a', { href: sessionHref(sn.session_id), title: `${sn.title || sn.project}: last record ${stamp(new Date(sn.last_seen))}` },
-      h('span', { class: hot ? 'dot hot' : 'dot' }),
-      h('span.name', null, h('span', null, sessionDot(sn.color), sn.title || sn.project), sub ? h('span.note', { text: sub }) : null),
+      // the session's own color (/color) when it has one, else green, orange for the top spender
+      h('span', { class: hot ? 'dot hot' : 'dot', style: sessionColor(sn.color) ? `background:${sessionColor(sn.color)}` : null }),
+      h('span.name', null, h('span', { text: sn.title || sn.project }), sub ? h('span.note', { text: sub }) : null),
       h('span', { class: hot ? 'rate hot' : 'rate', text: sn.usd_per_hour.toFixed(2) })));
   }
   return box;
