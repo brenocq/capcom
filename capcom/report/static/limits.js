@@ -2,7 +2,7 @@
 // (the reading, the forecast fan) and the Limits page (each window's sawtooth over
 // time, and what spent each window by project). Data from /api/limits.
 
-import { h, s, api, usd, tokens, seg, empty, setQuery, hm, monthDay, dayName, showTip, hideTip, entityColors, segBar, tableToggle } from './lib.js';
+import { h, s, api, usd, tokens, seg, empty, setQuery, hm, monthDay, dayName, showTip, hideTip, entityColors, segBar, tableToggle, labelSpan } from './lib.js';
 import { timeTicks, xAxis } from './charts.js';
 
 let uid = 0;
@@ -589,7 +589,7 @@ function windowSection(w, now, days, since) {
       for (const p of sg.by_project) table.push([span, p.project, usd(p.usd), p.percent === null ? '' : '≈' + pctText(p.percent, 1)]);
     }
     card.append(h('h3', { text: 'What spent each window' }),
-      h('div.legend', { style: 'margin:0 0 10px' }, order.map((n) => h('span', null, h('i', { style: `background:${colors.get(n)}` }), n))),
+      h('div.legend', { style: 'margin:0 0 10px' }, order.map((n) => h('span', null, h('i', { style: `background:${colors.get(n)}` }), labelSpan(n)))),
       rows, tableToggle(['Window', 'Project', 'Spent', 'Of the limit'], table));
   }
   return card;

@@ -483,10 +483,28 @@ export function seg(label, options, current, onPick) {
     }, text)));
 }
 
+// A label short enough for a legend, a bar or a chip: past `max` characters it
+// keeps the start and the last folder (or the end) around a middle "…", so a
+// deep path still reads as where it starts and which folder it is.
+export function clipLabel(text, max = 40) {
+  if (text.length <= max) return text;
+  const slash = text.lastIndexOf('/', text.length - 2);
+  const last = slash >= 0 ? text.slice(slash) : '';
+  const tail = last && last.length <= max - 12 ? last : text.slice(-Math.floor((max - 1) / 2));
+  return text.slice(0, max - 1 - tail.length) + '…' + tail;
+}
+
+// A label as a span, shortened by clipLabel, with the full text as its title
+// when it was shortened.
+export function labelSpan(text, max = 40) {
+  const shown = clipLabel(text, max);
+  return h('span.lbl', { text: shown, title: shown === text ? null : text });
+}
+
 export function legend(items, total) {
   return h('div.legend', null,
     total ? h('span.total', null, h('i', { style: 'background:var(--text)' }), 'Total ', h('em', null, total)) : null,
-    items.map((it) => h('span', null, h('i', { style: `background:${it.color}` }), it.label, ' ', h('em', null, it.value))));
+    items.map((it) => h('span', null, h('i', { style: `background:${it.color}` }), labelSpan(it.label), ' ', h('em', null, it.value))));
 }
 
 // Bars, one per row: the label and the amount stay in sight; the row's note
@@ -507,7 +525,7 @@ export function barList(rows, valueOf, noteOf) {
       r.path && r.path !== r.label ? { note: r.path } : null,
     ].filter(Boolean);
     return tipOn(h('div.bitem', null,
-      h('div.top', null, h('span', { text: r.label }), h('span.mono', null, usd(v))),
+      h('div.top', null, labelSpan(r.label), h('span.mono', null, usd(v))),
       h('div.track', null, h('div', { style: `width:${(v / max * 100).toFixed(1)}%;background:${color}` }))), r.label, tipRows);
   }));
 }
@@ -625,8 +643,9 @@ export function spikeHref(key, startMs, days) {
 export function projectChip(it, onPick) {
   if (!it || !it.project) return null;
   const title = it.project_path && it.project_path !== it.project ? `Project ${it.project_path}` : `Project ${it.project}`;
-  if (!onPick) return h('span.tag.proj', { text: it.project, title });
-  return h('button.tag.proj', { type: 'button', text: it.project, title: `${title}: show its spikes only`, onclick: (e) => { e.preventDefault(); e.stopPropagation(); onPick(it.project); } });
+  const text = clipLabel(it.project);
+  if (!onPick) return h('span.tag.proj', { text, title });
+  return h('button.tag.proj', { type: 'button', text, title: `${title}: show its spikes only`, onclick: (e) => { e.preventDefault(); e.stopPropagation(); onPick(it.project); } });
 }
 
 // The "what changed" line (/api/overview `regime`): the level the daily spend rose

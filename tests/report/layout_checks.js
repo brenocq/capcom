@@ -210,7 +210,8 @@
       // the full text must be readable somewhere: a title or label holding it
       const host = t.el.closest('[title], [aria-label]');
       const full = host && (host.getAttribute('title') || '') + ' ' + (host.getAttribute('aria-label') || '');
-      if (!full || !full.includes(t.el.textContent.trim().slice(0, 24))) add('truncated-no-title', t.el, '');
+      // a label shortened in the middle (lib.js clipLabel) is checked by its start
+      if (!full || !full.includes(t.el.textContent.trim().split('…')[0].slice(0, 24))) add('truncated-no-title', t.el, '');
     }
   }
 
