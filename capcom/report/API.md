@@ -199,8 +199,8 @@ true while serve's first scan has not finished: totals may be partial until then
 
 ### `GET /api/version`
 
-`{index, samples, marks, updated, launch}`: short digests of the index's generation, the
-usage samples' stamp and the marks file's stamp, when the index was last written, and a
+`{index, samples, marks, updated, launch}`: short digests of the index's generation
+(which, once it moved, holds a minute while the scan keeps writing), the usage samples' stamp and the marks file's stamp, when the index was last written, and a
 random id of this launch of `capcom serve` (not the write token). The pages
 ask for it every 10 s while the tab is visible and redraw the view they show when a part
 it reads changed (the index for every view; the samples for Overview and Limits; the
