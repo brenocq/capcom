@@ -524,6 +524,8 @@ READY = """new Promise((done) => {
     const main = document.getElementById('main');
     const ok = !window.__stale && document.readyState === 'complete' && main
       && main.childElementCount && !main.querySelector(':scope > p.loading')
+      && !main.hasAttribute('data-skeleton') && !main.hasAttribute('data-stale')
+      && !document.querySelector('.loadstatus:not([hidden]), #main .card[aria-busy="true"]')
       && !document.body.textContent.includes('Reading the index…');
     if (ok || Date.now() - t0 > 15000) setTimeout(() => done(!!ok), 400); else setTimeout(tick, 80);
   };

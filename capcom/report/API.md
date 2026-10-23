@@ -14,6 +14,47 @@ numbers, such as "the last hour", move with the clock alone) and the cache holds
 most 32 MB of encoded replies, least recently used out first. `status` and `live` are
 never cached; errors are never cached.
 
+### Progressive replies
+
+A reply that is not cached is computed as a job, off the request's thread, keyed like
+the cache (two requests for the same view share one job). When the job is done within
+0.3 s the request gets the normal `200`. Otherwise it gets `202 Accepted`:
+
+```
+{"status": "computing", "job": id, "progress": 0..1,
+ "source": "chunks" | "stale" | null, "partial": <reply so far> | null}
+```
+
+`partial` has the same shape as the final reply, so a page can draw either. With
+`source: "chunks"` it is this job's reply so far (`spikes`: the whole window's spikes,
+count, excess and projects, with the causes and listed spikes of the sessions explained
+so far, the sessions of the largest spikes first); with `"stale"` it is the last reply
+of the same view from before the index changed (or from an earlier day). The client
+polls the same URL with `&job=<id>`; a poll waits on the server (at most 0.5 s) until
+the job has a newer partial reply or ends, and gets `202` with newer progress and
+partial replies, then the final `200` (or the endpoint's error). `progress` never goes
+back; between the job's own steps it is estimated from how long the same view took last
+time. A `job` the server no longer knows is ignored: the request is answered as if it
+were the first. When the index's generation changes, a background job is dropped,
+while a page's job finishes the reply its page polls for (its `job` keeps being
+followed; a request without it starts a new job on the new data). A job stops after 120 s (the poll gets `504 {"error": "timeout"}`), and
+runs at low priority once no page polled it for 2.5 s. `status` and `live` are always
+answered at once.
+
+A request with the header `X-Capcom-Priority: low` (a page's prefetch, on a hover) is
+background work: its job runs at low priority and its polls do not lift it; the same
+request without the header (the click) lifts the same job to a page's priority.
+
+At most 3 jobs compute at once. Background work (low-priority jobs, and the warmer)
+waits while any page's request or job is in flight, and for 0.5 s after the last one,
+so a click never shares the CPU with it. The warmer computes the views pages asked for
+in the last 30 minutes (newest first) and then every page's default view (Overview's
+and Spend's split by the group a page asked for last), after startup
+and whenever the index changes, in a child process of its own (`capcom.report.worker`),
+which is stopped (SIGSTOP) while a page needs the CPU and continued after; it rests
+three times as long as each reply took (about a quarter of a core at most), and it
+stops after 30 minutes without a page request.
+
 The server keeps the index fresh itself: an incremental scan (`run_scan`, quiet) at
 start and then a minute after each scan ends, in one background thread; a lock keeps
 two scans from overlapping, and `--no-scan` turns it off. The handlers never write.
@@ -59,6 +100,7 @@ Errors are JSON: `{"error": code, "message": text, ...}`.
 | 501 | `unavailable` | The analysis module behind it is not built yet; adds `module` and `milestone`. |
 | 503 | `no_index` | No index, or one written by another capcom version: run `capcom scan`. Adds `scanning`: true when serve's scan is running (the message then says the logs are being read). |
 | 503 | `index_busy` | SQLite could not read the index. |
+| 504 | `timeout` | A job ran past its time limit (see Progressive replies). |
 
 Anything else is a plain-text `500 internal error` that says nothing more; the
 traceback goes to the terminal only. A static name that cannot be a file (a NUL byte,
@@ -149,10 +191,21 @@ member, labeled `temporary folders`, and all OpenClaw folders as one, labeled
 the later modification time of `index.sqlite` and `index.sqlite-wal`. `scanning` is
 true while serve's first scan has not finished: totals may be partial until then.
 
+### `GET /api/version`
+
+`{index, samples, marks, updated}`: short digests of the index's generation, the usage
+samples' stamp and the marks file's stamp, and when the index was last written. The pages
+ask for it every 30 s while the tab is visible and redraw the view they show when a part
+it reads changed (the index for every view; the samples for Overview and Limits; the
+marks for Checks and Did it work?). It opens no index and is never a job: a few `stat`
+calls and one `PRAGMA data_version`.
+
 ### `GET /api/overview?group=category|project|model|agent`
 
 `group` (default `category`, the same names as `/api/spend`) splits today's
-cumulative chart only.
+cumulative chart only. `capcom serve` makes the reply for one group from its cached
+reply for another (same index, same usage samples): only that chart is computed again,
+up to the cached reply's `now`.
 
 ```
 {now, running_sessions,

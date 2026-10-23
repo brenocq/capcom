@@ -1,6 +1,8 @@
 // Shared helpers: DOM building (text only, never HTML from data), formatting,
 // fetching the API, the tooltip.
 
+import { getProgressive } from './loading.js';
+
 const SVGNS = 'http://www.w3.org/2000/svg';
 
 // h('div.card', {style: '...'}, child, 'text', ...): an element. Children that
@@ -147,12 +149,36 @@ export function rememberGroup(g) {
   try { localStorage.setItem('capcom-group', g); } catch (e) { /* storage off */ }
 }
 
+// The API path Overview and Spend ask for first, for a page's query (a
+// URLSearchParams): the pages and the router's preload use the same one, so a
+// click never starts a second job for a view the page does not show.
+export function overviewPath(query) {
+  const group = pickedGroup(query);
+  return group === 'category' ? 'overview' : `overview?group=${group}`;
+}
+export function spendPath(query) {
+  return `spend?days=${Number(query.get('days')) || 14}&group=${pickedGroup(query)}`;
+}
+
 // ------------------------------------------------------------------ API
 
-const memo = new Map();
+// One entry per API path: the final reply's promise (kept for the page's life, so
+// a theme switch redraws without fetching again), and while the server computes it
+// as a job, the newest partial reply and the progress (capcom/report/API.md,
+// "Progressive replies").
+const store = new Map();
+// the newest partial of a path whose poll was stopped, to start from next time
+const partials = new Map();
+// `onPartial(path, partial, progress, source)` sees each 202; `pass`, set by the
+// frame while it draws a page, takes the page's api() calls (router.js).
+export const apiHooks = { onPartial: null, pass: null };
 
 // Drop the kept results, so the next draw fetches fresh data.
-export function forget() { memo.clear(); }
+export function forget() {
+  for (const e of store.values()) if (!e.done) e.ctrl.abort();
+  store.clear();
+  partials.clear();
+}
 
 export class ApiError extends Error {
   constructor(status, body) {
@@ -162,22 +188,100 @@ export class ApiError extends Error {
   }
 }
 
-// GET /api/<path>; results are kept for the page's life (a theme switch redraws
-// without fetching again). `fresh` skips the memo (the live list).
-export function api(path, fresh = false) {
-  if (!fresh && memo.has(path)) return memo.get(path);
-  const p = fetch('/api/' + path, { headers: { Accept: 'application/json' } }).then(async (r) => {
-    let body = null;
-    try { body = await r.json(); } catch (e) { body = null; }
-    if (!r.ok) throw new ApiError(r.status, body);
-    return body;
+function load(path, low = false) {
+  const ctrl = new AbortController();
+  const e = { path, ctrl, low, done: false, error: null, data: null, partial: partials.get(path) || null, progress: 0, source: null, waiters: new Set() };
+  const wake = () => { for (const w of e.waiters) w(); };
+  e.promise = getProgressive(path, {
+    signal: ctrl.signal,
+    headers: low ? { 'X-Capcom-Priority': 'low' } : null,
+    onPartial: (partial, progress, source) => {
+      e.progress = Math.max(e.progress, progress || 0);
+      if (partial) { e.partial = partial; e.source = source; partials.set(path, partial); }
+      wake();
+      if (apiHooks.onPartial) apiHooks.onPartial(path, partial, progress, source);
+    },
+  }).then((data) => {
+    Object.assign(e, { done: true, data, progress: 1 });
+    partials.delete(path);
+    wake();
+    return data;
+  }, (err) => {
+    // kept until the next navigation (stopLoads), so the redraws of this view
+    // show it instead of asking again and again
+    e.error = err.status ? new ApiError(err.status, err.body) : err;
+    wake();
+    throw e.error;
   });
-  if (!fresh) {
-    memo.set(path, p);
-    p.catch(() => memo.delete(path));
-  }
-  return p;
+  e.promise.catch(() => {}); // the pages see the error; no unhandled rejection
+  store.set(path, e);
+  return e;
 }
+
+// GET /api/<path>, following a server job to its end. While the frame draws a
+// page (`apiHooks.pass`), the page gets the first data there is instead: the
+// final reply, or else the newest partial one (the frame draws again as newer
+// ones come). `fresh` skips the kept results (the live list).
+export function api(path, fresh = false) {
+  if (fresh) {
+    return getProgressive(path).catch((err) => { throw err.status ? new ApiError(err.status, err.body) : err; });
+  }
+  const e = wanted(path);
+  return apiHooks.pass ? apiHooks.pass.use(path, e) : e.promise;
+}
+
+// The kept load of `path` for a page, started now if there is none. A prefetch
+// still loading runs at low priority on the server: a page that needs it asks
+// again at a page's priority (the server lifts the same job; nothing is lost).
+function wanted(path) {
+  const e = store.get(path);
+  if (e && !(e.low && !e.done && !e.error)) return e;
+  if (e) { e.ctrl.abort(); store.delete(path); }
+  return load(path);
+}
+
+// Start loading `path` now, for a page that will ask for it after another reply
+// (Overview asks for checks once its own data is in): the two then load side by side.
+export function preload(path) { wanted(path); }
+
+// Where the reply of `path` stands: {done, error, partial, progress}, or null
+// when nothing is loading or kept for it.
+export function apiState(path) {
+  const e = store.get(path);
+  return e ? { done: e.done, error: e.error, partial: e.partial, progress: e.progress, source: e.source, promise: e.promise, entry: e } : null;
+}
+
+// Stop following every reply still computing except `keep` (paths), and drop the
+// errors: the server's jobs go on at low priority and keep their result, so
+// asking again is cheap.
+export function stopLoads(keep = new Set()) {
+  for (const [path, e] of store) {
+    if (e.done || keep.has(path)) continue;
+    store.delete(path);
+    if (!e.error) e.ctrl.abort();
+  }
+}
+
+// Fetch `paths` again in the background (the data changed on the server) and, once
+// every one is in, keep the new replies in place of the old: the next draw shows
+// them at once, with no loading state. Resolves to false if one failed.
+export async function renew(paths) {
+  let fresh;
+  try {
+    fresh = await Promise.all(paths.map((p) => getProgressive(p)));
+  } catch (e) { return false; }
+  paths.forEach((path, i) => {
+    const old = store.get(path);
+    if (old && !old.done) return; // a newer load started meanwhile: it wins
+    const data = fresh[i];
+    store.set(path, { path, ctrl: new AbortController(), low: false, done: true, error: null, data, partial: null, progress: 1, source: null, waiters: new Set(), promise: Promise.resolve(data) });
+  });
+  return true;
+}
+
+// Start the server on `path` ahead of a click (a hover on a link to its page):
+// the reply is followed like any other, so the click finds it loading or done.
+export function prefetch(path) { if (!store.has(path)) load(path, true); }
 
 // ------------------------------------------------------------------ tooltip
 
@@ -381,14 +485,28 @@ export function barList(rows, valueOf, noteOf) {
 
 export function sessionHref(id) { return '/session/' + encodeURIComponent(id); }
 
-// Change the page's query without a reload; the frame redraws the page.
+// Change the page's query without a reload; the frame redraws the page. A new
+// range (`days`, Overview's `range`) is its own step in the history, so Back goes
+// 30 -> 14 -> 7 days before it leaves the page; other changes (a sort, a filter,
+// a picked spike) replace the current step.
+const RANGE_KEYS = ['days', 'range'];
+
 export function setQuery(params) {
   const q = new URLSearchParams(location.search);
   for (const [k, v] of Object.entries(params)) {
     if (v === null || v === '') q.delete(k); else q.set(k, v);
   }
   const qs = q.toString();
-  history.replaceState(null, '', location.pathname + (qs ? '?' + qs : ''));
+  const href = location.pathname + (qs ? '?' + qs : '');
+  const before = new URLSearchParams(location.search);
+  const step = RANGE_KEYS.some((k) => k in params && before.get(k) !== q.get(k));
+  if (step) {
+    // the step left keeps its scroll, for Back; the new one starts where we are
+    try { history.replaceState({ ...(history.state || {}), scrollY: window.scrollY }, ''); } catch (e) { /* state too large */ }
+    history.pushState({ scrollY: window.scrollY }, '', href);
+  } else {
+    history.replaceState(history.state, '', href);
+  }
   window.dispatchEvent(new Event('capcom-route'));
 }
 
