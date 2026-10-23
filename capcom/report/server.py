@@ -808,7 +808,7 @@ class Handler(BaseHTTPRequestHandler):
     def _api(self, route: str, query: dict[str, str]) -> None:
         parts = route.strip("/").split("/")
         name = parts[0]
-        if route.strip("/") == "version":  # the pages' 30 s look for news: never a job
+        if route.strip("/") == "version":  # the pages' 10 s look for news: never a job
             self._json(HTTPStatus.OK, version(self.site))
             return
         if name in MAY_ARG and len(parts) == 2 and not parts[1]:
@@ -903,7 +903,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def version(site: Site) -> dict[str, Any]:
-    """What a page compares every 30 s to know its data changed (`/api/version`):
+    """What a page compares every 10 s to know its data changed (`/api/version`):
     short digests of the index's generation, the usage samples' stamp and the marks'
     stamp, when the index was last written, and this launch's id (a restart changes
     it, so an open page knows to fetch the new write token). A few stat calls and one

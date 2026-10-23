@@ -273,7 +273,7 @@ async function refreshStatus() {
 
 // ------------------------------------------------------------------ live pages
 
-// Every 30 s while the tab is visible (and at once when it shows again): the live
+// Every 10 s while the tab is visible (and at once when it shows again): the live
 // list, and /api/version, whose parts say what changed on the server. When a part
 // the current view reads changed, the view is fetched again and swapped in place
 // (router.js refreshView), and the sidebar's "Index updated" moves on. A new
@@ -305,5 +305,5 @@ function tickLive() { if (!document.hidden) { refreshLive(); watchData(); } }
 refreshStatus();
 refreshLive();
 watchData();
-setInterval(tickLive, 30e3);
+setInterval(tickLive, 10e3);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) tickLive(); });

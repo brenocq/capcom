@@ -208,7 +208,7 @@ function schedule(v) {
 // ------------------------------------------------------------------ live refresh
 
 // The data behind the page changed on the server (app.js asks /api/version every
-// 30 s): fetch the view's replies again in the background and, once all are in,
+// 10 s): fetch the view's replies again in the background and, once all are in,
 // draw the page from them and swap it in place, numbers tweening and charts
 // gliding, with no dimming, no scroll jump and the focus kept; the sidebar's
 // "Index updated" is the only note of it. Nothing happens while the view is

@@ -196,7 +196,7 @@ true while serve's first scan has not finished: totals may be partial until then
 `{index, samples, marks, updated, launch}`: short digests of the index's generation, the
 usage samples' stamp and the marks file's stamp, when the index was last written, and a
 random id of this launch of `capcom serve` (not the write token). The pages
-ask for it every 30 s while the tab is visible and redraw the view they show when a part
+ask for it every 10 s while the tab is visible and redraw the view they show when a part
 it reads changed (the index for every view; the samples for Overview and Limits; the
 marks for Checks and Did it work?); a new `launch` is a restarted server, so the page
 reads its new write token from a fresh `/`. It opens no index and is never a job: a few
