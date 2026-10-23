@@ -27,8 +27,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 NOTICE = (
-    "Ask Claude sends the numbers and labels on this part of the page to Claude through "
-    "your own claude CLI. No text from your logs is sent."
+    "Ask Claude sends the numbers and labels on this part of the page, or the text you "
+    "select, to Claude through your own claude CLI. No text from your logs is sent."
 )
 
 

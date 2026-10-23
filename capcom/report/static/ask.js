@@ -1,6 +1,7 @@
 // Ask Claude: a chat in the corner that explains the dense parts of a page. A
 // round button (capcom's mascot, who waves now and then) opens a small panel; the
-// small "Explain" marks on dense cards open it already asking about that card.
+// small "Explain" marks on dense cards open it already asking about that card, and
+// the "Ask Claude" button beside any text the user selects asks about that text.
 //
 // Answers come from the user's own `claude` CLI, which `capcom serve` starts per
 // question (POST /api/ask, capcom/report/ask.py), streamed as they are written.
@@ -8,7 +9,9 @@
 // browser. What a question sends: the page's name, the part's label and its
 // numbers and labels in capcom's own words (partText below leaves out evidence
 // rows, session links and titles, notes the user wrote and pasted config), the
-// earlier turns of this chat and the question. Never a session's text.
+// earlier turns of this chat and the question. A selection sends its text without
+// the private pieces it crosses (PRIVATE below: only what kind they were), where it
+// sits and its card's text as partText builds it. Never a session's text.
 
 import { h, s } from './lib.js';
 import { freshToken } from './marks.js';
@@ -18,10 +21,24 @@ export const ASK_OFF = meta('capcom-ask') === 'off';
 
 const KEY = 'capcom-ask-on';
 const MAX_PART = 2800;
+const MAX_SELECTION = 1000;
+const MAX_WHERE = 200;
 const MAX_TURNS = 8;
 const MAX_QUESTION = 600;
 const EXPLAIN = 'Explain this part to me very shortly and simply.';
-export const NOTICE = 'Ask Claude sends the numbers and labels on this part of the page to Claude through your own claude CLI. No text from your logs is sent.';
+const EXPLAIN_SELECTION = 'Explain the text I selected, very shortly and simply.';
+export const NOTICE = 'Ask Claude sends the numbers and labels on this part of the page, or the text you select, to Claude through your own claude CLI. No text from your logs is sent.';
+// The mascot's name ("Roger that", on the radio): the greeting, the panel's
+// subtitle and the round button's label say it. The feature stays "Ask Claude".
+export const MASCOT_NAME = 'Roger';
+const named = (yes, no) => (MASCOT_NAME ? yes : no);
+
+// The sidebar's promise (app.js draws it): true with Ask Claude off, and saying
+// what goes out while it is on in this browser.
+export const NET_OFF = 'Local and read-only. No network.';
+export const NET_ON = 'Local and read-only. Only Ask Claude uses the network, through your claude CLI.';
+export function networkNote() { return !ASK_OFF && enabled() ? NET_ON : NET_OFF; }
+function syncNote() { for (const el of document.querySelectorAll('.netnote')) el.textContent = networkNote(); }
 
 const PAGE_NAMES = { overview: 'Overview', spend: 'Spend', sessions: 'Sessions', session: 'Session', day: 'Day', spikes: 'Spikes', checks: 'Checks', changes: 'Did it work?', limits: 'Limits' };
 
@@ -77,8 +94,29 @@ export function mascot(size, mini = false) {
 const DROP = [
   '.askmark', 'button', 'form', 'pre', 'svg', 'input', 'textarea', 'select', 'script', 'style',
   '.facts', '.evidence', 'details.astable', 'table', '.usernote', '.markform', '.tip', '[hidden]',
-  '.detail .tags > .note', '.spikelist', '.ylab', '.wx', '.histlabs', '.thrlab', '.legend',
+  '.detail .tags > .note', '.spikelist', '.spikerow .meta', '.lab .what', '.ylab', '.wx', '.histlabs', '.thrlab', '.legend',
 ].join(',');
+
+// The private pieces of a page, by what they are: text from the logs (session
+// titles, a subagent's spawn description, evidence rows) or the user's own (notes,
+// pasted config, what is typed in a field). A selection never sends them, only
+// their kind (capcom/report/ask.py, LEFT_OUT, takes only these names).
+const PRIVATE = [
+  ['a[href^="/session/"], a[href^="/session?"], .spikelist .meta, .spikerow .meta, .detail .tags > .note', 'session names'],
+  ['.lab .what', 'agent names'],
+  ['.facts, .evidence, details.astable', 'evidence rows'],
+  ['table', 'table rows'],
+  ['.usernote, .markform, input, textarea, select, [contenteditable]', 'your notes'],
+  ['pre', 'pasted config'],
+];
+// a session's page has its title as its heading
+const sessionTitle = (el) => (route().name === 'session' ? el.closest('#main h1') : null);
+function privateOf(el) {
+  const t = sessionTitle(el);
+  if (t) return [t, 'session names'];
+  for (const [sel, kind] of PRIVATE) { const p = el.closest(sel); if (p) return [p, kind]; }
+  return null;
+}
 const BLOCK = /^(DIV|P|LI|UL|OL|H1|H2|H3|H4|SECTION|ASIDE|HEADER|FOOTER|DETAILS|SUMMARY|FIGURE|BR|DL|DT|DD)$/;
 
 export function partText(el, extra = []) {
@@ -91,6 +129,7 @@ export function partText(el, extra = []) {
     const copy = root.cloneNode(true);
     for (const a of copy.querySelectorAll('a[href^="/session/"], a[href^="/session?"]')) a.replaceWith(document.createTextNode('a session'));
     for (const x of copy.querySelectorAll(DROP)) x.remove();
+    if (route().name === 'session') for (const x of copy.querySelectorAll('h1')) x.remove();
     let line = '';
     const flush = () => { const t = line.replace(/\s+/g, ' ').trim(); if (t) lines.push(t); line = ''; };
     const walk = (node) => {
@@ -200,7 +239,7 @@ const ICON = {
 const icon = (d, size = 18) => s('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 2, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' }, s('path', { d }));
 
 function build() {
-  const bubble = h('button.askbtn', { type: 'button', 'aria-label': 'Ask Claude', 'aria-expanded': 'false', 'aria-controls': 'askpanel', title: 'Ask Claude about this page', onclick: () => (state.open ? closePanel() : openPanel()) }, mascot(44));
+  const bubble = h('button.askbtn', { type: 'button', 'aria-label': named(`Ask ${MASCOT_NAME}`, 'Ask Claude'), 'aria-expanded': 'false', 'aria-controls': 'askpanel', title: named(`Ask ${MASCOT_NAME} about this page`, 'Ask Claude about this page'), onclick: () => (state.open ? closePanel() : openPanel()) }, mascot(44));
   const log = h('div.asklog', { role: 'log', 'aria-live': 'polite', 'aria-label': 'Conversation' });
   const input = h('textarea.askinput', { rows: 1, maxlength: MAX_QUESTION, placeholder: 'Ask about this page…', 'aria-label': 'Your question' });
   const sendBtn = h('button.asksend', { type: 'submit', 'aria-label': 'Send' }, icon(ICON.send));
@@ -209,7 +248,7 @@ function build() {
     h('p.asknote', null, 'Haiku, through your claude CLI. ', h('button.asklink', { type: 'button', text: 'Turn off', onclick: turnOff })));
   const panel = h('section.askpanel', { id: 'askpanel', role: 'dialog', 'aria-label': 'Ask Claude', hidden: true },
     h('header.askhead', null, mascot(34),
-      h('div.asktitle', null, h('strong', { text: 'Ask Claude' }), h('span', { text: 'Short answers about your numbers' })),
+      h('div.asktitle', null, h('strong', { text: 'Ask Claude' }), h('span', { text: named(`${MASCOT_NAME} · short answers`, 'Short answers about your numbers') })),
       h('button.askicon', { type: 'button', 'aria-label': 'New chat', title: 'New chat', onclick: newChat }, icon(ICON.fresh)),
       h('button.askicon', { type: 'button', 'aria-label': 'Close', title: 'Close', onclick: () => closePanel() }, icon(ICON.close))),
     log, foot);
@@ -263,6 +302,7 @@ function turnOff() {
   if (state.ctrl) state.ctrl.abort();
   setEnabled(false);
   state.on = false;
+  syncNote();
   state.msgs = [];
   state.topic = null;
   draw();
@@ -271,6 +311,7 @@ function turnOff() {
 function turnOn() {
   setEnabled(true);
   state.on = true;
+  syncNote();
   const p = state.pending;
   state.pending = null;
   draw();
@@ -286,7 +327,8 @@ function draw() {
   ui.sendBtn.replaceChildren(icon(state.ctrl ? ICON.stop : ICON.send));
   ui.sendBtn.setAttribute('aria-label', state.ctrl ? 'Stop' : 'Send');
   if (!state.on) {
-    const about = state.pending && state.pending.topic ? state.pending.topic.label : null;
+    const topic = state.pending && state.pending.topic;
+    const about = topic ? (topic.selection != null ? 'the text you selected' : topic.label) : null;
     ui.log.replaceChildren(h('div.askoptin', null,
       mascot(56),
       h('strong', { text: 'Turn on Ask Claude?' }),
@@ -300,7 +342,7 @@ function draw() {
   }
   if (!state.msgs.length) {
     ui.log.replaceChildren(h('div.askhello', null,
-      h('div.askrow.bot', null, avatar(), h('div.askmsg.bot', { text: 'Hi! I explain what you see here in a few simple words. Tap “Explain” on a card, or ask me anything about this page.' })),
+      h('div.askrow.bot', null, avatar(), h('div.askmsg.bot', { text: `Hi${named(`, I’m ${MASCOT_NAME}`, '')}! I explain what you see here in a few simple words. Tap “Explain” on a card, select any text and tap “Ask Claude”, or ask me anything about this page.` })),
       suggestions(starters(), true)));
     return;
   }
@@ -321,6 +363,8 @@ function message(m, last) {
   if (m.role === 'user') {
     return h('div.askrow.me', null, h('div.askmsg.me', null,
       m.part ? h('span.askpart', { title: m.part }, 'About: ', h('b', { text: m.part })) : null,
+      m.quote ? h('q.askquote', { text: m.quote }) : null,
+      m.leftOut && m.leftOut.length ? h('span.askleft', { text: `(${listed(m.leftOut)} left out)` }) : null,
       h('span', { text: m.text })));
   }
   const body = h('div', { class: m.error ? 'askmsg bot err' : 'askmsg bot' });
@@ -334,6 +378,7 @@ function message(m, last) {
   return next.length ? h('div', null, row, suggestions(next, false, m)) : row;
 }
 
+const listed = (xs) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
 const typing = () => h('span.asktyping', { 'aria-label': 'Claude is writing' }, h('i'), h('i'), h('i'));
 const tidy = (t) => t.replace(/\*\*/g, '').trim();
 
@@ -379,7 +424,11 @@ export async function ask(question, topic = null, again = false) {
   if (topic) state.topic = topic;
   const history = state.msgs.filter((m) => m.text && !m.error).slice(-MAX_TURNS).map((m) => ({ role: m.role, text: m.text.slice(0, 1500) }));
   if (again) state.msgs.pop();
-  else state.msgs.push({ role: 'user', text: question, part: topic ? topic.label : null });
+  else {
+    const picked = topic && topic.selection != null;
+    state.msgs.push({ role: 'user', text: question, part: topic ? (picked ? topic.where : topic.label) : null,
+      quote: picked ? topic.selection : null, leftOut: picked ? topic.leftOut : null });
+  }
   const reply = { role: 'assistant', text: '', done: false };
   state.msgs.push(reply);
   const ctrl = new AbortController();
@@ -387,6 +436,7 @@ export async function ask(question, topic = null, again = false) {
   draw();
   const t = state.topic || pageContext();
   const body = { page: (state.topic && state.topic.page) || pageName(), part: t ? { label: t.label, text: t.text } : null, history: again ? history.slice(0, -1) : history, question };
+  if (t && t.selection != null) Object.assign(body, { selection: t.selection, where: t.where, left_out: t.leftOut });
   const fail = (msg) => { reply.error = msg; reply.retry = { question, topic }; };
   try {
     const r = await post(body, ctrl.signal);
@@ -441,6 +491,209 @@ function handle(ev, reply) {
   }
 }
 
+// ------------------------------------------------------------------ a selection
+
+// What the user selected, as text: what they see of it, line by line, with each
+// private piece it crosses replaced by "[left out]" and named in `leftOut`.
+const SILENT = '#ask, .askmark, button.copy, .mark > button, script, style, noscript, [hidden], .tip';
+const LEFT = '[left out]';
+
+function blockOf(el) {
+  for (let x = el; x && x !== document.body; x = x.parentElement) {
+    const d = getComputedStyle(x).display;
+    if (d !== 'inline' && d !== 'contents') return x;
+  }
+  return document.body;
+}
+
+// seen on the page: not hidden, and not in a closed <details> (laid out, not painted)
+const shown = (el) => (el.checkVisibility ? el.checkVisibility({ visibilityProperty: true }) : el.getClientRects().length > 0);
+
+export function pickedText(range) {
+  const top = range.commonAncestorContainer;
+  const base = top.nodeType === 1 ? top : top.parentNode;
+  const walker = document.createTreeWalker(base, NodeFilter.SHOW_TEXT);
+  const lines = [];
+  const leftOut = [];
+  let line = '';
+  let block = null;
+  let hidden = null; // the private element last left out, to say it once
+  const flush = () => { const t = line.replace(/\s+/g, ' ').trim(); if (t) lines.push(t); line = ''; };
+  let seen = 0;
+  let size = 0; // past the limit, the rest would be cut anyway
+  for (let t = walker.nextNode(); t && seen < 20000 && size <= MAX_SELECTION + 200; t = walker.nextNode(), seen++) {
+    if (!range.intersectsNode(t)) continue;
+    const el = t.parentElement;
+    if (!el || el.closest(SILENT) || !shown(el)) continue;
+    const b = blockOf(el);
+    if (b !== block) { flush(); block = b; }
+    const p = privateOf(el);
+    if (p) {
+      if (!leftOut.includes(p[1])) leftOut.push(p[1]);
+      if (hidden !== p[0]) { line += ` ${LEFT} `; hidden = p[0]; }
+      continue;
+    }
+    hidden = null;
+    const from = t === range.startContainer ? range.startOffset : 0;
+    const to = t === range.endContainer ? range.endOffset : t.data.length;
+    line += t.data.slice(from, to);
+    size += to - from;
+  }
+  flush();
+  let text = lines.join('\n').replace(/\[left out\](?:\s*\[left out\])+/g, LEFT);
+  if (text.length > MAX_SELECTION) text = text.slice(0, MAX_SELECTION - 1) + '…';
+  const kinds = PRIVATE.map(([, k]) => k).filter((k) => leftOut.includes(k));
+  return { text: text === LEFT ? '' : text, leftOut: kinds };
+}
+
+// Where a selection sits: the page's name, then the headings of the cards and
+// sections around it, outermost first (never a private one, such as a session's title).
+const HEADS = [':scope > summary b', ':scope > h1', ':scope > h2', ':scope > h3', ':scope > .split > h2', ':scope > .split > h3', ':scope > .chead h2',
+  ':scope > .titles > h1', ':scope > header h2', ':scope > .label', ':scope > .tline > .t', ':scope > summary'];
+const nodeEl = (n) => (n && n.nodeType === 1 ? n : n && n.parentElement);
+
+function headings(el) {
+  const bits = [];
+  for (let x = el; x && x !== document.body; x = x.parentElement) {
+    if (x.id === 'main') break;
+    if (x.id === 'sidebar') { bits.unshift('Sidebar'); break; }
+    for (const q of HEADS) {
+      const hd = x.querySelector(q);
+      if (!hd) continue;
+      if (!privateOf(hd)) {
+        const t = headingText(hd).slice(0, 80);
+        if (t && !bits.includes(t)) bits.unshift(t);
+      }
+      break;
+    }
+  }
+  return bits;
+}
+
+function whereOf(el) {
+  let out = [pageName(), ...headings(el)].join(' › ');
+  if (out.length > MAX_WHERE) out = out.slice(0, MAX_WHERE - 1) + '…';
+  return out;
+}
+
+// The card or section a selection sits in: its text, as a mark would send it.
+const CARD = 'section.card, aside.card, .card, header.head, details, section, aside';
+function contextOf(el) {
+  const main = document.getElementById('main');
+  const card = el && main && main.contains(el) && el !== main ? el.closest(CARD) : null;
+  if (card && main.contains(card)) {
+    const label = headings(card).join(' › ').slice(0, 150);
+    return { label: label || `${pageName()} page`, text: partText(card) };
+  }
+  return pageContext();
+}
+
+export function selectionTopic(range) {
+  const el = nodeEl(range.commonAncestorContainer);
+  const picked = pickedText(range);
+  const ctx = contextOf(el);
+  return {
+    page: pageName(), label: ctx ? ctx.label : `${pageName()} page`, text: ctx ? ctx.text : '',
+    selection: picked.text, where: whereOf(el), leftOut: picked.leftOut,
+  };
+}
+
+// The "Ask Claude" button beside a selection: shown once the selection settles
+// (a mouse button let go, or a pause while the keyboard or touch handles move
+// it), placed under its end (above its start when there is no room), moved as the
+// page scrolls, and gone when the selection is cleared or on Escape. Never for
+// text in the chat itself or in a field.
+const pick = { btn: null, range: null, timer: 0, down: false, touch: false, pressing: false };
+
+function selectedRange() {
+  const sel = document.getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount || !sel.getRangeAt(0).toString().trim()) return null;
+  for (const n of [sel.anchorNode, sel.focusNode]) {
+    const el = nodeEl(n);
+    if (!el || el.closest('#ask, input, textarea, select, [contenteditable]')) return null;
+  }
+  const active = document.activeElement;
+  if (active && active.matches('input, textarea, select, [contenteditable]')) return null;
+  return sel.getRangeAt(0).cloneRange();
+}
+
+function hidePick() {
+  clearTimeout(pick.timer);
+  pick.range = null;
+  if (pick.btn) pick.btn.hidden = true;
+}
+
+function placePick() {
+  const b = pick.btn;
+  if (!b || !pick.range) return;
+  const rects = [...pick.range.getClientRects()].filter((r) => r.width > 0 || r.height > 0);
+  const vh = window.innerHeight, vw = document.documentElement.clientWidth;
+  if (!rects.length) { hidePick(); return; }
+  const first = rects[0], last = rects[rects.length - 1];
+  // off screen: out of the way until it scrolls back
+  b.style.visibility = last.bottom < 0 || first.top > vh ? 'hidden' : '';
+  const w = b.offsetWidth, ht = b.offsetHeight;
+  const gap = pick.touch ? 30 : 8; // on touch, below the selection's handles
+  let top = last.bottom + gap;
+  if (top + ht > vh - 8 && first.top - gap - ht >= 8) top = first.top - (pick.touch ? 8 : gap) - ht;
+  const left = Math.max(8, Math.min(last.right - w / 2, vw - w - 8));
+  b.style.top = `${Math.round(top)}px`;
+  b.style.left = `${Math.round(left)}px`;
+}
+
+function showPick() {
+  const r = selectedRange();
+  if (!r) { hidePick(); return; }
+  pick.range = r;
+  pick.btn.hidden = false;
+  placePick();
+}
+
+function askSelection() {
+  const r = pick.range;
+  hidePick();
+  if (!r) return;
+  openPanel();
+  ask(EXPLAIN_SELECTION, selectionTopic(r));
+}
+
+function buildPick() {
+  const b = h('button.asksel', { type: 'button', hidden: true, title: 'Ask Claude about the text you selected', 'aria-label': 'Ask Claude about the selected text' },
+    mascot(18, true), h('span', { text: 'Ask Claude' }));
+  // keep the selection: a press on the button must not clear it
+  const hold = (e) => { e.preventDefault(); pick.pressing = true; };
+  b.addEventListener('pointerdown', hold);
+  b.addEventListener('mousedown', (e) => e.preventDefault());
+  b.addEventListener('pointercancel', () => { pick.pressing = false; });
+  b.addEventListener('click', (e) => { e.preventDefault(); pick.pressing = false; askSelection(); });
+  ui.root.append(b);
+  pick.btn = b;
+  const later = (ms) => { clearTimeout(pick.timer); pick.timer = setTimeout(showPick, ms); };
+  document.addEventListener('selectionchange', () => {
+    if (pick.pressing) return;
+    const sel = document.getSelection();
+    if (!sel || sel.isCollapsed) { hidePick(); return; }
+    if (pick.down) return; // a mouse still dragging: wait for it to let go
+    later(pick.touch ? 350 : 250);
+  });
+  document.addEventListener('pointerdown', (e) => {
+    if (b.contains(e.target)) return;
+    pick.touch = e.pointerType !== 'mouse';
+    pick.down = e.pointerType === 'mouse' && e.button === 0;
+    if (pick.down) hidePick();
+  }, true);
+  document.addEventListener('pointerup', (e) => {
+    if (pick.pressing && !b.contains(e.target)) pick.pressing = false; // pressed, then let go elsewhere
+    if (!pick.down || b.contains(e.target)) return;
+    pick.down = false;
+    later(10);
+  }, true);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !b.hidden) hidePick(); });
+  const follow = () => { if (!b.hidden) requestAnimationFrame(placePick); };
+  window.addEventListener('scroll', follow, { capture: true, passive: true });
+  window.addEventListener('resize', follow, { passive: true });
+}
+
 // ------------------------------------------------------------------ the wave
 
 function scheduleWave() {
@@ -459,8 +712,12 @@ function scheduleWave() {
 
 if (!ASK_OFF) {
   build();
+  buildPick();
   draw();
   decorate();
+  syncNote();
+  // turned on or off in another tab: follow it
+  window.addEventListener('storage', (e) => { if (e.key === KEY) { state.on = enabled(); syncNote(); draw(); } });
   new MutationObserver((records) => {
     if (records.some((r) => !ui.root.contains(r.target))) decorate();
   }).observe(document.body, { childList: true, subtree: true });
@@ -469,5 +726,5 @@ if (!ASK_OFF) {
     setTimeout(() => { const svg = ui.bubble.querySelector('.mascot'); svg.classList.add('waving'); setTimeout(() => svg.classList.remove('waving'), 2000); }, 1500);
   }
   scheduleWave();
-  window.capcomAsk = { ask, open: openPanel, close: closePanel, state }; // for tests and the console
+  window.capcomAsk = { ask, open: openPanel, close: closePanel, state, pickedText, selectionTopic }; // for tests and the console
 }

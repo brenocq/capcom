@@ -14,6 +14,7 @@ import { renderChecks } from './checks.js';
 import { renderLimits } from './limits.js';
 import { renderChanges, renderChange } from './changes.js';
 import { freshToken } from './marks.js';
+import { networkNote } from './ask.js';
 
 const ICON = {
   overview: 'M3 12h4l3-8 4 16 3-8h4',
@@ -130,7 +131,7 @@ function footer() {
   }
   const dark = isDark();
   return h('div.foot', null,
-    h('div.row', null, icon('M8 11V8a4 4 0 0 1 8 0v3M5 11h14v10H5z', 14), h('span', { text: 'Local and read-only. No network.' })),
+    h('div.row', null, icon('M8 11V8a4 4 0 0 1 8 0v3M5 11h14v10H5z', 14), h('span.netnote', { text: networkNote() })),
     h('span', { text: status }),
     statusData ? h('span', { text: `Prices checked ${statusData.prices_checked}. API-equivalent cost, not your bill.` }) : null,
     h('button.toggle', { type: 'button', onclick: toggleTheme },

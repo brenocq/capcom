@@ -99,11 +99,27 @@
 .askmark .mascot { width: 20px; height: 20px; }
 h2 .askmark, h1 .askmark { position: relative; top: -2px; }
 
+/* the button beside a selection */
+.asksel { position: fixed; top: 0; left: 0; z-index: 26; display: inline-flex; align-items: center; gap: 5px; min-height: 32px; padding: 2px 12px 2px 4px;
+  border: 0.5px solid var(--l25); border-radius: 999px; background: var(--card); color: var(--text);
+  font: 500 13px/1 var(--sans); white-space: nowrap; cursor: pointer; user-select: none; -webkit-user-select: none;
+  box-shadow: 0 6px 18px rgba(20,20,19,0.18), 0 1px 3px rgba(20,20,19,0.12); animation: ask-pop 0.12s ease-out; }
+.asksel[hidden] { display: none; }
+.asksel:hover { color: var(--clay); border-color: var(--clay); }
+.asksel .mascot { width: 22px; height: 22px; }
+@keyframes ask-pop { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+
+/* a question about a selection: the text, then what was left out of it */
+.askquote { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: normal;
+  padding-left: 8px; border-left: 2px solid currentColor; font-size: 13px; opacity: 0.92; quotes: none; }
+.askleft { font-size: 12px; font-style: italic; opacity: 0.85; white-space: normal; }
+
 @media (max-width: 899.98px) {
   .ask { right: 16px; bottom: 16px; }
   .askpanel { height: min(580px, calc(100vh - 160px)); }
   .askicon, .askchip, .asklink { min-height: 44px; min-width: 44px; }
   .askmark { min-height: 44px; padding: 1px 12px 1px 6px; }
+  .asksel { min-height: 44px; padding: 2px 14px 2px 6px; }
   .askinput { font-size: 16px; min-height: 44px; }
   .asksend { flex-basis: 44px; width: 44px; height: 44px; }
 }
@@ -114,5 +130,6 @@ h2 .askmark, h1 .askmark { position: relative; top: -2px; }
 @media (prefers-reduced-motion: reduce) {
   .mascot.waving .mz-arm, .mascot.waving .mz-eyes, .asktyping i { animation: none; }
   .askbtn { transition: none; }
+  .asksel { animation: none; }
   .askbtn:hover { transform: none; }
 }
