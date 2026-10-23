@@ -11,8 +11,9 @@ cumulative spend by project in the website's band style, drawing in from the
 left while the three largest spikes' numbered markers pop onto the total line
 as it reaches them, each on the steep step it explains; the total is labeled
 right of its end, inside the picture. Roger blinks while the chart draws, then
-waves once with the website's own wave and says, in a chat bubble like his
-replies on the website, what the checks would save a week.
+waves once with the website's own wave and says "Roger that!" in a chat bubble
+like his replies on the website. chart() draws the chart alone, so the social
+card (social/build.py) shows the same one.
 """
 
 from __future__ import annotations
@@ -37,6 +38,8 @@ ROGER = (409, 80)  # left edge and width of Roger, standing on the wordmark's ba
 BLINK = 2.6  # Roger blinks while the chart draws,
 WAVE = 5.1  # then waves once it is drawn,
 SAY = 5.5  # and his bubble pops up, gone with the chart's fade.
+SAID = "Roger that!"
+BOX = (516, 34, 266, 132)  # the chart's plot, leaving room right of it for the total
 
 
 def wordmark(x: float, baseline: float, size: float, tracking: float = -0.01) -> tuple[str, float]:
@@ -77,15 +80,21 @@ def bubble(x: float, y: float, text: str) -> tuple[float, str]:
     )
 
 
-def build(data: dict, out: Path) -> Path:
+def chart(
+    data: dict, box: tuple[float, float, float, float], prefix: str
+) -> tuple[str, list[str], list[str]]:
+    """The two weeks' cumulative spend by project with the plot in `box`: its bands
+    and lines drawing in from the left, the numbered markers of the three largest
+    spikes popping onto the total line as it reaches them, the total's end value
+    right of its last point, all fading out before the loop restarts. Ids start with
+    `prefix`. Returns (defs, css, markup); reduced motion shows the drawn chart."""
     cum = data["spend_project"]["cumulative"]
     times = [t / 1000 for t in cum["times"]]
     members = cum["values"]
     total = cum["total"]
     colors = series_colors([m["label"] for m in cum["members"]])
-    box = (516, 34, 266, 132)  # leaves room right of the plot for the total's label
     ymax = max(total) * 1.04
-    defs, chart, points = bands(times, members, total, colors, box, ymax, "b")
+    defs, lines, points = bands(times, members, total, colors, box, ymax, prefix)
     x0, y0, w, h = box
 
     # The three largest spikes, each sitting on the top of the steepest step of its span.
@@ -126,10 +135,6 @@ def build(data: dict, out: Path) -> Path:
         ".pin circle{fill:var(--fg);stroke:var(--panel);stroke-width:2.5}"
         ".pin text{fill:var(--panel);font-size:10.5px;font-weight:700;text-anchor:middle}"
         ".pin{transform-box:fill-box;transform-origin:50% 50%}",
-        ".m .a1{animation:a1 10s infinite}.m .a2{animation:a2 10s infinite}",
-        keyframes("a1", LOOP, pulse([0.4, 3.0, 5.6, 8.2], 0)),
-        keyframes("a2", LOOP, pulse([0.4, 3.0, 5.6, 8.2], 0.22)),
-        ".sub{fill:var(--muted);font-size:19px}",
         ".total{fill:var(--fg);font-size:14px;font-weight:600;"
         "paint-order:stroke;stroke:var(--panel);stroke-width:3px;stroke-linejoin:round}",
         ".end{animation:end 10s infinite}",
@@ -166,9 +171,39 @@ def build(data: dict, out: Path) -> Path:
         )
 
     defs += (
-        f'<clipPath id="clip"><rect class="reveal" x="{x0 - 2}" y="{y0 - 30}" '
+        f'<clipPath id="{prefix}clip"><rect class="reveal" x="{x0 - 2}" y="{y0 - 30}" '
         f'width="{w + 6}" height="{h + 34}"/></clipPath>'
     )
+    body = [
+        '<g class="chart">',
+        f'<line class="grid" x1="{x0}" y1="{y0 + h + 0.5}" x2="{x0 + w}" y2="{y0 + h + 0.5}" '
+        'style="stroke-dasharray:none"/>',
+        f'<g clip-path="url(#{prefix}clip)">{lines}</g>',
+        *pins,
+        f'<g class="end"><circle cx="{r(points[-1][0])}" cy="{r(points[-1][1])}" r="3.2" '
+        f'style="fill:var(--fg)"/><text class="total" x="{r(points[-1][0] + 8)}" '
+        f'y="{r(points[-1][1] + 5)}">{usd(total[-1], cents=False)}</text></g>',
+        "</g>",
+    ]
+    return defs, css, body
+
+
+def chart_svg(data: dict, width: int, height: int, box: tuple[float, float, float, float]) -> str:
+    """The banner's chart alone as an SVG of its own, `width` x `height`, its plot in
+    `box`: what the social card draws on its right."""
+    defs, css, body = chart(data, box, "c")
+    label = "Two weeks of spend by project adding up, with numbered spike markers."
+    return svg(width, height, label, "".join(css), "".join(body), defs)
+
+
+def build(data: dict, out: Path) -> Path:
+    defs, css, chart_body = chart(data, BOX, "b")
+    css += [
+        ".m .a1{animation:a1 10s infinite}.m .a2{animation:a2 10s infinite}",
+        keyframes("a1", LOOP, pulse([0.4, 3.0, 5.6, 8.2], 0)),
+        keyframes("a2", LOOP, pulse([0.4, 3.0, 5.6, 8.2], 0.22)),
+        ".sub{fill:var(--muted);font-size:19px}",
+    ]
     word, _ = wordmark(104, 108, 88)
 
     # Roger on the baseline, right of the wordmark, his raised hand toward the chart.
@@ -176,9 +211,7 @@ def build(data: dict, out: Path) -> Path:
     vx, vy, vw, _ = roger.VIEWBOX
     k = rw / vw
     top = 108 - (roger.feet() - vy) * k  # his body's bottom on the baseline
-    weekly = round(data["checks"]["total"]["usd_per_week"])
-    said = f"Up to ${weekly}/wk to save"
-    _, say = bubble(rx + (37 - vx) * k, top + (9.5 - vy) * k, said)
+    _, say = bubble(rx + (37 - vx) * k, top + (9.5 - vy) * k, SAID)
     arm = roger.on_loop("arm", [WAVE])
     eyes = roger.on_loop("eyes", [BLINK, WAVE])
     _, _, ease = roger.motion("arm")
@@ -210,20 +243,12 @@ def build(data: dict, out: Path) -> Path:
         roger.group(rx, top, rw),
         say,
         f'<text class="sub" x="106" y="152">{SUBTITLE}</text>',
-        '<g class="chart">',
-        f'<line class="grid" x1="{x0}" y1="{y0 + h + 0.5}" x2="{x0 + w}" y2="{y0 + h + 0.5}" '
-        'style="stroke-dasharray:none"/>',
-        f'<g clip-path="url(#clip)">{chart}</g>',
-        *pins,
-        f'<g class="end"><circle cx="{r(points[-1][0])}" cy="{r(points[-1][1])}" r="3.2" '
-        f'style="fill:var(--fg)"/><text class="total" x="{r(points[-1][0] + 8)}" '
-        f'y="{r(points[-1][1] + 5)}">{usd(total[-1], cents=False)}</text></g>',
-        "</g>",
+        *chart_body,
     ]
     label = (
         "capcom: a radio-signal mark, the word capcom and Roger, a terracotta capsule in "
         "mission-control headphones, beside a two-week spend chart drawing itself with "
-        f"numbered spike markers; Roger waves and says: {said}. Mission control for your "
+        f"numbered spike markers; Roger waves and says: {SAID} Mission control for your "
         "Claude Code spend."
     )
     path = out / "banner.svg"
