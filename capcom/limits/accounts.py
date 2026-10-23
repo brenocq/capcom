@@ -33,10 +33,13 @@ from capcom.cost.top import project_label
 from capcom.limits.model import (
     BURST,
     Bins,
+    Group,
+    Prepared,
     Spend,
     WindowView,
     _dt,
-    analyze,
+    prepare,
+    scan_groups,
     scan_spend,
 )
 from capcom.limits.record import ACCOUNTS_FILE, SESSIONS_FILE, same_cycle
@@ -221,6 +224,8 @@ class Owners:
         self.switches = list(known.switches or ())
         self.timeline = sorted(timeline)
         self._memo: dict[tuple[str, datetime], tuple[str, bool]] = {}
+        # the last request asked about: one pass asks once per account for each
+        self._last: tuple[Request | None, tuple[str, bool]] = (None, (UNKNOWN, True))
 
     def at(self, t: datetime) -> str:
         """The account in use at `t`: the latest switch the recorder logged, else the
@@ -232,12 +237,15 @@ class Owners:
         return self.timeline[0][1] if self.timeline else UNKNOWN
 
     def __call__(self, r: Request) -> tuple[str, bool]:
+        if self._last[0] is r:
+            return self._last[1]
         key = (r.session_id, r.timestamp)
         got = self._memo.get(key)
         if got is None:
             acct = _session_at(self.sessions.get(r.session_id), r.timestamp)
             got = (acct, False) if acct is not None else (self.at(r.timestamp), True)
             self._memo[key] = got
+        self._last = (r, got)
         return got
 
 
@@ -292,13 +300,20 @@ def _share(a: AccountView, now: datetime) -> Share:
 
 
 def combined(
-    index: Index, table: PriceTable, accounts: Sequence[AccountView], now: datetime
+    index: Index,
+    table: PriceTable,
+    accounts: Sequence[AccountView],
+    now: datetime,
+    spent: Spend | None = None,
 ) -> Combined:
+    """The combined capacity; `spent`: every account's spend over the last `PACE`,
+    when the caller read it already (`pace_bins`)."""
     shares = [_share(a, now) for a in accounts]
     lefts = [s.usd_left for s in shares if s.usd_left is not None]
     total = sum(lefts) if lefts else None
-    spent = Spend()
-    scan_spend(index, table, [Bins([(now - PACE, now, spent)])])
+    if spent is None:
+        spent = Spend()
+        scan_spend(index, table, pace_bins(spent, now))
     pace = spent.usd / (PACE / timedelta(hours=1))
     runs_out = None
     if total is not None and total > 0 and pace > 0:
@@ -322,7 +337,8 @@ def analyze_accounts(
     tagged = attribute(samples, known)
     accounts = accounts_of(tagged, known)
     owners = Owners(tagged, known) if len(accounts) > 1 else None
-    out: list[AccountView] = []
+    # every account's windows and the combined pace in one read of the requests
+    preps: list[tuple[Account, list[LimitSample], dict[LimitWindow, Prepared]]] = []
     for acct in accounts:
         own = [s for s in tagged if s.account == acct.id]
         keep: Callable[[Request], bool] | None = None
@@ -331,12 +347,25 @@ def analyze_accounts(
             o, aid = owners, acct.id
             keep = lambda r, o=o, aid=aid: o(r)[0] == aid  # noqa: E731
             inferred = lambda r, o=o: o(r)[1]  # noqa: E731
-        views = {
-            w: analyze(index, table, own, w, now, label, keep=keep, inferred=inferred)
-            for w in LimitWindow
-        }
-        out.append(AccountView(acct, views, own))
-    return out, combined(index, table, out, now)
+        prep = {w: prepare(own, w, now, label, keep=keep, inferred=inferred) for w in LimitWindow}
+        preps.append((acct, own, prep))
+    spent = Spend()
+    # one group per account: its windows' bins take the same requests
+    groups: list[Group] = [
+        ([b for p in prep.values() for b in p.group[0]], next(iter(prep.values())).group[1])
+        for _, _, prep in preps
+    ]
+    scan_groups(index, table, [*groups, (pace_bins(spent, now), None)])
+    out = [
+        AccountView(acct, {w: p.finish() for w, p in prep.items()}, own)
+        for acct, own, prep in preps
+    ]
+    return out, combined(index, table, out, now, spent)
+
+
+def pace_bins(spent: Spend, now: datetime) -> list[Bins]:
+    """The bins of the combined pace: all spend over the last `PACE`."""
+    return [Bins([(now - PACE, now, spent)])]
 
 
 def find_account(accounts: Sequence[AccountView], key: str) -> AccountView | None:

@@ -399,6 +399,9 @@ def scan_spend(
     """One pass over the requests the bins cover (those `keep` accepts, when given),
     adding each to every bin holding it (a bin's payload is a Spend, or a callable
     taking the request)."""
+    if on_request is None:
+        scan_groups(index, table, [(bins, keep)])
+        return
     ranges = [(s, e) for b in bins for s, e, _ in b.items]
     for since, until in _merged(ranges):
         for r in index.requests(since=since, until=until):
@@ -406,14 +409,38 @@ def scan_spend(
                 continue
             model = canonical(table, r.model)
             usd = price(r, table).total
-            for b in bins:
-                payload = b.find(r.timestamp)
-                if isinstance(payload, Spend):
-                    payload.add(r, model, usd)
-                elif payload is not None:
-                    payload(r, model, usd)
-            if on_request is not None:
-                on_request(r, model, usd)
+            _add(bins, r, model, usd)
+            on_request(r, model, usd)
+
+
+def _add(bins: Sequence[Bins], r: Request, model: str, usd: float) -> None:
+    for b in bins:
+        payload = b.find(r.timestamp)
+        if isinstance(payload, Spend):
+            payload.add(r, model, usd)
+        elif payload is not None:
+            payload(r, model, usd)
+
+
+Group = tuple[Sequence[Bins], Callable[[Request], bool] | None]
+
+
+def scan_groups(index: Index, table: PriceTable, groups: Sequence[Group]) -> None:
+    """`scan_spend` for several groups of bins at once (each with its own `keep`, as
+    each account's windows): one read of the requests any of them covers, each
+    request priced once."""
+    ranges = [(s, e) for bins, _ in groups for b in bins for s, e, _ in b.items]
+    for since, until in _merged(ranges):
+        for r in index.requests(since=since, until=until):
+            if not counted(r):
+                continue
+            priced: tuple[str, float] | None = None
+            for bins, keep in groups:
+                if keep is not None and not keep(r):
+                    continue
+                if priced is None:
+                    priced = (canonical(table, r.model), price(r, table).total)
+                _add(bins, r, *priced)
 
 
 # --------------------------------------------------------------------------- fit
@@ -818,6 +845,31 @@ def analyze(
     for the current segment, and what spent the last `shown` segments by project.
     With several accounts, `samples` are one account's and `keep` accepts the
     requests of its sessions (`inferred`: those put on it by time only)."""
+    prep = prepare(samples, window, now, label, shown, keep, inferred)
+    scan_groups(index, table, [prep.group])
+    return prep.finish()
+
+
+@dataclass(slots=True)
+class Prepared:
+    """One window's analysis before its spend is read: the bins (and the requests
+    they take) to fill, then `finish` once they are filled."""
+
+    group: Group
+    finish: Callable[[], WindowView]
+
+
+def prepare(
+    samples: Sequence[LimitSample],
+    window: LimitWindow,
+    now: datetime,
+    label: Callable[[str], str] = project_label,
+    shown: int = 8,
+    keep: Callable[[Request], bool] | None = None,
+    inferred: Callable[[Request], bool] | None = None,
+) -> Prepared:
+    """`analyze` in two steps, so that several windows (and accounts) share one
+    read of the requests (`scan_groups`)."""
     own = [s for s in samples if s.window == window and s.time <= now]
     segs = segments(own, window)
     ivs = intervals(segs)
@@ -865,8 +917,39 @@ def analyze(
             ]
         )
     )
-    scan_spend(index, table, bins, keep=keep)
+    return Prepared(
+        (bins, keep),
+        lambda: _finish(
+            window,
+            own,
+            segs,
+            iv_spend,
+            current,
+            last,
+            rates_spend,
+            since_last,
+            views,
+            per_project,
+            guessed,
+            now,
+        ),
+    )
 
+
+def _finish(
+    window: LimitWindow,
+    own: list[LimitSample],
+    segs: list[Segment],
+    iv_spend: list[tuple[Interval, Spend]],
+    current: bool,
+    last: Segment | None,
+    rates_spend: list[Spend],
+    since_last: Spend,
+    views: list[Segment],
+    per_project: list[dict[str, Spend]],
+    guessed: list[Spend],
+    now: datetime,
+) -> WindowView:
     readings = sum(len(seg.samples) for seg in segs)
     result = fit(window, iv_spend, len(own), sum(1 for seg in segs if seg.samples), readings)
     if readings < MIN_READINGS:
@@ -924,7 +1007,9 @@ def analyze_all(
     now: datetime,
     label: Callable[[str], str] = project_label,
 ) -> dict[LimitWindow, WindowView]:
-    return {w: analyze(index, table, samples, w, now, label) for w in LimitWindow}
+    preps = {w: prepare(samples, w, now, label) for w in LimitWindow}
+    scan_groups(index, table, [p.group for p in preps.values()])
+    return {w: p.finish() for w, p in preps.items()}
 
 
 def model_label(key: Key) -> str:
