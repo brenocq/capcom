@@ -2,12 +2,13 @@
 
 import {
   h, s, api, usd, tokens, pct, seg, legend, empty, setQuery, longDate, barList, hm,
-  outputUsd, estimateNote, lowerMark, LOWER_TITLE, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor, storyLine,
+  outputUsd, estimateNote, lowerMark, LOWER_TITLE, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor, storyLine, segBar,
+  GROUPS, pickedGroup, rememberGroup,
 } from './lib.js';
 import { bandChart, sparkline } from './charts.js';
 import { pendingBlock } from './sessions.js';
 import { limitCard } from './limits.js';
-import { memberColor, memberLabel, timelineMissing, spikeMarks, spikeList, pickSpikes } from './spend.js';
+import { withColors, timelineMissing, spikeMarks, spikeList, pickSpikes } from './spend.js';
 
 function greeting(d) {
   const hr = d.getHours();
@@ -16,7 +17,8 @@ function greeting(d) {
 
 export async function renderOverview(main, r) {
   const range = r.query.get('range') === '7d' ? '7d' : 'today';
-  const d = await api('overview');
+  const group = pickedGroup(r.query);
+  const d = await api(group === 'category' ? 'overview' : `overview?group=${group}`);
   const now = new Date(d.now);
   const block = range === 'today' ? d.today : d.week;
   const t = block.totals;
@@ -65,20 +67,26 @@ export async function renderOverview(main, r) {
         spark && spark.values.some((v) => v > 0) ? sparkline(spark.values) : null),
       h('span.note', { text: spark ? 'Last two hours shown, in 5-minute steps.' : 'The sparkline arrives with the timeline module.' })),
     h('section.card.tight', null, h('span.label', { text: `Tokens ${when}` }), h('span.big', { text: lowerMark(t) + tokens(t.tokens), title: lower ? LOWER_TITLE : null }),
-      h('div.stackbar', { 'aria-hidden': 'true' }, CATEGORY_ORDER.map((k) => (cats[k].tokens ? h('span', { style: `width:${(cats[k].tokens / t.tokens * 100).toFixed(2)}%;background:${categoryColor(k)}` }) : null))),
+      t.tokens ? segBar(CATEGORY_ORDER.map((k) => ({
+        color: categoryColor(k), share: cats[k].tokens / t.tokens, title: CATEGORY_LABELS[k],
+        rows: [{ label: 'Tokens', value: tokens(cats[k].tokens), color: categoryColor(k) }, { label: 'Share of tokens', value: pct(cats[k].tokens / t.tokens, 1) },
+          { label: 'Cost', value: (k === 'output' ? lowerMark(t) : '') + usd(cats[k].usd) }],
+      })), { aria: `Tokens ${when} by kind` }) : null,
       h('span.note', { text: t.tokens ? `${pct(readShare)} are cache reads: the same context, reread every turn.` : 'No requests yet.' }), lowerNote && lowerNote.cloneNode(true)),
     h('section.card.tight', null, h('span.label', { text: `Subagents ${when}` }), h('span.big', { text: String(sub.count) }),
       h('span.note', { text: sub.count ? `They cost ${usd(sub.usd)} of ${usd(t.usd)}. ${sub.two_tool_calls_or_fewer} made two tool calls or fewer.` : 'No subagents ran.' }))));
 
   // today's cumulative chart and spikes
   const chart = h('section.card.grow2');
-  const head = h('div.split', null, h('h2', { text: "Today's spend, adding up" }));
+  chart.append(h('div.split', null, h('h2', { text: "Today's spend, adding up" }),
+    seg('Split by', GROUPS, group, (v) => { rememberGroup(v); setQuery({ group: v === 'category' ? null : v }); })));
+  const head = h('div');
   chart.append(head);
   const c = d.cumulative_today;
   let picked = pickSpikes(d.spikes_today, now.getTime() - 864e5, now.getTime());
   if (c && c.times.length && c.total[c.total.length - 1] > 0) {
-    const members = c.members.map((m, i) => ({ ...m, label: memberLabel(m, 'category'), color: memberColor(m, i, 'category'), values: c.values[i] }));
-    head.append(legend(members.map((m) => ({ label: m.label, color: m.color, value: (m.key === 'output' ? outputUsd(d.today.totals) : usd(m.final)) })), lowerMark(d.today.totals) + usd(d.today.totals.usd)));
+    const members = withColors(c.members, group).map((m, i) => ({ ...m, values: c.values[i] }));
+    head.append(legend(members.map((m) => ({ label: m.label, color: m.color, value: (group === 'category' && m.key === 'output' ? outputUsd(d.today.totals) : usd(m.final)) })), lowerMark(d.today.totals) + usd(d.today.totals.usd)));
     // start the axis at the first hour with spend; end at the next full hour after now
     const first = c.total.findIndex((v) => v > 0);
     const start = new Date(c.times[Math.max(0, first - 1)] - c.step_s * 1000); start.setMinutes(0, 0, 0);

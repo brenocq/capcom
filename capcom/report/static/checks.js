@@ -1,7 +1,7 @@
 // Checks: setup warnings drawn from real usage, ranked by the weekly saving, each
 // with its evidence, a small chart from its numbers and the change to paste.
 
-import { h, api, usd, pct, monthDay, hm, tokens, seg, empty, setQuery, sessionHref, maxOf, copyButton, daysText } from './lib.js';
+import { h, api, usd, pct, monthDay, hm, tokens, seg, empty, setQuery, sessionHref, maxOf, copyButton, daysText, entityColors, segBar, tableToggle, tipOn } from './lib.js';
 import { pendingBlock } from './sessions.js';
 import { READ_ONLY, markForm, markedChip, noticedBanners, summaryCard } from './marks.js';
 
@@ -52,9 +52,14 @@ export async function renderChecks(main, r) {
   const titleOf = new Map((d.rollups || []).map((r) => [r.kind, r.title]));
   const counted = (d.rollups || []).filter((r) => !r.judgement_call);
   const judged = (d.rollups || []).filter((r) => r.judgement_call);
+  // one color per place on every row: the six with the most saving in all, the rest gray
+  const bySaving = new Map();
+  for (const r of d.rollups || []) for (const x of r.scopes) bySaving.set(x.scope_label, (bySaving.get(x.scope_label) || 0) + x.saving_usd_per_week);
+  scopeColors = entityColors([...bySaving].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k]) => k));
   if (counted.length) {
     main.append(h('section.card.rollups', null, h('h2', { text: 'By kind' }),
-      h('p.note', { style: 'margin:0 0 8px', text: 'Each kind across the places it was found, with the share of each. Open a row for its findings.' }),
+      h('p.note', { style: 'margin:0 0 8px', text: 'Each kind across the places it was found, with the share of each (hover a bar for its numbers). Open a row for its findings.' }),
+      scopeLegend(),
       counted.map((r) => rollupRow(r, byN, titleOf, false))));
   }
   if (judged.length) {
@@ -72,24 +77,57 @@ export async function renderChecks(main, r) {
 
 // A roll-up row: the kind, its weekly saving, the scopes with their shares, what
 // it overlaps; it opens to its findings.
+let scopeColors = new Map();
+const scopeLegend = () => (scopeColors.size > 1 ? h('div.legend', { style: 'margin:0 0 6px' },
+  [...scopeColors].map(([k, c]) => h('span', null, h('i', { style: `background:${c}` }), k === '(other)' ? 'the rest' : k))) : null);
 function rollupRow(r, byN, titleOf, open) {
   const findings = r.findings.map((n) => byN.get(n)).filter(Boolean);
   const many = r.scopes.length !== 1;
   const noun = r.scope_noun + (many ? 's' : '');
-  const scopes = r.scopes.length === 1 && r.scopes[0].scope === 'all' ? 'across every project'
-    : `across ${r.scopes.length} ${noun}: ` + r.scopes.slice(0, 4).map((x) => `${x.scope_label} ${pct(x.share)}`).join(', ') + (r.scopes.length > 4 ? `, ${r.scopes.length - 4} more` : '');
+  const money = (x) => usd(x, x < 10 ? 2 : 0) + '/wk';
   const tags = [];
   // a judgement call's own section already says it is not in the total
   if (r.judgement_call) { /* no tag */ } else if (r.counted === 'none') tags.push(h('span.tag.over', { text: 'overlaps: not in the total', title: 'Its dollars are counted under the kind it overlaps.' }));
   else if (r.counted === 'some') tags.push(h('span.tag.over', { text: 'partly in the total', title: 'Some of its findings overlap a larger one and are left out of the total.' }));
-  // the kinds that kept one of its findings out of the total (none: no line)
+  // the kinds that kept one of its findings out of the total (none: no chip); their
+  // names on hover here, and in full once the row is open
   const near = r.overlaps.map((k) => titleOf.get(k) || k);
-  if (near.length) tags.push(h('span.note', { text: 'may share dollars with ' + near.slice(0, 3).join(', ') + (near.length > 3 ? `, ${near.length - 3} more` : '') }));
+  const shares = near.length ? `may share dollars with ${near.join(', ')}` : '';
+  if (near.length) {
+    tags.push(tipOn(h('span.tag.over', { text: `shares dollars with ${near.length === 1 ? near[0] : near.length + ' kinds'}` }),
+      'May share dollars with', near.map((k) => ({ label: k, value: '' })), { focus: false }));
+  }
+  const body = h('div.rfind');
+  let where;
+  if (r.scopes.length === 1 && r.scopes[0].scope === 'all') where = h('span.note.block', { text: 'across every project' });
+  else if (!many) where = h('span.note.block', { text: `in ${r.scopes[0].scope_label}` });
+  else {
+    // a small bar of each scope's share: the five largest, then the rest together
+    const sorted = [...r.scopes].sort((a, b) => b.share - a.share);
+    const top = sorted.slice(0, 5), rest = sorted.slice(5);
+    const colorOf = (k) => scopeColors.get(k) || scopeColors.get('(other)') || 'var(--gray)';
+    const parts = top.map((x) => ({ color: colorOf(x.scope_label), share: x.share, title: x.scope_label,
+      rows: [{ label: 'Share', value: pct(x.share) }, { label: 'Saving', value: 'up to ' + money(x.saving_usd_per_week) }] }));
+    if (rest.length) {
+      const share = rest.reduce((a, x) => a + x.share, 0);
+      parts.push({ color: colorOf('(other)'), share, title: `${rest.length} more ${rest.length === 1 ? r.scope_noun : noun}`,
+        rows: rest.slice(0, 6).map((x) => ({ label: x.scope_label, value: pct(x.share) }))
+          .concat(rest.length > 6 ? [{ label: `${rest.length - 6} more`, value: '' }] : []) });
+    }
+    const lead = sorted[0];
+    const text = `across ${r.scopes.length} ${noun}, most in ${lead.scope_label} (${pct(lead.share)})`;
+    where = h('span.scopes', null, h('span.note', { text }),
+      segBar(parts, { focus: false, aria: `across ${r.scopes.length} ${noun}: ` + sorted.map((x) => `${x.scope_label} ${pct(x.share)}`).join(', ') }));
+    body.append(tableToggle([r.scope_noun[0].toUpperCase() + r.scope_noun.slice(1), 'Share', 'Saving up to'],
+      sorted.map((x) => [x.scope_label, pct(x.share), money(x.saving_usd_per_week)]), `Each ${r.scope_noun} as a table`));
+  }
+  if (shares) body.append(h('p.note', { style: 'margin:0', text: shares[0].toUpperCase() + shares.slice(1) + '.' }));
+  body.append(...findings.map((f) => card(f, true)));
   return h('details.rollup', { open: open || null },
     h('summary', null,
-      h('span.mtext', null, h('b', { text: r.title }), h('span.note.block', { text: scopes }), tags.length ? h('span.tags', null, ...tags) : null),
-      h('span.save', null, h('small', { text: 'up to ' }), usd(r.saving_usd_per_week, r.saving_usd_per_week < 10 ? 2 : 0) + '/wk')),
-    h('div.rfind', null, findings.map((f) => card(f, true))));
+      h('span.mtext', null, h('b', { text: r.title }), where, tags.length ? h('span.tags', null, ...tags) : null),
+      h('span.save', null, h('small', { text: 'up to ' }), money(r.saving_usd_per_week))),
+    body);
 }
 
 

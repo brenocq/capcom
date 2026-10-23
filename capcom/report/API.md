@@ -199,7 +199,10 @@ it reads changed (the index for every view; the samples for Overview and Limits;
 marks for Checks and Did it work?). It opens no index and is never a job: a few `stat`
 calls and one `PRAGMA data_version`.
 
-### `GET /api/overview`
+### `GET /api/overview?group=category|project|model|agent`
+
+`group` (default `category`, the same names as `/api/spend`) splits today's
+cumulative chart only.
 
 ```
 {now, running_sessions,
@@ -207,7 +210,8 @@ calls and one `PRAGMA data_version`.
  previous_7_days: {since, daily_average_usd,     # the 7 days before today
                    same_hour_average_usd, same_hour},
  spending_now: {usd_last_hour, spark: {step_s, times, values} | null},
- cumulative_today: Cumulative (by category, 5-minute steps) | null,
+ cumulative_today: Cumulative (by `group`, 5-minute steps, top 6) | null,
+ group,
  spikes_today: Spikes | null,
  regime: Regime | null,                          # a change in the last 14 days
  limits: Limits without segments,                # see /api/limits

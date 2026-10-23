@@ -342,7 +342,19 @@ def status(ctx: Context) -> dict[str, Any]:
 SAME_HOUR_MIN_USD = 1.0
 
 
-def overview(ctx: Context) -> dict[str, Any]:
+def _group(query: Mapping[str, str]) -> GroupBy:
+    """The `group` of a query (default: by category); a 400 for an unknown one."""
+    raw = query.get("group") or GroupBy.CATEGORY.value
+    try:
+        return GroupBy(GROUP_ALIASES.get(raw, raw))
+    except ValueError:
+        names = ", ".join([*GroupBy, *GROUP_ALIASES])
+        raise ApiError(400, "bad_query", "group must be one of: " + names) from None
+
+
+def overview(ctx: Context, query: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """The Overview page; `group` splits today's cumulative chart (default: by category)."""
+    group = _group(query or {})
     today_since = ctx.midnight()
     week_since = ctx.midnight(6)
     prev_since = ctx.midnight(7)
@@ -379,13 +391,13 @@ def overview(ctx: Context) -> dict[str, Any]:
     step = _STEPS[1]
     cum = _try(
         lambda: ctx.analysis.cumulative(
-            ctx.index, ctx.table, today_since, ctx.now, GroupBy.CATEGORY, step
+            ctx.index, ctx.table, today_since, ctx.now, group, step, top=TOP_MEMBERS
         ),
         unavailable,
     )
     ctx.progress(0.3)
     if cum is not None:
-        cum = _tidy(cum, GroupBy.CATEGORY, names)
+        cum = _tidy(cum, group, names)
     marks = _spike_marks(ctx, today_since, ctx.now, infos, names, unavailable)
     spark_since = max(today_since, ctx.now - timedelta(hours=2))
     spark = _try(
@@ -457,6 +469,7 @@ def overview(ctx: Context) -> dict[str, Any]:
         },
         "spending_now": {"usd_last_hour": round(last_hour.usd, 6), "spark": spark_json},
         "cumulative_today": None if cum is None else _cumulative_json(cum, step, ctx.now),
+        "group": group.value,
         "spikes_today": marks,
         "regime": _regime(ctx, ctx.today() - timedelta(days=STORY_DAYS - 1), unavailable),
         "limits": _limits(ctx, None, full=False),
@@ -468,12 +481,7 @@ def spend(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     days = _int(query, "days", 14, 1, 366)
     if days not in SPEND_DAYS:
         raise ApiError(400, "bad_query", f"days must be one of {', '.join(map(str, SPEND_DAYS))}")
-    raw = query.get("group") or GroupBy.CATEGORY.value
-    try:
-        group = GroupBy(GROUP_ALIASES.get(raw, raw))
-    except ValueError:
-        names = ", ".join([*GroupBy, *GROUP_ALIASES])
-        raise ApiError(400, "bad_query", "group must be one of: " + names) from None
+    group = _group(query)
     since = ctx.midnight(days - 1)
     w = _window(ctx)
     hour_projects: dict[int, dict[str, float]] = {}  # local hour start (ms) -> project -> usd

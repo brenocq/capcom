@@ -2,7 +2,7 @@
 // (the reading, the forecast fan) and the Limits page (each window's sawtooth over
 // time, and what spent each window by project). Data from /api/limits.
 
-import { h, s, api, usd, tokens, seg, empty, setQuery, hm, monthDay, dayName, showTip, hideTip, SERIES, OTHER_COLOR } from './lib.js';
+import { h, s, api, usd, tokens, seg, empty, setQuery, hm, monthDay, dayName, showTip, hideTip, entityColors, segBar, tableToggle } from './lib.js';
 import { timeTicks, xAxis } from './charts.js';
 
 let uid = 0;
@@ -77,7 +77,7 @@ export function runoutMark(fc, x0, x1, weekly) {
 // sits under the lowest point of the fan and median over the label's span (and
 // under the run-out dot). Returns {side, top (px from the plot's top), x: [a, b] px}.
 export const LABEL_BOX = { w: 240, h: 46 }, LABEL_GAP = 10, PLOT_GUESS = 560;
-export function runoutLabel(f, fan, plot, box = LABEL_BOX) {
+export function runoutLabel(f, fan, plot, box = LABEL_BOX, reads = []) {
   const { x0, x1, w, h, ymax } = plot;
   const xc = f * w;
   const Ypx = (v) => h - v / ymax * h;
@@ -102,15 +102,20 @@ export function runoutLabel(f, fan, plot, box = LABEL_BOX) {
       }
     }
     const top = Math.max(Ypx(100) + 10, Ypx(low) + 6);
-    return { side, top, x: [a, b], fits: top + box.h <= h };
+    // the readings in the span must stay below the label, not run through it
+    let high = -Infinity;
+    for (const [t, v] of reads) if (t >= ta && t <= tb) high = Math.max(high, v);
+    const floor = high === -Infinity ? h : Math.min(h, Ypx(high) - 6);
+    return { side, top, x: [a, b], fits: top + box.h <= floor, inside: a >= 0 && b <= w };
   };
   const first = xc + LABEL_GAP + box.w <= w ? 'right' : 'left';
   let best = place(first);
   if (!best.fits) {
     const other = place(first === 'right' ? 'left' : 'right');
-    if (other.fits && other.x[0] >= 0 && other.x[1] <= w) best = other;
+    if (other.fits && other.inside) best = other;
   }
-  return { side: best.side, top: Math.min(best.top, h - box.h), x: best.x };
+  // clear: nothing passes through it; otherwise the label gets a solid backing
+  return { side: best.side, top: Math.min(best.top, h - box.h), x: best.x, clear: best.fits };
 }
 
 // What the cards and the page say about a window, in words.
@@ -144,8 +149,9 @@ function fitNote(w) {
 // Usage windows over time: each window's readings as a rising line that drops to
 // 0 at its reset, a dashed line at 100%, and the current window's forecast as a
 // fan (the 80% range, filled, with hairline edges, and the median dashed).
-// Each reading is a dot; the stretch from a window's reset (0 %) to its first reading
-// is dashed and labeled, since nothing was read there.
+// Readings are drawn as the line alone (Breno found the dots crowded); only a reading
+// that hit the limit gets a mark. The stretch from a window's reset (0 %) to its first
+// reading is dashed and labeled, since nothing was read there.
 // opts: {segments: [{points, resets_at, reset, hit_limit, start_known}], fan, now, x0, x1,
 //        height, left, weekly, since (ms: when recording began), runout (runoutMark)}
 export function limitChart(opts) {
@@ -215,13 +221,11 @@ export function limitChart(opts) {
       h('span.ylab', { style: `left:-${left}px;top:${t}`, text: `${v}%` }));
   }
   plot.append(svg);
-  // each reading as a dot (too many to tell apart: only the limit hits)
+  // only the readings that hit the limit get a mark; the others are the line itself
   const xp = (t) => ((t - x0) / (x1 - x0) * 100).toFixed(2) + '%';
   const yp = (v) => ((1 - v / ymax) * 100).toFixed(2) + '%';
-  const shown = hover.filter((p) => p.t >= x0 && p.t <= x1);
-  for (const p of shown) {
-    if (p.hit) plot.append(h('span.enddot', { style: `left:${xp(p.t)};top:${yp(p.v)};background:var(--accent-strong)`, title: 'Rate limit hit' }));
-    else if (shown.length <= 240) plot.append(h('span.rdot', { style: `left:${xp(p.t)};top:${yp(p.v)}` }));
+  for (const p of hover) {
+    if (p.hit && p.t >= x0 && p.t <= x1) plot.append(h('span.enddot', { style: `left:${xp(p.t)};top:${yp(p.v)};background:var(--accent-strong)`, title: 'Rate limit hit' }));
   }
   for (const g of gaps) {
     if ((g.b[0] - Math.max(g.a[0], x0)) / (x1 - x0) < 0.12) continue; // too narrow to label
@@ -237,10 +241,11 @@ export function limitChart(opts) {
     const y100 = yp(100), fx = (f) => (f * 100).toFixed(2) + '%';
     // the plot's width is not known until it is laid out: a narrow one (the
     // label spans more of it) is the cautious guess, as the forecast rises
-    const lab = runoutLabel(runout.f, fan, { x0, x1, w: PLOT_GUESS, h: H, ymax });
+    const lab = runoutLabel(runout.f, fan, { x0, x1, w: PLOT_GUESS, h: H, ymax }, LABEL_BOX,
+      hover.map((p) => [p.t, p.v]));
     plot.append(h('div.runguide', { style: `left:${fx(runout.f)};top:${y100}` }),
       h('span.rundot', { style: `left:${fx(runout.f)};top:${y100}`, title: runout.title }),
-      h(`div.runlab.${lab.side}`, { style: `left:${fx(runout.f)};top:${lab.top.toFixed(1)}px` },
+      h(`div.runlab.${lab.side}${lab.clear ? '' : '.backed'}`, { style: `left:${fx(runout.f)};top:${lab.top.toFixed(1)}px` },
         h('span.v', { text: runout.title }), runout.sub ? h('span.r', { text: runout.sub }) : null));
   }
   const label = (t) => `${opts.weekly ? monthDay(new Date(t)) + ' ' : ''}${hm(new Date(t))}`;
@@ -330,28 +335,36 @@ function windowSection(w, now, days, since) {
     card.append(h('h3', { text: 'What 1% costs, by model and token type' }));
     card.append(h('div.blist', null, w.fit.weights.slice(0, 8).map((x) => h('div.bitem', null, h('div.top', null,
       h('span', { text: `${x.model.replace(/^claude-/, '')} ${x.category.replace('_', ' ')}` }),
-      h('span.mono', { text: `${tokens(1 / x.percent_per_mtok * 1e6)} tokens` }))))));
+      h('span.mono', { text: `${tokens(Math.round(1 / x.percent_per_mtok * 1e6))} tokens` }))))));
   }
-  // what spent each window, newest first: one stacked bar per window, a color per project
+  // what spent each window, newest first: one bar per window, a color per project
+  // (the same project keeps its color in every window); each part's dollars and
+  // share of the limit on hover, all of them in the table
   const spent = w.segments.filter((sg) => sg.by_project && sg.by_project.length).slice(0, weekly ? 3 : 6);
   if (spent.length) {
-    const colors = new Map();
-    const colorOf = (name) => {
-      if (name === '(other)') return OTHER_COLOR;
-      if (!colors.has(name)) colors.set(name, SERIES[colors.size % SERIES.length]);
-      return colors.get(name);
-    };
+    const names = [...new Set(spent.flatMap((sg) => sg.by_project.map((p) => p.project)))];
+    const colors = entityColors(names);
+    const order = names.filter((n) => n !== '(other)').concat(names.includes('(other)') ? ['(other)'] : []);
     const rows = h('div.blist');
+    const table = [];
     for (const sg of spent) {
       const from = sg.start ? `${monthDay(new Date(sg.start))} ${hm(new Date(sg.start))}` : '';
       const to = sg.reset && sg.resets_at ? hm(new Date(sg.resets_at)) : 'now';
+      const span = `${from} → ${to}`;
       const total = sg.usd || 1e-9;
+      const parts = sg.by_project.map((p) => ({
+        color: colors.get(p.project), share: p.usd / total, title: p.project,
+        rows: [{ label: 'Spent', value: usd(p.usd) }, { label: 'Of the window', value: pctText(p.usd / total * 100, 1) },
+          p.percent === null ? null : { label: 'Of the limit', value: '≈' + pctText(p.percent, 1) }].filter(Boolean),
+      }));
       rows.append(h('div.bitem', null,
-        h('div.top', null, h('span', { text: `${from} → ${to} · peak ${pctText(sg.peak)}${sg.hit_limit ? ' · limit hit' : ''}` }), h('span.mono', { text: usd(sg.usd) })),
-        h('div.stackbar', { 'aria-hidden': 'true' }, sg.by_project.map((p) => h('span', { style: `width:${(p.usd / total * 100).toFixed(2)}%;background:${colorOf(p.project)}` }))),
-        h('span.note', { text: sg.by_project.map((p) => `${p.project} ${usd(p.usd)}${p.percent === null ? '' : ` (≈${pctText(p.percent, 1)})`}`).join(' · ') })));
+        h('div.top', null, h('span', { text: `${span} · peak ${pctText(sg.peak)}${sg.hit_limit ? ' · limit hit' : ''}` }), h('span.mono', { text: usd(sg.usd) })),
+        segBar(parts, { aria: `${span}: ${usd(sg.usd)}` })));
+      for (const p of sg.by_project) table.push([span, p.project, usd(p.usd), p.percent === null ? '' : '≈' + pctText(p.percent, 1)]);
     }
-    card.append(h('h3', { text: 'What spent each window' }), rows);
+    card.append(h('h3', { text: 'What spent each window' }),
+      h('div.legend', { style: 'margin:0 0 10px' }, order.map((n) => h('span', null, h('i', { style: `background:${colors.get(n)}` }), n))),
+      rows, tableToggle(['Window', 'Project', 'Spent', 'Of the limit'], table));
   }
   return card;
 }

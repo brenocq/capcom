@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -99,6 +100,34 @@ console.log(JSON.stringify({
     assert got["labels"][89] == "Oct 21"
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_day_bars_put_an_amount_on_every_day_with_spend() -> None:
+    got = _node("""
+const m = await import('./charts.js');
+const totals = [0, 12.5, 1234, 80, 3.2, 640, 41];
+const days = totals.map((t, i) => ({ date: new Date(2026, 9, 16 + i),
+  iso: `2026-10-${16 + i}`, values: [t], total: t }));
+const el = m.dayBars(days, [{ label: 'a', color: 'red' }], days[6].iso);
+const [bars] = el.children;
+console.log(JSON.stringify({
+  mode: bars.className,
+  amts: bars.children.map((c) => {
+    const a = c.children.find((k) => k && /amt/.test(k.className || ''));
+    return a ? [a.textContent, a.className] : null;
+  }),
+  f: bars.children.map((c) => c.attrs.style),
+}));
+""")
+    # a week fits level labels until the browser measures the bars
+    assert got["mode"] == "days hl flat"
+    assert got["amts"][0] is None  # a day without spend has no amount
+    assert [a[0] for a in got["amts"][1:]] == ["$13", "$1.2k", "$80", "$3.2", "$640", "$41"]
+    # the highest day and today are the ones a phone keeps
+    keys = [i for i, a in enumerate(got["amts"]) if a and "key" in a[1]]
+    assert keys == [2, 6]
+    assert got["f"][2] == "--f:1.0000" and got["f"][0] == "--f:0.0000"
+
+
 def _ys(d: object) -> list[float]:
     assert isinstance(d, str)
     return [float(pt.split(" ")[1]) for pt in d.lstrip("M").split("L")]
@@ -116,6 +145,65 @@ def test_band_chart_draws_the_total_and_each_series_from_zero() -> None:
     # not stacked: the smaller series stays below the larger one, and the total
     # (5 then 9) lies above both
     assert all(t < x < y for t, x, y in zip(total[1:], a[1:], b[1:], strict=True))
+
+
+def _node(body: str) -> Any:
+    out = subprocess.run(
+        ["node", "--input-type=module", "-e", FAKE_DOM + body],
+        cwd=STATIC,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    return json.loads(out.stdout)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_the_end_label_keeps_clear_of_the_markers_and_the_now_label() -> None:
+    got = _node("""
+const m = await import('./charts.js');
+const box = { left: -44, top: -24, right: 804, bottom: 304 };
+const size = { w: 40, h: 16 };
+const pt = { x: 780, y: 20 };
+// nothing in the way: above the end, to its left
+const free = m.placeEndLabel(pt, size, [], box);
+// a spike marker just above-left of the end and the "now" label above it
+const marker = { left: 730, top: -8, right: 756, bottom: 18 };
+const now = { left: 770, top: -22, right: 795, bottom: -8 };
+const busy = m.placeEndLabel(pt, size, [marker, now], box);
+const x = pt.x + busy.dx, y = pt.y + busy.dy;
+const r = { left: x, top: y, right: x + 40, bottom: y + 16 };
+const hit = [marker, now].some((o) =>
+  r.left < o.right && r.right > o.left && r.top < o.bottom && r.bottom > o.top);
+const inside = r.left >= box.left && r.right <= box.right
+  && r.top >= box.top && r.bottom <= box.bottom;
+// everything blocked: the least overlapping place, still inside
+const wall = { left: 0, top: -24, right: 800, bottom: 300 };
+const stuck = m.placeEndLabel(pt, size, [wall], box);
+console.log(JSON.stringify({ free, hit, inside, stuck }));
+""")
+    assert got["free"] == {"dx": -46, "dy": -22}
+    assert not got["hit"] and got["inside"]
+    assert set(got["stuck"]) == {"dx", "dy"}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_colors_follow_the_entity_not_its_rank() -> None:
+    got = _node("""
+const m = await import('./lib.js');
+const a = m.entityColors(['capcom', 'improved', 'toy-brain', '(other)']);
+const b = m.entityColors(['toy-brain', '(other)', 'improved', 'capcom']);
+const many = m.entityColors(['a', 'b', 'c', 'd', 'e', 'f', 'g']);
+console.log(JSON.stringify({ a: [...a], b: Object.fromEntries(b),
+  distinct: new Set([...a.values()]).size, many: [...many.values()] }));
+""")
+    a = dict(got["a"])
+    assert a == got["b"]
+    assert a["(other)"] == "var(--gray)"
+    assert got["distinct"] == 4
+    # six palette colors for the first six keys, the seventh shares the gray
+    assert len(set(got["many"][:6])) == 6 and got["many"][6] == "var(--gray)"
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
@@ -187,3 +275,21 @@ console.log(JSON.stringify(Object.fromEntries(labels)));
         "too_early": "Too early",
         "no_data": "Can\u2019t tell",
     }
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_a_share_bar_inside_a_control_is_one_image_without_tab_stops() -> None:
+    got = _node("""
+const m = await import('./lib.js');
+const parts = [{ color: 'red', share: 0.7, title: 'a', rows: [] },
+  { color: 'blue', share: 0.3, title: 'b', rows: [] },
+  { color: 'x', share: 0, title: 'c', rows: [] }];
+const own = m.segBar(parts, { aria: 'own' });
+const inner = m.segBar(parts, { focus: false, aria: 'inner' });
+const tabs = (b) => b.children.map((c) => c.attrs.tabindex || null);
+console.log(JSON.stringify({ own: [own.attrs.role, tabs(own)],
+  inner: [inner.attrs.role, tabs(inner)] }));
+""")
+    # a part with no share is left out; on its own each part is a tab stop
+    assert got["own"] == ["group", ["0", "0"]]
+    assert got["inner"] == ["img", [None, None]]

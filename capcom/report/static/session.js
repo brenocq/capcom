@@ -229,7 +229,7 @@ function unfolded(d) {
       return tipOn(h('span', { style: `left:${l.toFixed(2)}%;width:${w.toFixed(2)}%;background:${color};opacity:${(0.45 + 0.55 * a.usd / maxUsd).toFixed(2)}` }),
         `${a.description || type} · ${hm(new Date(a.first))} to ${hm(new Date(a.last))}`, [
           { label: 'Requests', value: String(a.requests) }, { label: 'Tool calls', value: String(a.tool_calls) },
-          { label: 'Peak context', value: tokens(a.peak_context) }, { label: 'Cost', value: usd(a.usd) }]);
+          { label: 'Peak context', value: tokens(a.peak_context) }, { label: 'Cost', value: usd(a.usd) }], { focus: false });
     };
     if (list.length === 1) {
       const [a] = list;
@@ -291,7 +291,8 @@ function agentsTable(d) {
         // the main thread is one thread: its calls are a count, not a median
         h('td.num', { text: a.median_tool_calls == null ? `${a.tool_calls} in all` : String(a.median_tool_calls), style: a.median_tool_calls != null && a.median_tool_calls <= 2 ? 'color:var(--clay)' : null }),
         h('td.num', { text: tokens(a.average_peak_context) }),
-        h('td', null, h('div.track', { style: 'width:140px' }, h('div', { style: `width:${(a.share * 100).toFixed(1)}%;background:${color}` }))),
+        h('td', null, tipOn(h('div.track', { style: 'width:140px' }, h('div', { style: `width:${(a.share * 100).toFixed(1)}%;background:${color}` })),
+          a.agent_type === 'main' ? 'main thread' : a.agent_type, [{ label: 'Share of cost', value: pct(a.share, 1), color }, { label: 'Cost', value: usd(a.usd) }])),
         h('td.cost', { text: usd(a.usd) }));
     })))));
   return card;

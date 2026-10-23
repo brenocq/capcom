@@ -4,20 +4,27 @@
 import {
   h, api, usd, tokens, pct, seg, legend, empty, errorBox, setQuery, monthDay, localDate, dayName, hm,
   outputUsd, estimateNote, lowerMark, SERIES, OTHER_COLOR, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor,
-  spikeText, spikeHref, projectChip, storyLine,
+  spikeText, spikeHref, projectChip, storyLine, segBar, tableToggle, tipOn, entityColors, GROUPS, pickedGroup, rememberGroup,
 } from './lib.js';
 import { bandChart, dayBars } from './charts.js';
 import { heatCard } from './heatmap.js';
 import { sessionsTable } from './sessions.js';
 
 const RANGES = [[7, '7 days'], [14, '14 days'], [30, '30 days'], [90, '90 days']];
-const GROUPS = [['category', 'Category'], ['project', 'Project'], ['model', 'Model'], ['agent', 'Agent type']];
 const TITLES = { 7: 'One week, adding up', 14: 'Two weeks, adding up', 30: 'Thirty days, adding up', 90: 'Ninety days, adding up' };
 
-export function memberColor(m, i, group) {
+export function memberColor(m, i, group, colors) {
   if (m.key === '(other)') return OTHER_COLOR;
   if (group === 'category' && CATEGORY_ORDER.includes(m.key)) return categoryColor(m.key);
+  if (colors && colors.has(m.key)) return colors.get(m.key);
   return SERIES[i] || OTHER_COLOR;
+}
+
+// The members of a chart with their labels and colors: a color follows its entity
+// (entityColors), so a project keeps its color across charts and windows.
+export function withColors(members, group) {
+  const colors = entityColors(members.map((m) => m.key));
+  return members.map((m, i) => ({ ...m, label: memberLabel(m, group), color: memberColor(m, i, group, colors) }));
 }
 
 export function memberLabel(m, group) {
@@ -85,7 +92,7 @@ export function timelineMissing(what) {
 
 export async function renderSpend(main, r) {
   const days = Number(r.query.get('days')) || 14;
-  const group = r.query.get('group') || 'category';
+  const group = pickedGroup(r.query);
   const d = await api(`spend?days=${days}&group=${group}`);
   const since = new Date(d.window.since), until = new Date(d.window.until);
   const t = d.totals;
@@ -96,7 +103,7 @@ export async function renderSpend(main, r) {
     h('div.titles', null, h('h1', { text: 'Spend' }), sub),
     h('div.controls', null,
       seg('Range', RANGES, days, (v) => setQuery({ days: v })),
-      seg('Split by', GROUPS, group, (v) => setQuery({ group: v })))));
+      seg('Split by', GROUPS, group, (v) => { rememberGroup(v); setQuery({ group: v }); }))));
   const story = storyLine(d.regime);
   if (story) main.append(story);
 
@@ -107,7 +114,7 @@ export async function renderSpend(main, r) {
   cum.append(head);
   if (d.cumulative && d.cumulative.times.length) {
     const c = d.cumulative;
-    const members = c.members.map((m, i) => ({ ...m, label: memberLabel(m, group), color: memberColor(m, i, group), values: c.values[i] }));
+    const members = withColors(c.members, group).map((m, i) => ({ ...m, values: c.values[i] }));
     head.append(legend(members.map((m) => ({ label: m.label, color: m.color, value: (group === 'category' && m.key === 'output' ? lowerMark(t) : '') + usd(m.final, m.final >= 100 ? 0 : 2) })), lowerMark(t) + usd(t.usd, t.usd >= 100 ? 0 : 2)));
     picked = pickSpikes(d.spikes, since.getTime(), until.getTime());
     cum.append(bandChart({ times: c.times, members, total: c.total, start: since.getTime(), end: until.getTime(), height: 340, left: 52, marks: spikeMarks(picked, days) }));
@@ -126,7 +133,7 @@ export async function renderSpend(main, r) {
   // per day + tokens vs dollars
   const perDay = h('section.card.grow3');
   if (d.daily) {
-    const members = d.daily.members.map((m, i) => ({ label: memberLabel(m, group), color: memberColor(m, i, group) }));
+    const members = withColors(d.daily.members, group);
     const rows = d.daily.days.map((x) => ({ ...x, iso: x.date, date: localDate(x.date) }));
     const best = rows.reduce((a, b) => (b.total > a.total ? b : a), rows[0]);
     perDay.append(h('div.split', null, h('h2.small', { text: 'Per day' }),
@@ -155,17 +162,24 @@ function tokensVsDollars(t) {
   const c = t.categories;
   const tokShare = CATEGORY_ORDER.map((k) => (t.tokens ? c[k].tokens / t.tokens : 0));
   const usdShare = CATEGORY_ORDER.map((k) => (t.usd ? c[k].usd / t.usd : 0));
-  const bar = (shares, aria) => h('div.stackbar.tall', { role: 'img', 'aria-label': aria },
-    shares.map((x, i) => (x > 0 ? h('span', { style: `width:${(x * 100).toFixed(2)}%;background:${categoryColor(CATEGORY_ORDER[i])}` }) : null)));
-  const names = ['reads', 'writes', 'output', 'input'];
-  const aria = (shares) => CATEGORY_ORDER.map((k, i) => `${pct(shares[i], 1)} ${CATEGORY_LABELS[k].toLowerCase()}`).join(', ');
+  const lower = (k) => (k === 'output' ? lowerMark(t) : '');
+  const bar = (shares, what) => segBar(CATEGORY_ORDER.map((k, i) => ({
+    color: categoryColor(k), share: shares[i], title: CATEGORY_LABELS[k],
+    rows: [
+      { label: `Share of ${what}`, value: pct(shares[i], 1), color: categoryColor(k) },
+      { label: 'Tokens', value: tokens(c[k].tokens) }, { label: 'Cost', value: lower(k) + usd(c[k].usd) },
+    ],
+  })), { tall: true, aria: `Share of ${what} by kind` });
+  const block = (label, el) => h('div', { style: 'display:flex;flex-direction:column;gap:6px' }, h('span.label', { text: label }), el);
   card.append(
-    h('div', { style: 'display:flex;flex-direction:column;gap:6px' }, h('span.label', { text: 'Share of tokens' }), bar(tokShare, 'Tokens: ' + aria(tokShare))),
-    h('div', { style: 'display:flex;flex-direction:column;gap:6px' }, h('span.label', { text: 'Share of cost' }), bar(usdShare, 'Cost: ' + aria(usdShare)),
-      h('div', { style: 'display:flex;justify-content:space-between;font-size:11px;color:var(--muted)' },
-        names.map((n, i) => h('span', { text: `${n} ${pct(usdShare[i])}` })))),
+    legend(CATEGORY_ORDER.map((k) => ({ label: CATEGORY_LABELS[k], color: categoryColor(k), value: '' }))),
+    block('Share of tokens', bar(tokShare, 'tokens')),
+    block('Share of cost', bar(usdShare, 'cost')),
     h('p.para', { style: 'font-size:14px' }, `Output is ${pct(tokShare[2], 1)} of the tokens and ${pct(usdShare[2])} of the cost (${outputUsd(t)}). `,
       `Cache reads are ${pct(tokShare[0], 1)} of the tokens: ${tokens(c.cache_read.tokens)} of them, the same context reread on every turn, for ${pct(usdShare[0])} of the cost.`),
+
+    tableToggle(['Kind', 'Tokens', 'Share of tokens', 'Cost', 'Share of cost'],
+      CATEGORY_ORDER.map((k, i) => [CATEGORY_LABELS[k], tokens(c[k].tokens), pct(tokShare[i], 1), lower(k) + usd(c[k].usd), pct(usdShare[i], 1)])),
   );
   return card;
 }
@@ -178,13 +192,19 @@ function contextCard(buckets) {
   const shares = buckets.map((b) => [b.requests / nReq, nUsd ? b.usd / nUsd : 0]);
   const max = Math.max(...shares.flat(), 1e-9);
   card.append(
-    h('div.pairs', null, buckets.map((b, i) => h('div', { title: `${b.label}: ${b.requests} requests (${pct(shares[i][0])}), ${usd(b.usd)} (${pct(shares[i][1])})` },
+    h('div.pairs.hl', null, buckets.map((b, i) => tipOn(h('div', null,
       h('div', { style: `height:${(shares[i][0] / max * 100).toFixed(1)}%;background:var(--gray)` }),
-      h('div', { style: `height:${(shares[i][1] / max * 100).toFixed(1)}%;background:var(--accent)` })))),
+      h('div', { style: `height:${(shares[i][1] / max * 100).toFixed(1)}%;background:var(--accent)` })),
+    `Context ${b.label.replace('-', '–')} tokens`, [
+      { label: 'Requests', value: `${b.requests.toLocaleString('en-US')} (${pct(shares[i][0])})`, color: 'var(--gray)' },
+      { label: 'Cost', value: `${usd(b.usd)} (${pct(shares[i][1])})`, color: 'var(--accent)' },
+    ]))),
     h('div.pairlabs', null, buckets.map((b) => h('span', { text: b.label.replace('-', '–') }))));
   const big = buckets.slice(4);
   const bigReq = big.reduce((a, b) => a + b.requests, 0) / nReq, bigUsd = nUsd ? big.reduce((a, b) => a + b.usd, 0) / nUsd : 0;
   card.append(h('p.para', { text: `Requests with more than 400k tokens of context are ${pct(bigReq)} of the requests and ${pct(bigUsd)} of the cost.` }));
+  card.append(tableToggle(['Context', 'Requests', 'Share', 'Cost', 'Share'],
+    buckets.map((b, i) => [b.label.replace('-', '–'), b.requests.toLocaleString('en-US'), pct(shares[i][0]), usd(b.usd), pct(shares[i][1])])));
   return card;
 }
 

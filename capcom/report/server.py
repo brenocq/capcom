@@ -280,7 +280,7 @@ SAMPLED = frozenset({"limits", "overview"})
 
 # the query parameters each endpoint reads: the cache key holds only these
 PARAMS: dict[str, tuple[str, ...]] = {
-    "overview": (),
+    "overview": ("group",),
     "spend": ("days", "group"),
     "sessions": ("days", "limit", "sort", "q"),
     "session": (),
@@ -1007,7 +1007,7 @@ def compute(
 Endpoint = Callable[[api.Context, str, dict[str, str]], Any]
 ENDPOINTS: dict[str, Endpoint] = {
     "status": lambda c, _, q: api.status(c),
-    "overview": lambda c, _, q: api.overview(c),
+    "overview": lambda c, _, q: api.overview(c, q),
     "spend": lambda c, _, q: api.spend(c, q),
     "sessions": lambda c, _, q: api.sessions(c, q),
     "session": lambda c, sid, q: api.session(c, sid),
