@@ -580,11 +580,41 @@ READY = """new Promise((done) => {
       && main.childElementCount && !main.querySelector(':scope > p.loading')
       && !main.hasAttribute('data-skeleton') && !main.hasAttribute('data-stale')
       && !document.querySelector('.loadstatus:not([hidden]), #main .card[aria-busy="true"]')
+      && !document.querySelector('.sk')
       && !document.body.textContent.includes('Reading the index…');
     if (ok || Date.now() - t0 > 15000) setTimeout(() => done(!!ok), 400); else setTimeout(tick, 80);
   };
   tick();
 })"""
+# The loading placeholders (skeleton.js): with every API reply held back, the page
+# shows its outline; wait for it, then check it like a page, plus that no block
+# runs out of its card.
+HELD = """new Promise((done) => {
+  const t0 = Date.now();
+  const tick = () => {
+    const ok = document.readyState === 'complete' && document.querySelector('#main .sk');
+    if (ok || Date.now() - t0 > 10000) setTimeout(() => done(!!ok), 300); else setTimeout(tick, 50);
+  };
+  tick();
+})"""
+SK_CHECK = """(() => {
+  const out = [];
+  const name = (e) => e.tagName.toLowerCase()
+    + [...e.classList].slice(0, 2).map((c) => '.' + c).join('');
+  for (const el of document.querySelectorAll('.sk, .sk-ring, .sk-bars i, .sk-dots i, .sk-draw')) {
+    if (el.closest('.scroll')) continue;
+    const box = el.closest('.card, .panel, .sidebar');
+    const r = el.getBoundingClientRect();
+    if (!box || !r.width) continue;
+    const b = box.getBoundingClientRect();
+    const off = r.left < b.left - 1 || r.right > b.right + 1
+      || r.top < b.top - 1 || r.bottom > b.bottom + 1;
+    if (off) out.push({ kind: 'escapes', detail: 'placeholder',
+      el: name(box) + ' ' + name(el.parentElement) + ' ' + name(el) });
+    if (out.length > 20) break;
+  }
+  return out;
+})()"""
 SETTLE = (
     "new Promise((d) => requestAnimationFrame(() => requestAnimationFrame(() => "
     "setTimeout(() => d(true), 250))))"
@@ -759,12 +789,55 @@ def run(
                             )
                         for label, width, scale in sizes:
                             one_width(chrome, res, name, theme, label, width, scale, out_dir)
+                for name, href in found:
+                    for theme in themes:
+                        placeholders(chrome, res, base + href, name, theme, sizes)
                 if out_dir is not None:
                     write_sheets(chrome, res, out_dir)
             finally:
                 chrome.close()
     res.seconds = time.monotonic() - t0
     return res
+
+
+def placeholders(
+    chrome: Chrome,
+    res: Result,
+    url: str,
+    page: str,
+    theme: str,
+    sizes: Sequence[tuple[str, int, float]],
+) -> None:
+    """Check the page's loading outline at every width: its API replies held back."""
+    chrome.viewport(sizes[0][1], sizes[0][2], theme)
+    chrome.page("Fetch.enable", {"patterns": [{"urlPattern": "*/api/*"}]})
+    try:
+        chrome.page("Page.navigate", {"url": url})
+        if not chrome.js(HELD):
+            res.problems.append(
+                {
+                    "page": page + " (loading)",
+                    "width": sizes[0][0],
+                    "theme": theme,
+                    "kind": "no-placeholder",
+                    "el": url,
+                }
+            )
+            return
+        for label, width, scale in sizes:
+            chrome.viewport(width, scale, theme)
+            chrome.js(SETTLE)
+            # the status line floats over the page while it loads, by design
+            opts = {
+                "touch": width < TOUCH_BELOW,
+                "ignore": ".tip, [data-layout-ignore], .loadstatus",
+            }
+            found = check(chrome, opts) + list(chrome.js(SK_CHECK) or [])
+            res.problems += [
+                {"page": page + " (loading)", "width": label, "theme": theme, **p} for p in found
+            ]
+    finally:
+        chrome.page("Fetch.disable")
 
 
 # --------------------------------------------------------------------------- contact sheets

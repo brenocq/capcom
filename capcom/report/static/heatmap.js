@@ -10,6 +10,7 @@ import {
   showTip, hideTip, errorBox, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor,
 } from './lib.js';
 import { heatColor } from './charts.js';
+import { hourSkeleton } from './skeleton.js';
 
 const HOUR = 3600e3;
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -308,7 +309,7 @@ export function causeLine(d) {
 async function hourPanel(panel, start, onClose) {
   const d0 = new Date(start);
   const when = `${rowLabel(d0)}, ${hourText(d0)}`;
-  panel.replaceChildren(h('div.split', null, h('h3.hm-title', { text: when }), closeButton(onClose)), h('p.note', { text: 'Loading…' }));
+  panel.replaceChildren(h('div.split', null, h('h3.hm-title', { text: when }), closeButton(onClose)), hourSkeleton());
   let d;
   try {
     d = await api('hour?start=' + encodeURIComponent(isoOf(start)));
