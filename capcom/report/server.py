@@ -19,14 +19,18 @@ under `--read-only`.
 API replies are cached per index generation (`ApiCache`): the key holds the index
 files' sizes and modification times and the index's `PRAGMA data_version` on a held
 read connection, so any write invalidates every entry and a scan that wrote nothing
-none, plus only the query parameters the endpoint reads. Entries also expire after
-a few minutes, since some numbers move with the clock alone, and the cache is
-bounded in bytes.
+none, plus only the query parameters the endpoint reads. Under `capcom serve` the
+generation, once it moved, holds a minute (`ApiCache.current`): the scan writes
+every few seconds while a session runs, and the pages need not follow each write.
+Entries also expire after a few minutes, since some numbers move with the clock
+alone, and the cache is bounded in bytes.
 
-The index stays fresh through a `Scanner`: an incremental `run_scan` at start and
-then every minute, in one background thread. Only that thread writes the index
-(SQLite's WAL lets the handlers read while it does), and a lock makes sure two scans
-never overlap.
+The index stays fresh through a `Scanner`: an incremental scan at start and then
+every few seconds, in one background thread, so a session shows in "Live now" soon
+after it writes. With nothing new, a scan is one stat per log and two indexed
+lookups, a few milliseconds, and it writes nothing. Only that thread writes the
+index (SQLite's WAL lets the handlers read while it does), and a lock makes sure two
+scans never overlap.
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ import hmac
 import importlib
 import io
 import json
+import math
 import os
 import secrets
 import select
@@ -107,6 +112,9 @@ CACHE_BYTES = 32 * 1024 * 1024  # encoded replies kept, all endpoints together
 CACHE_TTL = 300.0  # seconds: "today", "last hour" and "running" move with the clock
 UNCACHED = {"status", "live"}  # cheap, and about the current minute
 PATIENCE = 0.3  # seconds a request waits for its reply before answering 202
+SCAN_INTERVAL = 3.0  # seconds from the end of one background scan to the next
+SCAN_REST = 4.0  # ...or this many times as long as that scan took, when longer
+GEN_HOLD = 60.0  # serve: seconds the pages' index generation holds after it moved
 POLL_WAIT = 0.5  # seconds a poll waits for a newer partial reply or the end
 LEAVE_TICK = 0.05  # seconds between two looks, while a poll waits, for its page gone
 PRIORITY_HEADER = "X-Capcom-Priority"  # "low": a prefetch, run as background work
@@ -119,20 +127,39 @@ class ApiCache:
     first out once they pass `max_bytes`; an entry older than `ttl` seconds of the
     site's clock is computed again. Thread-safe."""
 
-    def __init__(self, max_bytes: int = CACHE_BYTES, ttl: float = CACHE_TTL) -> None:
+    def __init__(
+        self, max_bytes: int = CACHE_BYTES, ttl: float = CACHE_TTL, hold: float = 0.0
+    ) -> None:
         self.max_bytes = max_bytes
         self.ttl = ttl
+        self.hold = hold
         self._entries: OrderedDict[tuple[Any, ...], tuple[float, bytes]] = OrderedDict()
         self._bytes = 0
         self._lock = threading.Lock()
         self.hits = 0
         self.misses = 0
         self._watch: DataVersion | None = None
+        self._shown: tuple[int, ...] = ()  # the generation `current` gives
+        self._shown_at = -math.inf  # when it moved there (time.monotonic)
         # the last reply of each view (the key without its generation and date),
         # kept after its generation ended, with when it was computed: shown, marked
         # stale, while the new one is computed
         self._stale: OrderedDict[tuple[Any, ...], tuple[float, bytes]] = OrderedDict()
         self._stale_bytes = 0
+
+    def current(self, index_path: Path, now: float | None = None) -> tuple[int, ...]:
+        """The index generation the cached replies and /api/version go by: the one
+        `generation` gives, except that once it moved it stays `hold` seconds. The
+        background scan writes every few seconds while a session runs, and each
+        move turns every cached reply stale (open pages fetch their view again, the
+        warmer starts over); held, that happens at most once per `hold`, and a first
+        write after a quiet `hold` still shows at once. Live now reads uncached."""
+        gen = generation(index_path, self.watch(index_path))
+        t = time.monotonic() if now is None else now
+        with self._lock:
+            if gen != self._shown and t - self._shown_at >= self.hold:
+                self._shown, self._shown_at = gen, t
+            return self._shown
 
     def watch(self, index_path: Path) -> DataVersion:
         """The held data_version reader of `index_path`, made on first use."""
@@ -373,15 +400,22 @@ class Site:
 
 
 class Scanner:
-    """Incremental scans in one background thread: one at start, then one every
-    `interval` seconds after the previous one ends. `scan_once` returns False
-    without scanning when a scan is already running, so two never overlap."""
+    """Incremental scans in one background thread: one at start, then the next
+    `pause(took)` seconds after the previous one ends: `interval`, or `rest` times as
+    long as that scan took when that is longer, so a slow scan (the first, a large
+    catch-up) never keeps a core busy. `scan_once` returns False without scanning
+    when a scan is already running, so two never overlap."""
 
     def __init__(
-        self, scan: Callable[[], object], interval: float = 60.0, name: str = "capcom-scan"
+        self,
+        scan: Callable[[], object],
+        interval: float = SCAN_INTERVAL,
+        name: str = "capcom-scan",
+        rest: float = SCAN_REST,
     ) -> None:
         self._scan = scan
         self.interval = interval
+        self.rest = rest
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name=name, daemon=True)
@@ -409,10 +443,15 @@ class Scanner:
             self._lock.release()
         return True
 
+    def pause(self, took: float) -> float:
+        """Seconds to wait after a scan that took `took` seconds."""
+        return max(self.interval, self.rest * took)
+
     def _loop(self) -> None:
         while not self._stop.is_set():
+            t0 = time.monotonic()
             self.scan_once()
-            self._stop.wait(self.interval)
+            self._stop.wait(self.pause(time.monotonic() - t0))
 
     def start(self) -> None:
         self._thread.start()
@@ -1020,8 +1059,10 @@ def version(site: Site) -> dict[str, Any]:
     stamp, when the index was last written, and this launch's id (a restart changes
     it, so an open page knows to fetch the new write token). A few stat calls and one
     PRAGMA on a held connection: no index is opened, nothing is computed."""
-    watch = site.cache.watch(site.index_path) if site.cache is not None else None
-    gen = generation(site.index_path, watch)
+    if site.cache is not None:
+        gen = site.cache.current(site.index_path)
+    else:
+        gen = generation(site.index_path)
 
     def digest(x: Any) -> str:
         return hashlib.blake2s(repr(x).encode(), digest_size=6).hexdigest()
@@ -1071,7 +1112,7 @@ def cache_key(
     is open. The marks file (changes.jsonl) counts the same way for the replies
     that show marks (`MARKED`)."""
     assert site.cache is not None
-    gen = generation(site.index_path, site.cache.watch(site.index_path))
+    gen = site.cache.current(site.index_path)
     today = now.astimezone(site.tz).date().isoformat()  # the windows start at midnight
     args: tuple[Any, ...] = tuple((k, query[k]) for k in PARAMS.get(name, ()) if k in query)
     if name in SAMPLED:
@@ -1274,6 +1315,7 @@ def run_serve(
         openclaw_root=config.openclaw_root,
         state_dir=config.state_dir,
         scanner=scanner,
+        cache=ApiCache(hold=GEN_HOLD),
         read_only=read_only,
         day_cache=config.cache_dir / DAY_CACHE,
         ask_on=ask_claude,
@@ -1284,7 +1326,7 @@ def run_serve(
         print(f"capcom serve: cannot listen on {HOST}:{port} ({err})", file=sys.stderr)
         return 1
     url = f"http://{HOST}:{server.server_address[1]}/"
-    fresh = "rescanning every minute" if scanner else "no background scan"
+    fresh = f"rescanning every {SCAN_INTERVAL:g} s" if scanner else "no background scan"
     fresh += ", read-only" if read_only else ""
     fresh += "" if ask_claude else ", no Ask Claude"
     print(f"capcom: serving {url} (local only, {fresh}; Ctrl+C to stop)", flush=True)
