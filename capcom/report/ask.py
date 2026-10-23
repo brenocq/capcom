@@ -10,7 +10,9 @@ written, one JSON object per line: `{"type": "text", "text": ...}` pieces, then
 capcom itself makes no network request: the CLI does, with the user's own
 sign-in, and only when the user asks in the page. What goes in is what the page
 sends: the page's name, a part's label and its numbers and labels in capcom's own
-wording, the chat's earlier turns and the question. The page never sends text
+wording, the text the user selected on the page (without the private pieces it
+crossed, which are only named), where it sits, the chat's earlier turns and the
+question. The page never sends text
 from the logs beyond tool names, file paths and short labels (static/ask.js).
 
 The child runs in an empty temporary folder (no CLAUDE.md or AGENTS.md to pick
@@ -36,12 +38,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 MODEL = "claude-haiku-5-5"
-MAX_BODY = 16 * 1024  # bytes: a question, a part and the earlier turns
+MAX_BODY = 20 * 1024  # bytes: a question, a part, a selection and the earlier turns
 TIMEOUT = 60.0  # seconds a question may take, from start to the last word
 SLOTS = 2  # questions answered at once
 MAX_PAGE = 40
 MAX_LABEL = 160
 MAX_PART = 3000
+MAX_SELECTION = 1000
+MAX_WHERE = 200
 MAX_TURNS = 8
 MAX_TURN = 1500
 MAX_QUESTION = 600
@@ -60,12 +64,27 @@ SYSTEM = (
     "the question, say so in one sentence. capcom's "
     "dollars are API-equivalent cost at list prices, not the person's bill. A finding's "
     "saving is an estimate of what a change would save in a week at this pace. "
+    "When the person selected some text on the page, explain what that text means, "
+    "using the part of the page around it as context. Pieces marked [left out] were "
+    "private and removed: never guess what they said. "
     "After the answer, write a line that is exactly SUGGESTIONS: and then two or three "
     "short follow-up questions the person might ask next, one per line, each under eight "
     "words, written the way the person would ask them."
 )
 
 EXPLAIN = "Explain this part to me very shortly and simply."
+EXPLAIN_SELECTION = "Explain the text I selected, very shortly and simply."
+
+# What a selection may have crossed and lost (static/ask.js, PRIVATE): only these
+# names come in, so the page cannot send anything else in their place.
+LEFT_OUT = (
+    "session names",
+    "agent names",
+    "evidence rows",
+    "table rows",
+    "your notes",
+    "pasted config",
+)
 
 
 class AskError(Exception):
@@ -99,7 +118,9 @@ def _clean(value: Any, limit: int, name: str, *, required: bool = False) -> str:
 
 def _fence(text: str) -> str:
     """Text inside a <tag>...</tag> block, unable to close the block early."""
-    return re.sub(r"</?(part|chat|message)\b", lambda m: m.group(0).replace("<", "\u2039"), text)
+    return re.sub(
+        r"</?(part|selection|chat|message)\b", lambda m: m.group(0).replace("<", "\u2039"), text
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +132,9 @@ class Question:
     part: str
     history: tuple[tuple[str, str], ...]
     question: str
+    selection: str = ""  # the text the user selected, its private pieces left out
+    where: str = ""  # where it sits: the page, the card's and the section's headings
+    left_out: tuple[str, ...] = ()  # what kinds of private pieces it lost (LEFT_OUT)
 
 
 def parse(body: Any) -> Question:
@@ -137,14 +161,39 @@ def parse(body: Any) -> Question:
         said = _clean(turn.get("text"), MAX_TURN, "a turn's text")
         if said:
             turns.append((str(turn["role"]), said))
-    question = _clean(body.get("question"), MAX_QUESTION, "question") or EXPLAIN
-    return Question(page, label, text, tuple(turns), question)
+    selection = _clean(body.get("selection"), MAX_SELECTION, "selection")
+    where = " ".join(_clean(body.get("where"), MAX_WHERE, "where").split())
+    raw = body.get("left_out") or []
+    if not isinstance(raw, list) or any(k not in LEFT_OUT for k in raw):
+        raise AskError(400, "bad_request", "left_out lists only what a selection may lose.")
+    left_out = tuple(k for k in LEFT_OUT if k in raw)
+    picked = bool(selection or left_out)
+    default = EXPLAIN_SELECTION if picked else EXPLAIN
+    question = _clean(body.get("question"), MAX_QUESTION, "question") or default
+    return Question(page, label, text, tuple(turns), question, selection, where, left_out)
 
 
 def build_prompt(q: Question) -> str:
     """The user message the CLI gets: the page, the part, the chat so far, the question."""
     out = [f"The person is looking at capcom's {q.page} page."]
-    if q.label or q.part:
+    if q.selection or q.left_out:
+        at = f' (at "{_fence(q.where)}")' if q.where else ""
+        out.append(f"They selected this text on the page{at}:")
+        shown = _fence(q.selection) or "[left out]"
+        out.append(f"<selection>\n{shown}\n</selection>")
+        if q.left_out:
+            out.append(
+                "Private pieces of it were left out and marked [left out]: "
+                + ", ".join(q.left_out)
+                + "."
+            )
+        if q.part:
+            out.append(
+                f'It sits in this part of the page ("{_fence(q.label) or "a part"}"). '
+                "What the part shows, in capcom's own words and numbers:"
+            )
+            out.append(f"<part>\n{_fence(q.part)}\n</part>")
+    elif q.label or q.part:
         out.append(
             f'They picked this part of the page ("{_fence(q.label) or "a part"}"). '
             "What it shows, in capcom's own words and numbers:"

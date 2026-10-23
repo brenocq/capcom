@@ -12,7 +12,7 @@ per-launch token the pages carry in a meta tag, an Origin (or Referer) of this
 server, a JSON body of at most 4 KB, and a body that passes `didit.write`'s schema;
 `--read-only` turns it off (405). `POST /api/ask` (`ask.py`) streams an answer from
 the user's own `claude` CLI about a part of a page, behind the same checks with a
-body of at most 16 KB, two at a time, with a timeout, its child killed by PID when
+body of at most 20 KB, two at a time, with a timeout, its child killed by PID when
 the page goes away; `--no-ask` turns it off (405). It writes nothing, so it stays on
 under `--read-only`.
 

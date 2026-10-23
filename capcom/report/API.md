@@ -100,7 +100,7 @@ Errors are JSON: `{"error": code, "message": text, ...}`.
 | 404 | `not_found` | Unknown endpoint, session or change. |
 | 405 | | A method other than GET and HEAD, except `POST /api/changes` and `/api/ask`; the first under `--read-only` too, the second under `--no-ask`. |
 | 409 | `already_marked` | `POST /api/changes`: the finding already has an open mark. |
-| 411, 413, 415 | `no_length`, `too_large`, `bad_type` | `POST /api/changes` or `/api/ask`: no Content-Length, a body over 4 KB (16 KB for `/api/ask`, or one of its fields past its limit), not `application/json`. |
+| 411, 413, 415 | `no_length`, `too_large`, `bad_type` | `POST /api/changes` or `/api/ask`: no Content-Length, a body over 4 KB (20 KB for `/api/ask`, or one of its fields past its limit), not `application/json`. |
 | 429 | `busy` | `POST /api/ask`: two answers are being written already. |
 | 503 | `no_claude` | `POST /api/ask`: no `claude` command on the PATH of `capcom serve`. |
 | 501 | `unavailable` | The analysis module behind it is not built yet; adds `module` and `milestone`. |
@@ -745,7 +745,8 @@ pages leave out every button that writes.
 
 #### `POST /api/ask`
 
-The chat in the pages' corner (`static/ask.js`, `ask.py`). The user turns it on once
+The chat in the pages' corner (`static/ask.js`, `ask.py`), behind capcom's mascot,
+Roger. The user turns it on once
 in the panel; the choice stays in that browser. Each question starts the user's own
 `claude` CLI headless:
 
@@ -760,7 +761,7 @@ with `ENABLE_CLAUDEAI_MCP_SERVERS=false`, in an empty temporary folder, the prom
 stdin. capcom makes no network request itself; the CLI does, signed in as the user.
 
 Guarded like `POST /api/changes`: this launch's token in `X-Capcom-Token`, an Origin
-(or Referer) of this server, `application/json`, a Content-Length of at most 16 KB.
+(or Referer) of this server, `application/json`, a Content-Length of at most 20 KB.
 Two answers at a time (a third gets 429), each stopped after 60 s; when the page
 closes the connection the child is killed by its PID (and its process group).
 `--no-ask` turns it off (405); `--read-only` does not, as it writes nothing.
@@ -772,9 +773,23 @@ Body, every other field ignored:
  part: {label, text} | null,             # the part a mark was clicked on (at most 160
                                          #   and 3000 characters): its numbers and labels
                                          #   in capcom's words, never text from the logs
+ selection: "..." | null,                # the text the user selected (at most 1000
+                                         #   characters), each private piece it crossed
+                                         #   replaced by "[left out]"
+ where: "Checks › By kind › ...",        # where it sits: the page, then the headings
+                                         #   of its card and section (at most 200)
+ left_out: ["session names", ...],       # what kinds of private pieces it lost, only
+                                         #   from ask.LEFT_OUT, else 400
  history: [{role: "user"|"assistant", text}],   # the chat so far, the last 8 turns
- question: "..."}                        # at most 600 characters; default: explain the part
+ question: "..."}                        # at most 600 characters; default: explain the
+                                         #   part, or the selection when there is one
 ```
+
+A selection's `part` is the card or section around it, built as a mark's is. The
+page leaves out of a selection, and only names: session titles (the links to
+sessions, a session page's heading, a spike's session), a subagent's spawn
+description, evidence rows, tables, the user's notes and anything typed in a field,
+and pasted config (`PRIVATE` in `static/ask.js`).
 
 Reply: `200 application/x-ndjson`, one JSON object per line as the answer is written,
 until the connection closes:
