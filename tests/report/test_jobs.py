@@ -627,3 +627,40 @@ def test_version_says_which_part_changed(index_path: Path, tmp_path: Path) -> No
         assert v2["samples"] != v1["samples"]
         assert v2["index"] == v1["index"] and v2["marks"] == v1["marks"]
     assert site.jobs is not None and len(site.jobs) == 0  # never a job
+
+
+def test_overview_group_switch_builds_on_the_newest_cached_reply(index_path: Path) -> None:
+    # two splits of the same index state computed at different moments (two pages
+    # asking at once): a switch keeps the moment of the newer one, the reply a page
+    # shows last, not of whichever group comes first
+    site = Site(index_path, TABLE, FAKE, clock=lambda: NOW, tz=UTC, patience=10)
+    fresh = Site(index_path, TABLE, FAKE, tz=UTC, cache=None, jobs=None)
+    assert site.cache is not None
+    older, newer = NOW - timedelta(minutes=2), NOW - timedelta(minutes=1)
+    for group, when in (("model", older), ("agent", newer)):
+        q = {"group": group}
+        body = compute(fresh, "overview", ["overview"], q, when).body
+        site.cache.put(cache_key(site, "overview", ["overview"], q, NOW), when.timestamp(), body)
+    for client in serve(site):
+        status, got, _ = client.get("/api/overview?group=project")
+        assert status == 200 and got["group"] == "project"
+        assert datetime.fromisoformat(got["now"]) == newer
+
+
+def test_a_late_reply_of_an_older_generation_keeps_the_newer_ones() -> None:
+    # a job that began before the index changed ends after a reply of the new
+    # generation was cached: the newer reply stays (a group switch is made from
+    # it), and the late one is a stand-in only, never chosen over a newer one
+    cache = ApiCache(max_bytes=1000)
+    new_a, new_b = ("g2", "d", "overview", (), ("a",)), ("g2", "d", "overview", (), ("b",))
+    cache.put(new_a, 10, b"new a")
+    cache.put(("g1", "d", "overview", (), ("b",)), 5, b"late b")
+    assert cache.get(new_a, 10) == b"new a"
+    assert cache.stale(new_b) == b"late b"  # nothing newer for its view
+    cache.put(("g2", "d", "overview", (), ("c",)), 11, b"new c")
+    cache.put(("g3", "d", "overview", (), ("c",)), 20, b"newest c")  # g2 retires
+    cache.put(("g2", "d", "overview", (), ("c",)), 12, b"late c")  # outdated by g3
+    assert cache.get(("g3", "d", "overview", (), ("c",)), 20) == b"newest c"
+    assert cache.stale(("g4", "d", "overview", (), ("c",))) == b"newest c"
+    cache.put(("g4", "d", "overview", (), ("a",)), 30, b"a4")  # g3 retires too
+    assert cache.stale(("g4", "d", "overview", (), ("c",))) == b"newest c"  # not "late c"

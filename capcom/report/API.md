@@ -28,8 +28,11 @@ the cache (two requests for the same view share one job). When the job is done w
 `partial` has the same shape as the final reply, so a page can draw either. With
 `source: "chunks"` it is this job's reply so far (`spikes`: the whole window's spikes,
 count, excess and projects, with the causes and listed spikes of the sessions explained
-so far, the sessions of the largest spikes first); with `"stale"` it is the last reply
-of the same view from before the index changed (or from an earlier day). The client
+so far, the sessions of the largest spikes first); with `"stale"` it is the newest reply
+of the same view from before the index changed (or from an earlier day). A page
+that switches a view of the page it shows (a group or range) draws no stand-in from
+before over it, nor a reply it kept that came in before the one on screen: those
+could show older totals than the page already does. The client
 polls the same URL with `&job=<id>`; a poll waits on the server (at most 0.5 s) until
 the job has a newer partial reply or ends, and gets `202` with newer progress and
 partial replies, then the final `200` (or the endpoint's error). `progress` never goes
