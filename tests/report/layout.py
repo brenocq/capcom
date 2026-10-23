@@ -306,8 +306,8 @@ def findings(index: Index, table: PriceTable, since: datetime, until: datetime) 
 
 
 @contextlib.contextmanager
-def synthetic_site(workdir: Path) -> Iterator[str]:
-    """Serve the synthetic data; yield the base URL."""
+def synthetic_site(workdir: Path, **site_kw: Any) -> Iterator[str]:
+    """Serve the synthetic data; yield the base URL. `site_kw`: more Site fields."""
     now = datetime.now(UTC).replace(microsecond=0)
     index = workdir / "index.sqlite"
     build_index(index, now)
@@ -322,7 +322,7 @@ def synthetic_site(workdir: Path) -> Iterator[str]:
         findings,
         real.regimes_fn,
     )
-    site = Site(index, load_prices(), analysis, tz=UTC, state_dir=state)
+    site = Site(index, load_prices(), analysis, tz=UTC, state_dir=state, **site_kw)
     server = make_server(site, 0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

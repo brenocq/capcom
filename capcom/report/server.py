@@ -6,11 +6,15 @@ through DNS rebinding). Each API request opens the index read-only and closes it
 done. Pages are static files from `static/`; the API is in `api.py` and `didit.py`,
 documented in `API.md`.
 
-Everything is GET but one write: `POST /api/changes`, which marks a finding as applied
-(or edits or unmarks a mark) in capcom.changes' own file. It needs the per-launch
-token the pages carry in a meta tag, an Origin (or Referer) of this server, a JSON
-body of at most 4 KB, and a body that passes `didit.write`'s schema; `--read-only`
-turns it off (405).
+Everything is GET but two POSTs. `POST /api/changes`, the one write, marks a finding
+as applied (or edits or unmarks a mark) in capcom.changes' own file. It needs the
+per-launch token the pages carry in a meta tag, an Origin (or Referer) of this
+server, a JSON body of at most 4 KB, and a body that passes `didit.write`'s schema;
+`--read-only` turns it off (405). `POST /api/ask` (`ask.py`) streams an answer from
+the user's own `claude` CLI about a part of a page, behind the same checks with a
+body of at most 16 KB, two at a time, with a timeout, its child killed by PID when
+the page goes away; `--no-ask` turns it off (405). It writes nothing, so it stays on
+under `--read-only`.
 
 API replies are cached per index generation (`ApiCache`): the key holds the index
 files' sizes and modification times and the index's `PRAGMA data_version` on a held
@@ -57,7 +61,7 @@ from capcom.config import Config
 from capcom.cost.prices import load_prices
 from capcom.limits.cli import adopt_samples
 from capcom.limits.model import samples_path
-from capcom.report import api, didit
+from capcom.report import api, ask, didit
 from capcom.report.analysis import Analysis, Unavailable, default_analysis
 from capcom.report.jobs import Job, Jobs, Result, computing_body
 from capcom.report.worker import Worker
@@ -352,6 +356,11 @@ class Site:
     day_cache: Path | None = None  # capcom.changes' finished days; None: not kept
     agent_dirs: Sequence[Path] | None = None  # where noticed() reads; None: its own
     request_timeout: float = 30.0  # seconds a client may take to send its request
+    ask_on: bool = True  # False (--no-ask): no POST /api/ask, no Ask Claude in the pages
+    ask_slots: threading.BoundedSemaphore = field(
+        default_factory=lambda: threading.BoundedSemaphore(ask.SLOTS)
+    )
+    ask_timeout: float = ask.TIMEOUT  # seconds one answer may take
 
 
 class Scanner:
@@ -693,51 +702,24 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(HTTPStatus.INTERNAL_SERVER_ERROR, b"internal error", "text/plain")
 
     def _post(self) -> None:
-        """The one write: POST /api/changes (see the module's docstring)."""
+        """The one write, POST /api/changes, and POST /api/ask (see the module's
+        docstring)."""
         if not self._host_ok():
             self._send(HTTPStatus.FORBIDDEN, b"forbidden host", "text/plain")
             return
-        if unquote(urlsplit(self.path).path).rstrip("/") != "/api/changes":
+        route = unquote(urlsplit(self.path).path).rstrip("/")
+        if route == "/api/ask":
+            self._ask()
+            return
+        if route != "/api/changes":
             self._not_allowed()
             return
         site = self.site
         if site.read_only:
             self._not_allowed()
             return
-        if not self._same_origin():
-            self._error(HTTPStatus.FORBIDDEN, "cross_origin", "Only capcom's own pages can write.")
-            return
-        token = self.headers.get(TOKEN_HEADER) or ""
-        if not hmac.compare_digest(token.encode(), site.token.encode()):
-            self._error(
-                HTTPStatus.FORBIDDEN,
-                "bad_token",
-                "The page's write token is not this launch's: reload the page.",
-            )
-            return
-        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-        if ctype != "application/json":
-            self._error(
-                HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "bad_type", "The body must be application/json."
-            )
-            return
-        raw_length = self.headers.get("Content-Length")
-        if self.headers.get("Transfer-Encoding") or raw_length is None:
-            self._error(HTTPStatus.LENGTH_REQUIRED, "no_length", "Content-Length is required.")
-            return
-        try:
-            length = int(raw_length)
-        except ValueError:
-            length = -1
-        if length < 0 or length > MAX_BODY:
-            self._error(
-                HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "too_large", f"At most {MAX_BODY} bytes."
-            )
-            return
-        try:
-            body = json.loads(self.rfile.read(length).decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            self._error(HTTPStatus.BAD_REQUEST, "bad_json", "The body is not JSON.")
+        body = self._checked_body(MAX_BODY)
+        if body is _REFUSED:
             return
         try:
             index = _open(site)
@@ -763,6 +745,102 @@ class Handler(BaseHTTPRequestHandler):
             )
         finally:
             index.close()
+
+    def _checked_body(self, limit: int) -> Any:
+        """A POST's JSON body, once it passed the checks every POST does: an Origin
+        of this server, this launch's token, a JSON type, a Content-Length of at
+        most `limit` bytes. `_REFUSED` (the reply sent) when one fails."""
+        site = self.site
+        if not self._same_origin():
+            self._error(HTTPStatus.FORBIDDEN, "cross_origin", "Only capcom's own pages can write.")
+            return _REFUSED
+        token = self.headers.get(TOKEN_HEADER) or ""
+        if not hmac.compare_digest(token.encode(), site.token.encode()):
+            self._error(
+                HTTPStatus.FORBIDDEN,
+                "bad_token",
+                "The page's write token is not this launch's: reload the page.",
+            )
+            return _REFUSED
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            self._error(
+                HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "bad_type", "The body must be application/json."
+            )
+            return _REFUSED
+        raw_length = self.headers.get("Content-Length")
+        if self.headers.get("Transfer-Encoding") or raw_length is None:
+            self._error(HTTPStatus.LENGTH_REQUIRED, "no_length", "Content-Length is required.")
+            return _REFUSED
+        try:
+            length = int(raw_length)
+        except ValueError:
+            length = -1
+        if length < 0 or length > limit:
+            self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "too_large", f"At most {limit} bytes.")
+            return _REFUSED
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            self._error(HTTPStatus.BAD_REQUEST, "bad_json", "The body is not JSON.")
+            return _REFUSED
+
+    def _ask(self) -> None:
+        """POST /api/ask: the answer of the user's `claude` CLI, streamed as JSON
+        lines (ask.py). The CLI runs only here, when a page asks."""
+        site = self.site
+        if not site.ask_on:
+            self._not_allowed()
+            return
+        body = self._checked_body(ask.MAX_BODY)
+        if body is _REFUSED:
+            return
+        try:
+            prompt = ask.build_prompt(ask.parse(body))
+        except ask.AskError as err:
+            self._error(err.status, err.code, err.message)
+            return
+        claude = ask.find_claude()
+        if claude is None:
+            self._error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "no_claude",
+                "capcom could not find the claude command. Install Claude Code, or start "
+                "capcom serve where claude is on the PATH.",
+            )
+            return
+        if not site.ask_slots.acquire(blocking=False):
+            self._error(
+                HTTPStatus.TOO_MANY_REQUESTS,
+                "busy",
+                f"Claude is answering {ask.SLOTS} questions already: wait for one to finish.",
+            )
+            return
+        child = None
+        try:
+            try:
+                child = ask.start(claude, prompt)
+            except OSError:
+                self._error(
+                    HTTPStatus.SERVICE_UNAVAILABLE, "no_claude", "The claude command did not start."
+                )
+                return
+            self.close_connection = True  # the reply ends when the connection closes
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Security-Policy", CSP)
+            self.send_header("Connection", "close")
+            self.end_headers()
+            for line in ask.stream(child, self._gone, site.ask_timeout):
+                self.wfile.write(json.dumps(line, separators=(",", ":")).encode() + b"\n")
+                self.wfile.flush()
+        finally:
+            if child is not None:
+                child.close()  # killed by its PID if it still runs: the page went away
+            site.ask_slots.release()
 
     def _known(self, now: datetime) -> Callable[[int], list[didit.Known] | None]:
         """The findings of a Checks window from its cached reply, if there is one."""
@@ -809,6 +887,8 @@ class Handler(BaseHTTPRequestHandler):
         metas = f'<meta name="capcom-token" content="{self.site.token}">\n'
         if self.site.read_only:
             metas += '<meta name="capcom-read-only" content="1">\n'
+        if not self.site.ask_on:
+            metas += '<meta name="capcom-ask" content="off">\n'
         return html.replace("</head>", metas + "</head>", 1).encode()
 
     def _static(self, name: str) -> None:
@@ -949,6 +1029,9 @@ def version(site: Site) -> dict[str, Any]:
         "updated": updated,
         "launch": site.launch,
     }
+
+
+_REFUSED = object()  # _checked_body: a check failed and its reply is sent
 
 
 def _same_view(a: Any, b: tuple[Any, ...]) -> bool:
@@ -1160,7 +1243,12 @@ def make_server(site: Site, port: int) -> ThreadingHTTPServer:
 
 
 def run_serve(
-    config: Config, port: int, open_browser: bool, scan: bool = True, read_only: bool = False
+    config: Config,
+    port: int,
+    open_browser: bool,
+    scan: bool = True,
+    read_only: bool = False,
+    ask_claude: bool = True,
 ) -> int:
     adopt_samples(config)
     scanner = None
@@ -1175,6 +1263,7 @@ def run_serve(
         scanner=scanner,
         read_only=read_only,
         day_cache=config.cache_dir / DAY_CACHE,
+        ask_on=ask_claude,
     )
     try:
         server = make_server(site, port)
@@ -1184,6 +1273,7 @@ def run_serve(
     url = f"http://{HOST}:{server.server_address[1]}/"
     fresh = "rescanning every minute" if scanner else "no background scan"
     fresh += ", read-only" if read_only else ""
+    fresh += "" if ask_claude else ", no Ask Claude"
     print(f"capcom: serving {url} (local only, {fresh}; Ctrl+C to stop)", flush=True)
     if scanner is not None:
         scanner.start()
