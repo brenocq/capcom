@@ -102,11 +102,16 @@ def test_button_beside_a_selection(tmp_path: Path, runs: Path, chrome: layout.Ch
         select(chrome, node_range("section.card.check .para"))
         until(chrome, SHOWN)
         before = chrome.js("document.querySelector('.asksel').getBoundingClientRect().top")
-        chrome.js(SCROLLER + ".scrollBy(0, 60)")
+        # by however far the page could go: near its end it scrolls less than asked
+        step = chrome.js(
+            f"(() => {{ const s = {SCROLLER}; const y = s.scrollTop;"
+            " s.scrollBy(0, 60); return s.scrollTop - y; })()"
+        )
+        assert step > 0, "the page did not scroll"
         until(
             chrome,
             f"Math.abs(document.querySelector('.asksel').getBoundingClientRect().top"
-            f" - ({before} - 60)) < 2",
+            f" - ({before} - {step})) < 2",
         )
         assert not overlaps_selection(chrome)
         # scrolled out of sight: out of the way until it comes back (room made to scroll)
