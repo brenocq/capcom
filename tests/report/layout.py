@@ -398,7 +398,9 @@ def find_chrome() -> str | None:
         found = shutil.which(name)
         if found:
             return found
-    return None
+    # macOS installs Chrome as an app, not on PATH
+    app = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+    return str(app) if app.exists() else None
 
 
 class CdpError(RuntimeError):
