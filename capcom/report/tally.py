@@ -258,6 +258,7 @@ def session_json(
     return {
         "session_id": row.session_id,
         "title": info.title if info else None,
+        "color": info.color if info else None,
         "project": project_display(row.project_dir, names),
         "project_path": names.path(row.project_dir),
         "project_dir": row.project_dir,

@@ -28,11 +28,11 @@ Tables (schema version in `schema_version`):
 Version 2 lacked cost_states.ts, version 3 cost_states.next_ts and shared_replies,
 version 4 filled next_ts from the earliest time of the next batch, and version 5 lacked
 requests.reported_cost (OpenClaw's own cost estimate), version 6
-cost_states.total_duration_ms, version 7 session_parts.custom_title: a writable open
+cost_states.total_duration_ms, version 7 session_parts.custom_title and color: a writable open
 migrates them in place (the index keeps history the logs may have lost); up to 5 it
 queues the files with cost-states, and every file of their sessions, for a reread,
 5 -> 6 only adds the column, 6 -> 7 queues the files with cost-states alone, and 7 -> 8
-the session logs that hold a custom-title record.
+the session logs that hold a custom-title or agent-color record.
 
 Times are stored as integer microseconds since the Unix epoch, UTC.
 """
@@ -83,6 +83,7 @@ _SESSION_FIELDS = (
     "entrypoint",
     "git_branch",
     "custom_title",
+    "color",
 )
 _AGENT_FIELDS = (
     "session_id",
@@ -681,23 +682,26 @@ class SqliteIndex:
         rows = self._con.execute(
             f"SELECT session_id, {cols}, first_seen, last_seen FROM session_parts"
         )
-        merged = _merge_parts(rows, len(_SESSION_FIELDS))
-        out = sorted(merged.items(), key=lambda kv: (kv[1][0][7] is None, kv[1][0][7] or 0, kv[0]))
+        n = len(_SESSION_FIELDS)
+        merged = _merge_parts(rows, n)
+        out = sorted(merged.items(), key=lambda kv: (kv[1][0][n] is None, kv[1][0][n] or 0, kv[0]))
         for sid, (v, _) in out:
+            f = dict(zip(_SESSION_FIELDS, v, strict=False))
             # A name the user gave wins over Claude Code's; a cleared one ("") falls
-            # back to it.
-            custom = v[6] or None
+            # back to it. A reset color ("") is none.
+            custom = f["custom_title"] or None
             yield SessionInfo(
                 sid,
-                v[0],
-                v[1],
-                custom or v[2],
-                v[3],
-                v[4],
-                v[5],
-                _dt_opt(v[7]),
-                _dt_opt(v[8]),
+                f["project_dir"],
+                f["cwd"],
+                custom or f["title"],
+                f["version"],
+                f["entrypoint"],
+                f["git_branch"],
+                _dt_opt(v[n]),
+                _dt_opt(v[n + 1]),
                 custom,
+                f["color"] or None,
             )
 
     def agents(self, session_id: str | None = None) -> Iterator[AgentInfo]:
@@ -797,7 +801,16 @@ def _cost_state(row: tuple[Any, ...]) -> CostState:
 
 
 def _session_row(file: str, s: SessionInfo, seq: int) -> tuple[Any, ...]:
-    vals = (s.project_dir, s.cwd, s.title, s.version, s.entrypoint, s.git_branch, s.custom_title)
+    vals = (
+        s.project_dir,
+        s.cwd,
+        s.title,
+        s.version,
+        s.entrypoint,
+        s.git_branch,
+        s.custom_title,
+        s.color,
+    )
     pairs = [x for v in vals for x in (v, None if v is None else seq)]
     return (file, s.session_id, *pairs, _us_opt(s.first_seen), _us_opt(s.last_seen))
 
@@ -919,19 +932,22 @@ def _migrate_6_to_7(con: sqlite3.Connection) -> None:
     con.execute("COMMIT")
 
 
-_CUSTOM_TITLE = b'"type":"custom-title"'
+# The records schema 8 added (a session's name and color), as Claude Code writes them.
+_NAME_MARKERS = (b'"type":"custom-title"', b'"type":"agent-color"')
 
 
-def _holds(path: str, marker: bytes, chunk: int = 1 << 20) -> bool:
-    """Whether the file at `path` contains `marker` (False when it cannot be read).
-    Streams it read-only, a chunk at a time."""
+def _holds(path: str, markers: Sequence[bytes], chunk: int = 1 << 20) -> bool:
+    """Whether the file at `path` contains any of `markers` (False when it cannot be
+    read). Streams it read-only, a chunk at a time."""
+    keep = max(len(m) for m in markers) - 1
     tail = b""
     try:
         with open(path, "rb") as f:
             while block := f.read(chunk):
-                if marker in tail + block[: len(marker) - 1] or marker in block:
+                seam = tail + block[:keep]
+                if any(m in block or m in seam for m in markers):
                     return True
-                tail = block[-(len(marker) - 1) :]
+                tail = block[-keep:]
     except OSError:
         return False
     return False
@@ -939,25 +955,26 @@ def _holds(path: str, marker: bytes, chunk: int = 1 << 20) -> bool:
 
 def _migrate_7_to_8(con: sqlite3.Connection) -> None:
     """Add session_parts.custom_title (the name the user gave a session, which wins
-    over its ai-title) and queue for a reread the Claude Code session logs that hold a
-    custom-title record, found by a byte search of each main log (subagent logs never
-    hold one) before the transaction. Only those: every other row stays. One
-    transaction."""
+    over its ai-title) and session_parts.color, and queue for a reread the Claude Code
+    session logs that hold a custom-title or agent-color record, found by a byte search
+    of each main log (subagent logs never hold one) before the transaction. Only
+    those: every other row stays. One transaction."""
     if con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] != 7:
         return
     paths = [r[0] for r in con.execute("SELECT path FROM files")]
     queued = [
         p
         for p in paths
-        if p.endswith(".jsonl") and Path(p).parent.name != "subagents" and _holds(p, _CUSTOM_TITLE)
+        if p.endswith(".jsonl") and Path(p).parent.name != "subagents" and _holds(p, _NAME_MARKERS)
     ]
     con.execute("BEGIN IMMEDIATE")
     try:
         if con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 7:
             cols = {r[1] for r in con.execute("PRAGMA table_info(session_parts)")}
-            if "custom_title" not in cols:
-                con.execute("ALTER TABLE session_parts ADD COLUMN custom_title")
-                con.execute("ALTER TABLE session_parts ADD COLUMN custom_title_seq INTEGER")
+            for name in ("custom_title", "color"):
+                if name not in cols:
+                    con.execute(f"ALTER TABLE session_parts ADD COLUMN {name}")
+                    con.execute(f"ALTER TABLE session_parts ADD COLUMN {name}_seq INTEGER")
             con.executemany("UPDATE files SET pos = 0 WHERE path = ?", [(p,) for p in queued])
             con.execute("DELETE FROM schema_version")
             con.execute("INSERT INTO schema_version (version) VALUES (8)")

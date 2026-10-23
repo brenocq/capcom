@@ -141,8 +141,9 @@ def model_usage(reqs: Sequence[Request]) -> dict[str, ModelUsage]:
 def build_index(path: Path) -> Path:
     ix = open_index(path)
     s1 = SessionInfo(
-        "s1", ALPHA, cwd="/home/user/alpha", title="Alpha work", git_branch="main",
+        "s1", ALPHA, cwd="/home/user/alpha", title="Alpha draft", git_branch="main",
         first_seen=S1_MAIN[0].timestamp, last_seen=S1_MAIN[-1].timestamp,
+        custom_title="Alpha work", color="purple",  # renamed and colored in Claude Code
     )  # fmt: skip
     compaction = Event(
         EventKind.COMPACTION, "s1", None, ago(hours=5, minutes=40), "c1",

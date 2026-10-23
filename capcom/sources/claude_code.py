@@ -78,6 +78,7 @@ _USED_TYPES = (
     "api-request-shape",
     "ai-title",
     "custom-title",
+    "agent-color",
     "cost-state",
 )
 _MARKERS = tuple(f'"type":"{t}"'.encode() for t in _USED_TYPES)
@@ -102,7 +103,6 @@ _IGNORED_TYPES = frozenset(
         "summary",
         "tag",
         "agent-name",
-        "agent-color",
         "pr-link",
         "fork-context-ref",
         "artifact-autoreact-ledger",
@@ -382,6 +382,7 @@ class _BatchState:
     git_branch: str | None = None
     title: str | None = None
     custom_title: str | None = None  # "" when the user cleared it
+    color: str | None = None  # "" when the user reset it
 
 
 class _Parser:
@@ -410,13 +411,16 @@ class _Parser:
                 b.records.append(req)
             else:
                 b.skipped += 1
-        if b.first_seen is not None or b.title is not None or b.custom_title is not None:
+        if b.first_seen is not None or any(
+            v is not None for v in (b.title, b.custom_title, b.color)
+        ):
             if self.subagent:
                 info = SessionInfo(
                     session_id=self.log.session_id,
                     project_dir=self.log.project_dir,
                     title=b.title,
                     custom_title=b.custom_title,
+                    color=b.color,
                     first_seen=b.first_seen,
                     last_seen=b.last_seen,
                 )
@@ -427,6 +431,7 @@ class _Parser:
                     cwd=b.cwd,
                     title=b.title,
                     custom_title=b.custom_title,
+                    color=b.color,
                     version=b.version,
                     entrypoint=b.entrypoint,
                     git_branch=b.git_branch,
@@ -502,6 +507,13 @@ class _Parser:
             custom = rec.get("customTitle")
             if isinstance(custom, str):
                 b.custom_title = custom.strip()[:500]
+        elif kind == "agent-color":
+            # The session's color (`/color`): a name such as "purple"; "default" or
+            # an empty one resets it, kept as "" so it still replaces an earlier one.
+            color = rec.get("agentColor")
+            if isinstance(color, str):
+                color = color.strip().lower()[:32]
+                b.color = "" if color == "default" else color
         elif kind == "cost-state":
             self._cost_state(rec, offset)
         elif isinstance(kind, str) and kind in _IGNORED_TYPES:

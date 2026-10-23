@@ -507,6 +507,14 @@ export function barList(rows, valueOf, noteOf) {
 
 export function sessionHref(id) { return '/session/' + encodeURIComponent(id); }
 
+// The color a session was given in Claude Code (`/color`), as a dot before its name:
+// a known name maps to a theme token (light and dark), anything else draws nothing.
+const SESSION_COLORS = new Set(['red', 'orange', 'yellow', 'green', 'cyan', 'blue', 'purple', 'pink']);
+export function sessionDot(color) {
+  if (!color || !SESSION_COLORS.has(color)) return null;
+  return h('span.sdot', { style: `background:var(--sc-${color})`, title: `Session color: ${color}`, 'aria-hidden': 'true' });
+}
+
 // Change the page's query without a reload; the frame redraws the page. A new
 // range (`days`, Overview's `range`) is its own step in the history, so Back goes
 // 30 -> 14 -> 7 days before it leaves the page; other changes (a sort, a filter,

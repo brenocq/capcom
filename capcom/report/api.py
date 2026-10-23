@@ -271,6 +271,7 @@ def _spike_marks(
                 "scope": sp.scope,
                 "session_id": sp.session_id,
                 "title": (info.title if (info := infos.get(sp.session_id or "")) else None),
+                "color": info.color if info else None,
                 "agent_id": sp.agent_id,
                 "requests": len(sp.message_ids),
                 "cost_usd": round(sp.cost_usd, 6),
@@ -1004,6 +1005,7 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
         "session": {
             "session_id": session_id,
             "title": info.title if info else None,
+            "color": info.color if info else None,
             "title_custom": bool(info and info.custom_title),
             "project": project_display(project_dir, names),
             "project_path": names.path(project_dir),
@@ -1205,6 +1207,7 @@ def live(ctx: Context) -> dict[str, Any]:
             {
                 "session_id": sid,
                 "title": info.title if info else None,
+                "color": info.color if info else None,
                 "project": project_display(project_dir, names),
                 "agents_active": len(row.agents) if row else 0,
                 "usd_last_10_min": round(usd, 6),
@@ -1360,6 +1363,7 @@ def _spike_json(
         "agent_id": sp.agent_id,
         "agent_type": agent.agent_type if agent else None,
         "title": info.title if info else None,
+        "color": info.color if info else None,
         **_spike_project(sp, infos, names),
         "requests": len(sp.message_ids),
         "cost_usd": round(sp.cost_usd, 6),

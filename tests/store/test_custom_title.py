@@ -101,3 +101,34 @@ def test_other_sessions_keep_their_ai_title(config: Config) -> None:
     _append(_log(config), _user(1), _custom("mine"))
     _append(_log(config, "s2"), _user(1, "s2"), _ai("generated", "s2"))
     assert _titles(config) == {"s1": ("mine", "mine"), "s2": ("generated", None)}
+
+
+def _color(name: str, sid: str = "s1") -> dict[str, Any]:
+    return {"type": "agent-color", "agentColor": name, "sessionId": sid}
+
+
+def _colors(config: Config) -> dict[str, str | None]:
+    run_scan(config, quiet=True, source=ClaudeCodeSource())
+    with open_index(config.index_path, readonly=True) as ix:
+        return {s.session_id: s.color for s in ix.sessions()}
+
+
+def test_session_color_latest_wins_across_scans(config: Config) -> None:
+    log = _log(config)
+    _append(log, _user(1), _custom("mine"), _color("purple"))
+    _append(_log(config, "s2"), _user(1, "s2"), _ai("generated", "s2"))
+    assert _colors(config) == {"s1": "purple", "s2": None}
+    _append(log, _custom("mine"), _color("Green"), _user(2))  # names are kept lowercase
+    assert _colors(config) == {"s1": "green", "s2": None}
+    _append(log, _ai("generated"), _user(3))  # a title alone keeps the color
+    assert _colors(config) == {"s1": "green", "s2": None}
+    _append(log, _color("default"))  # reset
+    assert _colors(config) == {"s1": None, "s2": None}
+
+
+def test_color_without_custom_title(config: Config) -> None:
+    _append(_log(config), _user(1), _ai("generated"), _color("orange"))
+    run_scan(config, quiet=True, source=ClaudeCodeSource())
+    with open_index(config.index_path, readonly=True) as ix:
+        (s,) = ix.sessions()
+    assert (s.title, s.custom_title, s.color) == ("generated", None, "orange")

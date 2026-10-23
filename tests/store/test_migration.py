@@ -1,7 +1,7 @@
 """Schemas 2 -> 3 -> 4 -> 5 -> 6 -> 7: cost_states gains its times (ts, then next_ts) and the
 index its shared_replies, in place, and the files with cost-states and every file of
 their sessions are read again (6 -> 7 for cost_states.total_duration_ms). 7 -> 8 adds
-session_parts.custom_title and rereads the session logs that hold a custom-title."""
+session_parts.custom_title and color, and rereads the session logs that hold either."""
 
 from __future__ import annotations
 
@@ -319,10 +319,11 @@ def test_an_index_from_a_newer_capcom_asks_for_an_update(tmp_path: Path) -> None
         assert "capcom scan" not in str(err.value)  # a scan by this capcom cannot fix it
 
 
-def test_v7_index_gains_custom_title_and_rereads_only_renamed_logs(config: Config) -> None:
+def test_v7_index_gains_custom_title_and_color_and_rereads_only_those_logs(config: Config) -> None:
     project = config.projects_dir / "-home-u-p"
     renamed = project / "s1.jsonl"
     plain = project / "s2.jsonl"
+    colored = project / "s4.jsonl"
     sub = project / "s1" / "subagents" / "agent-a1.jsonl"
     gone = project / "s3.jsonl"  # in the index, deleted from disk since
     user = '{"type":"user","uuid":"u1","timestamp":"2026-10-20T09:00:00Z","message":{}}\n'
@@ -338,14 +339,17 @@ def test_v7_index_gains_custom_title_and_rereads_only_renamed_logs(config: Confi
     )  # fmt: skip
     plain.write_text(user + '{"type":"ai-title","aiTitle":"other","sessionId":"s2"}\n')
     sub.write_text('{"type":"custom-title","customTitle":"never","sessionId":"s1"}\n')
+    colored.write_text(user + '{"type":"agent-color","agentColor":"blue","sessionId":"s4"}\n')
 
     config.index_path.parent.mkdir(parents=True)
     con = sqlite3.connect(config.index_path)
     con.executescript(
-        index_module._SCHEMA.replace(",\n    custom_title , custom_title_seq INTEGER", "")
+        index_module._SCHEMA.replace(",\n    custom_title , custom_title_seq INTEGER", "").replace(
+            ",\n    color , color_seq INTEGER", ""
+        )
     )
     con.execute("INSERT INTO schema_version (version) VALUES (7)")
-    for f in (renamed, plain, sub):
+    for f in (renamed, plain, sub, colored):
         _file_row(con, f, f.stat().st_size)
     con.execute(
         "INSERT INTO files (path, inode, size, mtime_ns, pos, head_len) VALUES (?, 1, 9, 0, 9, 0)",
@@ -357,14 +361,16 @@ def test_v7_index_gains_custom_title_and_rereads_only_renamed_logs(config: Confi
         (str(renamed),),
     )
     con.commit()
-    assert "custom_title" not in {r[1] for r in con.execute("PRAGMA table_info(session_parts)")}
+    cols = {r[1] for r in con.execute("PRAGMA table_info(session_parts)")}
+    assert not cols & {"custom_title", "color"}
     con.close()
 
     with open_index(config.index_path) as ix:
         assert ix.file_state(renamed).offset == 0  # type: ignore[union-attr]
+        assert ix.file_state(colored).offset == 0  # type: ignore[union-attr]
         for f in (plain, sub):
             assert ix.file_state(f).offset == f.stat().st_size  # type: ignore[union-attr]
         assert [s.title for s in ix.sessions()] == ["generated"]
     source = FakeSource()
     run_scan(config, quiet=True, source=source)
-    assert source.calls == [(renamed, 0)]
+    assert sorted(source.calls) == [(renamed, 0), (colored, 0)]

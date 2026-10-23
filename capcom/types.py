@@ -238,6 +238,9 @@ class SessionInfo:
     # The `custom-title` record: the name the user gave it (`/rename`, `claude -n`),
     # "" when cleared. It wins over any `ai-title`, earlier or later.
     custom_title: str | None = None
+    # The `agent-color` record: the color the user gave it (`/color`), a lowercase
+    # name such as "purple"; "" when reset. The latest one wins.
+    color: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -6,7 +6,7 @@
 // it. The view and the open hour live in the URL (`heat=week`, `hour=<ISO>`).
 
 import {
-  h, api, usd, pct, two, monthDay, barList, sessionHref, spikeHref, spikeText, projectChip,
+  h, api, usd, pct, two, monthDay, barList, sessionHref, sessionDot, spikeHref, spikeText, projectChip,
   showTip, hideTip, errorBox, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor,
 } from './lib.js';
 import { heatColor } from './charts.js';
@@ -354,7 +354,7 @@ async function hourPanel(panel, start, onClose) {
   if (d.sessions.length) {
     out.push(h('h4.label', { text: d.sessions_count > d.sessions.length ? `Top sessions (${d.sessions.length} of ${d.sessions_count})` : 'Sessions' }),
       h('div.hm-list', null, d.sessions.map((s) => h('a.hm-row', { href: sessionHref(s.session_id) },
-        h('span.hm-main', null, s.project ? h('span.tag.proj', { text: s.project }) : null, h('span', { text: s.title || s.session_id.slice(0, 8) })),
+        h('span.hm-main', null, s.project ? h('span.tag.proj', { text: s.project }) : null, h('span', null, sessionDot(s.color), s.title || s.session_id.slice(0, 8))),
         h('span.note', { text: `${s.requests} request${s.requests === 1 ? '' : 's'}` }),
         h('span.mono', { text: usd(s.usd) })))));
   }
