@@ -515,6 +515,12 @@ export function sessionDot(color) {
   return h('span.sdot', { style: `background:var(--sc-${color})`, title: `Session color: ${color}`, 'aria-hidden': 'true' });
 }
 
+// The same color as a CSS value, for a dot drawn elsewhere (the live list's activity
+// dot takes it), or null.
+export function sessionColor(color) {
+  return color && SESSION_COLORS.has(color) ? `var(--sc-${color})` : null;
+}
+
 // Change the page's query without a reload; the frame redraws the page. A new
 // range (`days`, Overview's `range`) is its own step in the history, so Back goes
 // 30 -> 14 -> 7 days before it leaves the page; other changes (a sort, a filter,
