@@ -103,6 +103,8 @@ def test_panel_opt_in_mark_answer_and_suggestions(
         chrome.js("document.querySelector('.askbtn').click()")
         assert not chrome.js("document.getElementById('askpanel').hidden")
         assert chrome.js("document.querySelector('.askoptin p').textContent") == NOTICE
+        heading = chrome.js("document.querySelector('.askoptin strong').textContent")
+        assert heading == "Turn on Ask Roger?"
         chrome.js("document.querySelector('.askmark').click()")
         label = chrome.js("document.querySelector('.askoptin b').textContent")
         assert label

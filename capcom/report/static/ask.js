@@ -31,8 +31,8 @@ const EXPLAIN = 'What does this show, and what stands out?';
 const EXPLAIN_SELECTION = 'Explain the text I selected, very shortly and simply.';
 export const NOTICE = 'Ask Claude sends the numbers and labels on this part of the page, or the text you select, to Claude through your own claude CLI. No text from your logs is sent.';
 // The mascot's name ("Roger that", on the radio): the greeting, the panel's
-// title and the round button's label say it. The opt-in notice and the sidebar
-// still say Ask Claude, since Claude is what answers.
+// title, the opt-in's heading and the round button's label say it. The opt-in
+// notice's text and the sidebar say Claude, since Claude is what answers.
 export const MASCOT_NAME = 'Roger';
 const named = (yes, no) => (MASCOT_NAME ? yes : no);
 // The first message of every chat, written by capcom (instant, and nothing sent).
@@ -402,7 +402,7 @@ function draw() {
     const about = topic ? (topic.selection != null ? 'the text you selected' : topic.label) : null;
     ui.log.replaceChildren(h('div.askoptin', null,
       mascot(56),
-      h('strong', { text: 'Turn on Ask Claude?' }),
+      h('strong', { text: `Turn on ${named(`Ask ${MASCOT_NAME}`, 'Ask Claude')}?` }),
       h('p', { text: NOTICE }),
       h('p.note', { text: 'It runs your claude CLI with the Haiku model, so each question counts toward your Claude usage. You can turn it off again under the chat.' }),
       about ? h('p.note', null, `Then ${named(MASCOT_NAME, 'Claude')} explains `, h('b', { text: about }), '.') : null,
