@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
@@ -935,9 +936,16 @@ def open_index(path: Path, readonly: bool = False) -> SqliteIndex:
         row = con.execute("SELECT MAX(version) FROM schema_version").fetchone()
         version = row[0] if row else None
         if version != SCHEMA_VERSION:
+            # older versions were migrated above: a newer index needs a newer capcom
+            newer = isinstance(version, int) and version > SCHEMA_VERSION
+            fix = (
+                f"a newer capcom wrote it; update this one ({sys.argv[0]})"
+                if newer
+                else "run `capcom scan` to update it"
+            )
             raise RuntimeError(
                 f"capcom index {path} has schema version {version}, this capcom reads "
-                f"{SCHEMA_VERSION}: run `capcom scan` to update it"
+                f"{SCHEMA_VERSION}: {fix}"
             )
     except BaseException:
         con.close()

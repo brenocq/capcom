@@ -10,14 +10,50 @@ const meta = (name) => { const m = document.querySelector(`meta[name="${name}"]`
 // `capcom serve --read-only`: no button that writes
 export const READ_ONLY = meta('capcom-read-only') === '1';
 
-export async function postChange(body) {
-  const r = await fetch('/api/changes', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Capcom-Token': meta('capcom-token') || '' },
-    body: JSON.stringify(body),
-  });
+// The write token is made per launch of `capcom serve`, and an open page refreshes
+// its views in place without loading index.html again: after a restart its token
+// is the old launch's. So the page reads the new one from a fresh `/` (same origin
+// only, as the first one was) when /api/version shows a new launch (app.js) or
+// when a write is refused for its token, and then tries that write once more.
+let token = null;
+const TOKEN_RE = /<meta name="capcom-token" content="([^"]+)">/;
+
+export async function freshToken() {
+  try {
+    const r = await fetch('/', { cache: 'no-store', credentials: 'same-origin', headers: { Accept: 'text/html' } });
+    const found = r.ok ? TOKEN_RE.exec(await r.text()) : null;
+    if (found) token = found[1];
+    return found ? found[1] : null;
+  } catch (e) { return null; }
+}
+
+async function send(body) {
+  if (token === null) token = meta('capcom-token') || '';
+  let r;
+  try {
+    r = await fetch('/api/changes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Capcom-Token': token },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    throw new ApiError(0, { message: 'capcom serve is not answering. Start it again, then retry.' });
+  }
   let data = null;
   try { data = await r.json(); } catch (e) { data = null; }
+  return { r, data };
+}
+
+export async function postChange(body) {
+  let { r, data } = await send(body);
+  if (r.status === 403 && data && data.error === 'bad_token') {
+    const was = token;
+    if ((await freshToken()) && token !== was) ({ r, data } = await send(body));
+    if (r.status === 403 && data && data.error === 'bad_token') {
+      throw new ApiError(r.status, { error: 'bad_token', message: 'capcom serve was restarted and this page could not get its new write token. Reload the page and try again.' });
+    }
+  }
+  if (r.status === 405) throw new ApiError(r.status, { message: 'This capcom serve is read-only (--read-only): it saves no marks.' });
   if (!r.ok) throw new ApiError(r.status, data);
   forget(); // every kept reply may show the mark: fetch again
   window.dispatchEvent(new Event('capcom-changed'));

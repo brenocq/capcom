@@ -365,6 +365,8 @@ details.rollup > summary::before { content: '▸'; color: var(--muted); width: 1
 details.rollup[open] > summary::before { content: '▾'; }
 details.rollup > summary .mtext { flex: 1; display: flex; flex-direction: column; gap: 2px; }
 details.rollup .tags { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; margin-top: 4px; }
+details.rollup .scopes { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 4px; }
+details.rollup .scopes .stackbar { flex: 0 1 180px; min-width: 96px; }
 .tag.over { background: var(--subtle); color: var(--muted); }
 .rfind { display: flex; flex-direction: column; gap: 12px; padding: 0 0 14px; }
 .rfind > .card { box-shadow: none; border: 1px solid var(--l10); }
@@ -493,6 +495,40 @@ table.data.narrow { min-width: 0; }
 .runlab .r { font-size: 12px; color: var(--muted); }
 .runlab.backed { background: var(--card); padding: 4px 8px; border-radius: 6px; box-shadow: 0 0 0 1px var(--l25); }
 
+/* progressive loading (router.js, morph.js): the status line, a thin bar along
+   the top of each card still loading, the old content dimmed, skeleton cards,
+   new parts fading in */
+.loadstatus { position: fixed; top: 14px; right: 18px; z-index: 30; display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px; border-radius: 999px; background: var(--card); border: 0.5px solid var(--l15);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.loadstatus[hidden] { display: none; }
+.loadstatus .spin { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--subtle); border-top-color: var(--accent); animation: cc-spin 0.8s linear infinite; }
+.loadstatus .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.card[aria-busy="true"] { background-image: linear-gradient(var(--accent), var(--accent)); background-repeat: no-repeat;
+  background-size: var(--progress, 0%) 2px; background-position: 0 0; transition: background-size 0.4s ease-out; }
+[data-indet] .card[aria-busy="true"] { background-size: 30% 2px; animation: cc-indet 1.2s ease-in-out infinite; }
+.panel[data-stale] > * { opacity: 0.55; transition: opacity 0.2s; }
+.panel[data-stale] > .head { opacity: 1; }
+.panel[data-stale] > .head .sub { opacity: 0.55; transition: opacity 0.2s; }
+.card.skel { flex: 1 1 160px; min-height: 64px; gap: 12px; }
+.card.skel.tall { min-height: 220px; }
+.skel-body, .skel-tail { display: flex; flex-direction: column; gap: 16px; }
+.skel-tail { order: 99; }
+.skel-line { display: block; height: 10px; border-radius: 5px; background: linear-gradient(90deg, var(--subtle) 30%, var(--l10, var(--subtle)) 50%, var(--subtle) 70%);
+  background-size: 300% 100%; animation: cc-shimmer 1.4s ease-in-out infinite; }
+.skel-line.big { height: 22px; }
+.head .skel-line { margin-top: 10px; }
+[data-fade] { animation: cc-fade 0.35s ease-out both; }
+#main, #main .mono, #main .big { font-variant-numeric: tabular-nums; }
+@keyframes cc-spin { to { transform: rotate(360deg); } }
+@keyframes cc-indet { 0% { background-position: -40% 0; } 100% { background-position: 140% 0; } }
+@keyframes cc-shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
+@keyframes cc-fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .loadstatus .spin, [data-indet] .card[aria-busy="true"], .skel-line, [data-fade] { animation: none; }
+  .card[aria-busy="true"], .panel[data-stale] > *, .panel[data-stale] > .head .sub { transition: none; }
+}
+
 /* ------------------------------------------------------------------ responsive
    One breakpoint, 900 px. Above it the sidebar sits beside the page and scrolls on
    its own; below it a top bar (app.js, "responsive shell") takes its place and the
@@ -550,3 +586,8 @@ code, .mono, pre { overflow-wrap: anywhere; }
 .seg.acct { max-width: 100%; flex-wrap: wrap; }
 .seg.acct button { max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 h2.acct { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+
+/* the loading status line sits under the top bar on narrow screens */
+@media (max-width: 899.98px) {
+  .loadstatus { top: 64px; right: 16px; }
+}

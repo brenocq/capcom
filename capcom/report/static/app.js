@@ -1,7 +1,9 @@
 // The frame: sidebar (navigation, session search, live sessions, index status,
 // theme toggle) and a router from the URL path to a page.
 
-import { h, s, api, stamp, sessionHref, errorBox, forget } from './lib.js';
+import { h, s, api, stamp, sessionHref, forget } from './lib.js';
+import { startRouter, render, go, afterPointer, refreshView } from './router.js';
+import { swapIn } from './morph.js';
 import { renderOverview } from './overview.js';
 import { renderSpend } from './spend.js';
 import { renderSession } from './session.js';
@@ -11,6 +13,7 @@ import { renderSpikes } from './spikes.js';
 import { renderChecks } from './checks.js';
 import { renderLimits } from './limits.js';
 import { renderChanges, renderChange } from './changes.js';
+import { freshToken } from './marks.js';
 
 const ICON = {
   overview: 'M3 12h4l3-8 4 16 3-8h4',
@@ -78,12 +81,11 @@ let liveData = null, statusData = null;
 function drawSidebar() {
   const r = route();
   const active = { session: 'sessions', day: 'spend' }[r.name] || r.name;
-  const nav = document.getElementById('sidebar');
-  const keep = keepFocus(nav);
   const input = h('input', { id: 'capcom-find', type: 'search', placeholder: 'Project, title or agent type', value: r.name === 'sessions' ? r.query.get('q') || '' : '' });
-  const form = h('form.find', { role: 'search', onsubmit: (e) => { e.preventDefault(); location.href = '/sessions?q=' + encodeURIComponent(input.value.trim()); } },
+  const form = h('form.find', { role: 'search', onsubmit: (e) => { e.preventDefault(); go('/sessions?q=' + encodeURIComponent(input.value.trim())); } },
     h('label', { for: 'capcom-find', text: 'Find a session' }), input);
-  nav.replaceChildren(
+  // drawn anew and swapped in, so the live rates tween and new sessions fade in
+  const fresh = h('nav', { id: 'sidebar', class: 'sidebar', 'aria-label': 'capcom' },
     h('a.brand', { href: '/' }, mark(), h('span', { text: 'capcom' })),
     form,
     h('div.nav', null, NAV.map(([id, href, label, soon]) => h('a', { href, 'aria-current': id === active ? 'page' : null },
@@ -92,7 +94,7 @@ function drawSidebar() {
     liveList(),
     footer(),
   );
-  keep();
+  afterPointer(() => { const live = document.getElementById('sidebar'); swapIn(live, fresh, { animate: live.childElementCount > 0 }); });
   drawTopbar(r, active);
 }
 
@@ -164,8 +166,9 @@ function topbar() {
   bar = h('header.topbar', { id: 'topbar' }, h('a.brand', { href: '/' }, mark(), h('span', { text: 'capcom' })), h('span.where'), menu);
   document.querySelector('.frame').before(bar);
   document.body.append(h('div.scrim', { 'aria-hidden': 'true', onclick: () => setMenu(false) }));
-  // following a link in the sheet closes it
-  document.getElementById('sidebar').addEventListener('click', (e) => { if (e.target.closest('a[href]')) setMenu(false, false); });
+  // following a link in the sheet closes it (on the document: the sidebar node is
+  // swapped for a fresh one on each redraw)
+  document.addEventListener('click', (e) => { if (e.target instanceof Element && e.target.closest('#sidebar a[href]')) setMenu(false, false); });
   document.addEventListener('keydown', trapKeys);
   window.addEventListener('capcom-route', () => setMenu(false, false));
   if (NARROW) NARROW.addEventListener('change', () => { if (!NARROW.matches) setMenu(false, false); });
@@ -205,21 +208,6 @@ function trapKeys(e) {
   items[next].focus();
 }
 
-// The sidebar is redrawn every 30 s: the focused control (and a typed search) survive it.
-function keepFocus(nav) {
-  const el = document.activeElement;
-  if (!el || !nav.contains(el)) return () => {};
-  const href = el.getAttribute('href');
-  const key = el.id ? '#' + CSS.escape(el.id) : href ? `a[href="${CSS.escape(href)}"]` : el.classList.length ? '.' + [...el.classList].map((c) => CSS.escape(c)).join('.') : null;
-  const value = el.tagName === 'INPUT' ? el.value : null;
-  return () => {
-    const again = key && nav.querySelector(key);
-    if (!again) return;
-    if (value !== null) again.value = value;
-    again.focus();
-  };
-}
-
 // ------------------------------------------------------------------ pages
 
 const PAGES = {
@@ -234,30 +222,23 @@ const PAGES = {
   limits: renderLimits,
 };
 
-let renderToken = 0;
-
-async function renderPage() {
-  const r = route();
-  const main = document.getElementById('main');
-  const page = PAGES[r.name];
-  const token = ++renderToken;
-  // Draw into a detached node so a redraw (theme switch) never flashes empty.
-  const next = h('main', { id: 'main', class: 'panel', 'aria-live': 'polite' });
-  if (!main.childElementCount) main.replaceChildren(h('p.loading', { text: 'Loading…' }));
-  try {
-    await page(next, r, () => token === renderToken);
-  } catch (err) {
-    next.replaceChildren(errorBox(err));
-  }
-  if (statusData && statusData.scanning) next.prepend(scanningNotice());
-  next.inert = menuOpen; // behind the open menu sheet
-  if (token === renderToken) main.replaceWith(next);
-}
+// Draw the page of the URL (router.js: at once, from the first data there is,
+// then again as the server's partial replies come).
+function renderPage() { render(); }
 
 window.addEventListener('capcom-route', () => { drawSidebar(); renderPage(); });
 // a mark was written: redraw the page and the sidebar's count
 window.addEventListener('capcom-changed', () => { renderPage(); refreshStatus(); });
 
+startRouter({
+  pages: PAGES,
+  route,
+  onNavigate: () => { setMenu(false, false); drawSidebar(); },
+  decorate: (next) => {
+    if (statusData && statusData.scanning) next.prepend(scanningNotice());
+    next.inert = menuOpen; // behind the open menu sheet
+  },
+});
 drawSidebar();
 renderPage();
 // While serve's first scan runs, the totals are partial: say so, and redraw once
@@ -290,6 +271,39 @@ async function refreshStatus() {
   }
 }
 
+// ------------------------------------------------------------------ live pages
+
+// Every 10 s while the tab is visible (and at once when it shows again): the live
+// list, and /api/version, whose parts say what changed on the server. When a part
+// the current view reads changed, the view is fetched again and swapped in place
+// (router.js refreshView), and the sidebar's "Index updated" moves on. A new
+// `launch` is a restarted server: its write token is new too (marks.js).
+const READS = { overview: ['index', 'samples', 'marks'], limits: ['index', 'samples'], checks: ['index', 'marks'], changes: ['index', 'marks'] };
+let seen = null;
+
+async function watchData() {
+  if (document.hidden) return;
+  let v;
+  try { v = await api('version', true); } catch (e) { return; }
+  const before = seen;
+  seen = v;
+  if (!before) return;
+  if (v.launch !== before.launch) freshToken();
+  if (v.updated && statusData && statusData.index && statusData.index.updated !== v.updated) {
+    statusData.index.updated = v.updated;
+    drawSidebar();
+  }
+  const parts = READS[route().name] || ['index'];
+  if (parts.some((k) => before[k] !== v[k])) {
+    if (before.marks !== v.marks) forget(); // a mark shows on several pages' replies
+    refreshView();
+  }
+}
+
+function tickLive() { if (!document.hidden) { refreshLive(); watchData(); } }
+
 refreshStatus();
 refreshLive();
-setInterval(refreshLive, 30e3);
+watchData();
+setInterval(tickLive, 10e3);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) tickLive(); });

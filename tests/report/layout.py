@@ -432,15 +432,20 @@ class Chrome:
             # CI runners (Ubuntu 24.04) block the user namespaces Chrome's sandbox needs,
             # so Chrome exits at once; it only loads this suite's synthetic local pages
             args[1:1] = ["--no-sandbox", "--disable-dev-shm-usage"]
-        # a shell puts the pipe ends on fds 3 and 4, where Chrome expects them
+        # a shell puts the pipe ends on fds 3 and 4, where Chrome expects them; bash,
+        # since dash (Ubuntu's /bin/sh) rejects fd numbers above 9 ("Bad fd number")
         wire = f'exec "$@" 3<&{hi_r} 4>&{hi_w} {hi_r}<&- {hi_w}>&-'
-        self.proc = subprocess.Popen(
-            ["/bin/sh", "-c", wire, "sh", *args],
-            pass_fds=(hi_r, hi_w),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        # Chrome's own errors go to a file, so a Chrome that dies says why
+        profile.mkdir(parents=True, exist_ok=True)
+        self._errlog = profile / "chrome-stderr.log"
+        with self._errlog.open("wb") as err:
+            self.proc = subprocess.Popen(
+                [shutil.which("bash") or "/bin/bash", "-c", wire, "sh", *args],
+                pass_fds=(hi_r, hi_w),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=err,
+            )
         os.close(hi_r)
         os.close(hi_w)
         self._buf = b""
@@ -472,7 +477,7 @@ class Chrome:
                     raise CdpError(f"{method}: no reply in {timeout} s")
                 chunk = os.read(self._r, 1 << 20)
                 if not chunk:
-                    raise CdpError("Chrome closed the pipe")
+                    raise CdpError("Chrome closed the pipe" + self._last_errors())
                 self._buf += chunk
             raw, self._buf = self._buf.split(b"\0", 1)
             reply = json.loads(raw)
@@ -540,6 +545,13 @@ class Chrome:
         )
         return base64.b64decode(out["data"])
 
+    def _last_errors(self) -> str:
+        try:
+            lines = self._errlog.read_text(errors="replace").strip().splitlines()[-25:]
+        except OSError:
+            return ""
+        return ("; Chrome said:\n" + "\n".join(lines)) if lines else ""
+
     def close(self) -> None:
         with contextlib.suppress(Exception):
             self.call("Browser.close", timeout=5)
@@ -561,6 +573,8 @@ READY = """new Promise((done) => {
     const main = document.getElementById('main');
     const ok = !window.__stale && document.readyState === 'complete' && main
       && main.childElementCount && !main.querySelector(':scope > p.loading')
+      && !main.hasAttribute('data-skeleton') && !main.hasAttribute('data-stale')
+      && !document.querySelector('.loadstatus:not([hidden]), #main .card[aria-busy="true"]')
       && !document.body.textContent.includes('Reading the index…');
     if (ok || Date.now() - t0 > 15000) setTimeout(() => done(!!ok), 400); else setTimeout(tick, 80);
   };

@@ -129,6 +129,12 @@ class Analysis:
         spikes = _call("timeline", 3, lambda: self.find_spikes_fn(index, table, since, until, None))
         return spikes, _call("explain", 3, lambda: self.explain_fn(index, table, spikes))
 
+    def detect(
+        self, index: Index, table: PriceTable, since: datetime, until: datetime
+    ) -> list[Spike]:
+        """The first half of `spikes`: the spikes, to explain later (in chunks)."""
+        return _call("timeline", 3, lambda: self.find_spikes_fn(index, table, since, until, None))
+
     def explain(
         self, index: Index, table: PriceTable, spikes: Sequence[Spike]
     ) -> list[Explanation]:

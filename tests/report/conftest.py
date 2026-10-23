@@ -199,8 +199,10 @@ STUBS = Analysis(not_yet, not_yet, not_yet, not_yet, not_yet)
 class Client:
     base: str
 
-    def get(self, path: str, host: str | None = None) -> tuple[int, Any, dict[str, str]]:
-        request = urllib.request.Request(self.base + path)
+    def get(
+        self, path: str, host: str | None = None, headers: dict[str, str] | None = None
+    ) -> tuple[int, Any, dict[str, str]]:
+        request = urllib.request.Request(self.base + path, headers=headers or {})
         if host is not None:
             request.add_header("Host", host)
         try:
