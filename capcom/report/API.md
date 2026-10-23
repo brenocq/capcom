@@ -52,8 +52,8 @@ request without the header (the click) lifts the same job to a page's priority.
 At most 3 jobs compute at once. Background work (low-priority jobs, and the warmer)
 waits while any page's request or job is in flight, and for 0.5 s after the last one,
 so a click never shares the CPU with it. The warmer computes the views pages asked for
-in the last 30 minutes (newest first) and then every page's default view (Overview's
-and Spend's split by the group a page asked for last), after startup
+in the last 30 minutes (newest first) and then every page's default view (Overview's,
+Spend's and Limits' split by the group a page asked for last), after startup
 and whenever the index changes, in a child process of its own (`capcom.report.worker`),
 which is stopped (SIGSTOP) while a page needs the CPU and continued after; it rests
 three times as long as each reply took (about a quarter of a core at most), and it
@@ -130,7 +130,9 @@ missing or old. Static files are under `/static/`.
 
 **Group**: Totals plus `key`, `label`, `count` (sessions for projects, models and the
 main thread; spawned agents for an agent type); project groups add `path`, the full
-folder (`~` for home) for a tooltip.
+folder (`~` for home) for a tooltip. A model is named by its price-table id (a session's
+`models` too), as the charts split by model, so a model logged under its alias and its
+dated id is one group.
 
 **Session row**: `session_id, title, project, project_path, project_dir, temporary, git_branch,
 subagents, active_seconds, first, last, peak_context, cache_read_share, usd, requests,
@@ -448,19 +450,21 @@ spend of its scope: `usual` is what the requests cost at the baseline pace (the
 spike's baseline shared among its requests, plus every other request), `extra` what
 the spike's requests cost above it, adding up to its excess.
 
-### `GET /api/limits?days=14`
+### `GET /api/limits?days=14&group=category`
 
 The subscription's 5-hour and weekly windows from `capcom.limits`: the samples
 `capcom record-limits` appends to `limits.jsonl` in the state folder
 (`$XDG_STATE_HOME/capcom`, else `~/.local/state/capcom`: no scan rebuilds them, so they
 stay out of the cache), and the seed from the index's rate-limit errors. `days` is one
-of 7, 14, 30, 90 and bounds `segments`.
+of 7, 14, 30, 90 and bounds `segments`. `group` (default `category`; also accepted as
+`agent_type` for `agent`) is one of `category`, `project`, `model`, `agent` and splits
+each segment's spend (`by`); a split by session is a 400, as is an unknown group.
 The reply's cache key also holds the size and modification time of `limits.jsonl`
 (and of the recorder's account files beside it), since the recorder writes them
 without a scan.
 
 ```
-Limits = {available, recording, message, install, samples, last_sample, recording_since, days,
+Limits = {available, recording, message, install, samples, last_sample, recording_since, days, group,
           windows: {five_hour: Window | null, seven_day: Window | null},  # the current account's
           accounts: [Account],          # the current one first; absent without samples
           combined: Combined | null}    # null with fewer than two accounts
@@ -483,7 +487,7 @@ Window = {window, label, samples, current,
           start, start_known,           # start_known: history's first point is the reset, not a reading
           segments: [{start, start_known, resets_at, peak, hit_limit, reset,
                       points: [[ms, percent]], usd, inferred_usd,
-                      by_project: [{project, usd, percent}] | null,
+                      by: [{key, usd, percent}] | null,   # split by `group`
                       path}]}           # newest first; path: the window's own page
 Costs = {rows: [{model, category, label, tokens, tokens_low, tokens_high,
                  usd, usd_low, usd_high, rough}],   # tokens (and dollars) per 1 %
@@ -522,8 +526,13 @@ other kind has a weight with an 80 % range from the least-squares covariance of 
 kept weights. A row is left out (`left_out`) when that range reaches zero; it is
 `rough` when its high end is more than `rough_ratio` (2) times its low end. A row's
 dollars are its tokens per 1 % at the average price its tokens had.
-`by_project` (the last 8 segments; up to 6 projects plus `(other)`) is what the
-index's requests spent in the segment, and their fitted percent (null without a fit).
+`by` (the last 8 segments; up to 6 members plus `(other)`, largest first) is what the
+index's requests spent in the segment split by `group`, and their fitted percent (null
+without a fit). Its `key` is a project's display label, an agent type (`main` for main
+threads, `(unknown agent)` for a subagent of no known type), a model's price-table id,
+or a kind of token (`input`, `cache_write`, `cache_read`, `output`, web tools counted
+with output). Every split adds up to the segment's `usd` and to the same percent: the
+fit is linear in each kind's tokens and dollars, so the parts of a split share it out.
 Usage from other machines or claude.ai counts toward the limits but is not in the
 logs.
 
@@ -533,7 +542,7 @@ own windows, segments, fit and forecast; `email` is its `oauthAccount.emailAddre
 `label` is the email, or "earlier account" for the `unknown` id (samples from before
 accounts were recorded, on no known account's weekly cycle). The recorder reads only
 those two keys of `~/.claude.json`. `current` is the account Claude Code was last
-seen logged in with. A window's spend (`usd`, `by_project`) is that of the
+seen logged in with. A window's spend (`usd`, `by`) is that of the
 account's sessions, through the session ids of its samples and the recorder's
 session log; `inferred_usd` is the part from sessions no sample names, put on the
 account Claude Code was logged in with at the time. With a single account,
@@ -545,7 +554,7 @@ with nothing spent or nothing left; `reset_first` is an account whose weekly
 window resets before then. The website's account filter (Overview and Limits) is applied
 in the browser and kept there (localStorage), never in the URL.
 
-### `GET /api/limit-window?account=<id>&window=5-hour&start=2026-10-22T1820`
+### `GET /api/limit-window?account=<id>&window=5-hour&start=2026-10-22T1820&group=category`
 
 One window of one account, for its page (`/limits/window/<id>/<5-hour|weekly>/<start>`,
 linked from each segment's `path`). `window` is `5-hour` or `weekly` (or the
@@ -558,7 +567,10 @@ Its cache key holds the samples' stamp, as `/api/limits`.
 {account: {id, label, current, several}, window, label, start, start_known, resets_at,
  until, current, peak, hit_limit, readings,
  points: [[ms, percent]],                       # the segment's line (0 % at a known start)
- fitted: {times: [ms], percent: [p], usd: [u]}, # the fit's percent of the spend, adding up
+ group,
+ fitted: {times: [ms], percent: [p], usd: [u],  # the fit's percent of the spend, adding up
+          base,                                 # where it starts: 0, or the first reading
+          by: [{key, percent: [p]}]},           # split by `group`, adding up at `times`
  step_minutes, bucket_minutes,
  fit: {method, usd_per_percent, rough, intervals, note} | null,
  own_usd_per_percent,                           # this window's spend / its rise; null under 1 point
@@ -573,7 +585,11 @@ Its cache key holds the samples' stamp, as `/api/limits`.
 
 The spend is the account's (as the window's `usd` on `/api/limits`); `percent` is
 the fit's percent of a part's spend (null without a fit). `fitted.percent` starts at
-0 at a known start, else at the first reading.
+`base`: 0 at a known start, else the first reading. `group` (default `category`, as
+`/api/limits`'s, with the same 400s) splits the line: `fitted.by` is each member's fit
+of its own spend, adding up, at the same `times` (up to 6 members, largest at the end
+first, plus `(other)`; empty without a fit), with keys as `/api/limits`'s `by`; at every
+time, `base` plus the members' percents is `fitted.percent`.
 
 ### `GET /api/checks?days=14`
 

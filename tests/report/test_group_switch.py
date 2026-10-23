@@ -168,6 +168,17 @@ def test_day_chart_splits_by_the_group_in_the_url(tmp_path: Path) -> None:
             assert got["pressed"] == "Model"
             assert got["asked"] == [f"/api/day/{day}?group=model"]
             assert got["legend"] and all(x.startswith("claude-") for x in got["legend"])
+            # where the money went lists the models too, under the agent types
+            models = chrome.js(
+                "(() => { const t = [...document.querySelectorAll('#main h2.small')]"
+                ".find((e) => e.textContent === 'By model');"
+                " return t && [...t.nextElementSibling"
+                ".querySelectorAll('.bitem .top span:first-child')]"
+                ".map((s) => s.textContent); })()"
+            )
+            # by the same names: each model's price-table id
+            assert models and sorted(models) == sorted(got["legend"])
+            assert all(m.startswith("claude-") for m in models)
 
             chrome.js(
                 "[...document.querySelectorAll('#main .seg button')]"
@@ -194,5 +205,107 @@ def test_day_chart_splits_by_the_group_in_the_url(tmp_path: Path) -> None:
             assert got["pressed"] == "Category" and got["search"] == ""
             assert got["asked"][-1] == f"/api/day/{day}"
             assert "Cache reads" in got["legend"]
+        finally:
+            chrome.close()
+
+
+# each "What spent each window" block on Limits: its pressed "Split by" button, its
+# legend, its table's member column; and the query and the limits replies asked for
+LIMITS_STATE = """(() => {
+  const blocks = [...document.querySelectorAll('#main h3')]
+    .filter((e) => e.textContent === 'What spent each window').map((h3) => {
+      const head = h3.parentElement;
+      return {
+        pressed: head.querySelector('.seg[aria-label="Split by"] button[aria-pressed="true"]')
+          ?.textContent,
+        legend: [...head.nextElementSibling.querySelectorAll('span')]
+          .map((s) => s.textContent),
+        column: head.parentElement.querySelectorAll('details.astable th')[1]?.textContent,
+      };
+    });
+  return {
+    blocks, search: location.search,
+    asked: performance.getEntriesByType('resource').map((e) => new URL(e.name))
+      .filter((u) => u.pathname === '/api/limits').map((u) => u.search),
+  };
+})()"""
+
+
+def test_limits_split_what_spent_each_window_by_the_group_in_the_url(tmp_path: Path) -> None:
+    binary = layout.find_chrome()
+    assert binary is not None
+    with layout.synthetic_site(tmp_path) as base:
+        chrome = layout.Chrome(binary, tmp_path / "profile")
+        try:
+            assert layout.load(chrome, f"{base}/limits?group=agent")
+            got = chrome.js(LIMITS_STATE)
+            assert got["asked"] == ["?days=14&group=agent"]
+            assert len(got["blocks"]) == 4  # the 5-hour and weekly windows of 2 accounts
+            for b in got["blocks"]:
+                assert b["pressed"] == "Agent type" and b["column"] == "Agent type"
+                assert "main" in b["legend"]
+
+            chrome.js(
+                "[...document.querySelectorAll('#main .seg[aria-label=\"Split by\"] button')]"
+                ".find((b) => b.textContent.trim() === 'Category').click()"
+            )
+            time.sleep(0.1)
+            assert chrome.js(layout.READY, timeout=30)
+            got = chrome.js(LIMITS_STATE)
+            assert got["search"] == "?group=category"
+            assert got["asked"][-1] == "?days=14&group=category"
+            for b in got["blocks"]:
+                assert b["pressed"] == "Category" and b["column"] == "Category"
+                assert "Cache reads" in b["legend"]
+        finally:
+            chrome.close()
+
+
+# a limit window's "How it filled up": its pressed "Split by" button, its legend, the
+# fitted line's bands in the chart; and the query and the window replies asked for
+WINDOW_STATE = """(() => {
+  const card = [...document.querySelectorAll('#main section.card')]
+    .find((c) => c.querySelector('h2')?.firstChild.textContent === 'How it filled up');
+  return {
+    pressed: card.querySelector('.seg[aria-label="Split by"] button[aria-pressed="true"]')
+      ?.textContent,
+    legend: [...card.querySelectorAll('.legend > span')].map((s) => s.childNodes[1].textContent),
+    bands: card.querySelectorAll('svg path.fitband').length,
+    search: location.search,
+    asked: performance.getEntriesByType('resource').map((e) => new URL(e.name))
+      .filter((u) => u.pathname === '/api/limit-window')
+      .map((u) => u.searchParams.get('group')),
+  };
+})()"""
+
+
+def test_limit_window_splits_the_fitted_line_by_the_group_in_the_url(tmp_path: Path) -> None:
+    binary = layout.find_chrome()
+    assert binary is not None
+    with layout.synthetic_site(tmp_path) as base:
+        chrome = layout.Chrome(binary, tmp_path / "profile")
+        try:
+            assert layout.load(chrome, f"{base}/limits")
+            href = chrome.js(
+                "document.querySelector(\"#main a[href^='/limits/window/']\").getAttribute('href')"
+            )
+            assert layout.load(chrome, f"{base}{href}?group=agent")
+            got = chrome.js(WINDOW_STATE)
+            assert got["pressed"] == "Agent type"
+            assert got["asked"] == ["agent"]
+            assert got["legend"][:2] == ["Readings", "Fitted from the spend"]
+            members = got["legend"][2:]
+            assert "main thread" in members and got["bands"] == len(members)
+
+            chrome.js(
+                "[...document.querySelectorAll('#main .seg[aria-label=\"Split by\"] button')]"
+                ".find((b) => b.textContent.trim() === 'Category').click()"
+            )
+            time.sleep(0.1)
+            assert chrome.js(layout.READY, timeout=30)
+            got = chrome.js(WINDOW_STATE)
+            assert got["pressed"] == "Category" and got["search"] == "?group=category"
+            assert got["asked"][-1] == "category"
+            assert "Cache reads" in got["legend"] and got["bands"] == len(got["legend"]) - 2
         finally:
             chrome.close()

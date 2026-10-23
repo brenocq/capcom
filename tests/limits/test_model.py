@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
@@ -12,7 +13,10 @@ from capcom.cost.model import price
 from capcom.cost.prices import load_prices
 from capcom.cost.top import project_label
 from capcom.limits.model import (
+    MAIN,
     NOT_ENOUGH,
+    SPLITS,
+    UNKNOWN_AGENT,
     Interval,
     Line,
     Spend,
@@ -30,7 +34,7 @@ from capcom.limits.model import (
     segments,
 )
 from capcom.limits.view import _at_reset, runs_out_text
-from capcom.types import Event, EventKind, LimitWindow
+from capcom.types import AgentInfo, Event, EventKind, LimitWindow
 from tests.limits.fakes import T0, FakeIndex, minutes, req, sample
 
 TABLE = load_prices()
@@ -217,6 +221,37 @@ def test_forecast_range_and_running_out() -> None:
     assert flat.median == flat.high == 60.0
 
 
+def test_each_split_of_a_window_adds_up_to_its_spend() -> None:
+    index, ss = synthetic(4)
+    # in the last window: a scout subagent in alpha, an agent of no known type, beta
+    last = ss[-1].time
+    extra = [
+        replace(req(last - minutes(30), output=9_000, cache_read=200_000), agent_id="a1"),
+        replace(req(last - minutes(25), output=3_000), agent_id="a2"),
+        req(last - minutes(20), project="-home-user-beta", output=5_000, cache_read=50_000),
+    ]
+    index = FakeIndex([*index.reqs, *extra], agents=[AgentInfo("a1", "s1", agent_type="scout")])
+    view = analyze(index, TABLE, ss, H5, now=last + minutes(1))
+    shown = view.shown[-1]
+    alpha, beta = project_label("-home-user-alpha"), project_label("-home-user-beta")
+    want = {
+        "project": {alpha, beta},
+        "agent": {MAIN, "scout", UNKNOWN_AGENT},
+        "model": {"claude-opus-5-5", "claude-sonnet-5-5"},
+        "category": {"input", "cache_write", "cache_read", "output"},
+    }
+    assert set(shown.by) == set(SPLITS) == set(want)
+    percent = sum(p or 0.0 for _, _, p in shown.by["project"])
+    assert percent > 0
+    for split, rows in shown.by.items():
+        assert {k for k, _, _ in rows} == want[split], split
+        assert sum(u for _, u, _ in rows) == pytest.approx(shown.usd, rel=1e-9), split
+        assert sum(p or 0.0 for _, _, p in rows) == pytest.approx(percent, rel=1e-9), split
+        assert [u for _, u, _ in rows] == sorted((u for _, u, _ in rows), reverse=True)
+    scout = next(u for k, u, _ in shown.by["agent"] if k == "scout")
+    assert scout == pytest.approx(price(extra[0], TABLE).total)
+
+
 def test_analyze_forecasts_the_current_window() -> None:
     index, ss = synthetic(8)
     last_reset = ss[-1].resets_at
@@ -231,8 +266,8 @@ def test_analyze_forecasts_the_current_window() -> None:
     # the true value at the end of the readings is inside a generous range
     assert fc.low - 10 <= ss[-1].used_percentage <= fc.high + 10
     shown = view.shown[-1]
-    assert shown.by_project[0][0] == project_label("-home-user-alpha") and shown.usd > 0
-    assert shown.by_project[0][2] is not None
+    assert shown.by["project"][0][0] == project_label("-home-user-alpha") and shown.usd > 0
+    assert shown.by["project"][0][2] is not None
     # after the reset there is no forecast, but the history stays
     later = analyze(index, TABLE, ss, H5, now=last_reset + minutes(5))
     assert not later.current and later.forecast is None

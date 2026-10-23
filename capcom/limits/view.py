@@ -23,6 +23,8 @@ from capcom.limits.model import (
     NOT_ENOUGH,
     Fit,
     Forecast,
+    Row,
+    Split,
     WindowView,
     load_samples,
     samples_path,
@@ -31,7 +33,7 @@ from capcom.types import Index, LimitSample, LimitWindow, PriceTable
 
 INSTALL = "capcom limits --install"
 NOT_RECORDING = "Not recording yet: run `capcom limits --install` to set it up."
-TOP_PROJECTS = 6
+TOP_MEMBERS = 6  # a segment's split lists these, then one "(other)" for the rest
 OTHER = "(other)"
 
 
@@ -47,14 +49,14 @@ def _r(x: float | None, digits: int = 2) -> float | None:
     return None if x is None else round(x, digits)
 
 
-def _projects(rows: Sequence[tuple[str, float, float | None]]) -> list[dict[str, Any]]:
-    out = [{"project": k, "usd": _r(u, 4), "percent": _r(p)} for k, u, p in rows[:TOP_PROJECTS]]
-    rest = rows[TOP_PROJECTS:]
+def _rows(rows: Sequence[Row]) -> list[dict[str, Any]]:
+    out = [{"key": k, "usd": _r(u, 4), "percent": _r(p)} for k, u, p in rows[:TOP_MEMBERS]]
+    rest = rows[TOP_MEMBERS:]
     if rest:
         pcts = [p for _, _, p in rest]
         out.append(
             {
-                "project": OTHER,
+                "key": OTHER,
                 "usd": _r(sum(u for _, u, _ in rest), 4),
                 "percent": None if None in pcts else _r(sum(p or 0.0 for p in pcts)),
             }
@@ -148,9 +150,10 @@ def window_json(
     since: datetime | None,
     full: bool,
     account: str | None = None,
+    split: Split = "project",
 ) -> dict[str, Any]:
     """One window of one account (`account`: its id, for the links to each window's
-    own page)."""
+    own page), each segment's spend split by `split`."""
     reading = v.reading
     f = v.fit
     fc = v.forecast
@@ -233,7 +236,7 @@ def window_json(
                     "usd": None if sv is None else _r(sv.usd, 4),
                     # of usd, from sessions no reading names, put on the account by time
                     "inferred_usd": None if sv is None else _r(sv.inferred_usd, 4),
-                    "by_project": None if sv is None else _projects(sv.by_project),
+                    "by": None if sv is None else _rows(sv.by[split]),
                 }
                 | ({} if account is None else {"path": window_path(account, seg, tz)})
             )
@@ -257,6 +260,7 @@ def limits_json(
     days: int | None = None,
     full: bool = True,
     label: Callable[[str], str] = project_label,
+    split: Split = "project",
 ) -> dict[str, Any]:
     samples = load_samples(samples_path(state_dir)) if state_dir is not None else []
     recording = any(s.source == "statusline" for s in samples)
@@ -282,7 +286,7 @@ def limits_json(
             "current": a.account.current,
             "samples": len(a.samples),
             "windows": {
-                w.value: window_json(a.views[w], now, tz, since, full, a.account.id)
+                w.value: window_json(a.views[w], now, tz, since, full, a.account.id, split)
                 for w in LimitWindow
             },
         }
@@ -484,7 +488,7 @@ def format_views(
         if v.shown and v.current:
             sv = v.shown[-1]
             parts = []
-            for k, u, p in sv.by_project[:5]:
+            for k, u, p in sv.by["project"][:5]:
                 parts.append(f"{k} ${u:,.2f}" + ("" if p is None else f" ({p:.1f}%)"))
             if parts:
                 lines.append("  this window by project: " + ", ".join(parts))

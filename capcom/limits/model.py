@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from capcom.cost.model import price
 from capcom.cost.prices import canonical, is_placeholder
@@ -391,6 +391,22 @@ class Spend:
                 k = (model, cat)
                 self.tokens[k] = self.tokens.get(k, 0.0) + n
 
+    def merge(self, other: Spend) -> None:
+        self.usd += other.usd
+        self.requests += other.requests
+        for k, v in other.tokens.items():
+            self.tokens[k] = self.tokens.get(k, 0.0) + v
+        for k, v in other.usd_by.items():
+            self.usd_by[k] = self.usd_by.get(k, 0.0) + v
+
+    def only(self, pick: Callable[[Key], bool]) -> Spend:
+        """The part of this spend of the kinds of token `pick` accepts. A fit's percent
+        is linear in the tokens and dollars per kind, so the parts of a partition add
+        up to the whole (dollars need `usd_by`: spend added with its cost)."""
+        usd_by = {k: v for k, v in self.usd_by.items() if pick(k)}
+        tokens = {k: v for k, v in self.tokens.items() if pick(k)}
+        return Spend(sum(usd_by.values()), tokens, 0, usd_by)
+
 
 class Bins:
     """Non-overlapping [start, end) bins, sorted, each with a payload."""
@@ -429,7 +445,7 @@ def scan_spend(
 ) -> None:
     """One pass over the requests the bins cover (those `keep` accepts, when given),
     adding each to every bin holding it (a bin's payload is a Spend, or a callable
-    taking the request)."""
+    taking the request, its canonical model and its cost)."""
     if on_request is None:
         scan_groups(index, table, [(bins, keep)])
         return
@@ -450,7 +466,7 @@ def _add(bins: Sequence[Bins], r: Request, model: str, cost: CostBreakdown) -> N
         if isinstance(payload, Spend):
             payload.add(r, model, cost.total, cost)
         elif payload is not None:
-            payload(r, model, cost.total)
+            payload(r, model, cost)
 
 
 Group = tuple[Sequence[Bins], Callable[[Request], bool] | None]
@@ -896,12 +912,51 @@ def forecast(
 # --------------------------------------------------------------------------- per window
 
 
+# The ways a window's spend is split: by project (its display label), by agent type
+# (MAIN for main threads), by canonical model id, by kind of token (CATEGORIES, web
+# tools counted with output). Each split's rows add up to the window's spend.
+type Split = Literal["project", "agent", "model", "category"]
+SPLITS: tuple[Split, ...] = ("project", "agent", "model", "category")
+MAIN = "main"
+UNKNOWN_AGENT = "(unknown agent)"
+Row = tuple[str, float, float | None]  # (member, usd, percent or None), largest first
+
+
 @dataclass(slots=True)
 class SegmentView:
     segment: Segment
-    by_project: list[tuple[str, float, float | None]]  # (label, usd, percent or None)
+    by: dict[Split, list[Row]]
     usd: float
     inferred_usd: float = 0.0  # of `usd`, from sessions put on the account by time
+
+
+def split_rows(parts: Mapping[tuple[str, str], Spend], fit: Fit | None) -> dict[Split, list[Row]]:
+    """A segment's spend per (project, agent type), split each way of SPLITS: whole
+    parts merged by project or by agent type, and every part's tokens taken apart by
+    model or by kind of token."""
+    whole: dict[Split, dict[str, Spend]] = {"project": {}, "agent": {}}
+    for (project, agent), sp in parts.items():
+        whole["project"].setdefault(project, Spend()).merge(sp)
+        whole["agent"].setdefault(agent, Spend()).merge(sp)
+    total = Spend()
+    for sp in parts.values():
+        total.merge(sp)
+    kinds = {*total.usd_by, *total.tokens}
+
+    def part(at: int, value: str) -> Spend:  # at: 0 the model, 1 the category of a Key
+        return total.only(lambda k: k[at] == value)
+
+    by_part: dict[Split, dict[str, Spend]] = {
+        **whole,
+        "model": {m: part(0, m) for m in {k[0] for k in kinds}},
+        "category": {c: part(1, c) for c in CATEGORIES if any(k[1] == c for k in kinds)},
+    }
+
+    def rows(d: Mapping[str, Spend]) -> list[Row]:
+        ordered = sorted(d.items(), key=lambda kv: (-kv[1].usd, kv[0]))
+        return [(k, s.usd, None if fit is None else fit.percent(s)) for k, s in ordered]
+
+    return {split: rows(by_part[split]) for split in SPLITS}
 
 
 @dataclass(slots=True)
@@ -945,12 +1000,17 @@ def analyze(
     inferred: Callable[[Request], bool] | None = None,
 ) -> WindowView:
     """Everything capcom knows about one window: its segments, the fit, the forecast
-    for the current segment, and what spent the last `shown` segments by project.
-    With several accounts, `samples` are one account's and `keep` accepts the
-    requests of its sessions (`inferred`: those put on it by time only)."""
-    prep = prepare(samples, window, now, label, shown, keep, inferred)
+    for the current segment, and what spent the last `shown` segments, split each
+    way of SPLITS. With several accounts, `samples` are one account's and `keep`
+    accepts the requests of its sessions (`inferred`: those put on it by time only)."""
+    prep = prepare(samples, window, now, label, shown, keep, inferred, agent_types(index))
     scan_groups(index, table, [prep.group])
     return prep.finish()
+
+
+def agent_types(index: Index) -> dict[str, str]:
+    """Each subagent's type by its id, for the split by agent type."""
+    return {a.agent_id: a.agent_type for a in index.agents() if a.agent_type}
 
 
 @dataclass(slots=True)
@@ -970,6 +1030,7 @@ def prepare(
     shown: int = 8,
     keep: Callable[[Request], bool] | None = None,
     inferred: Callable[[Request], bool] | None = None,
+    agent_types: Mapping[str, str] | None = None,
 ) -> Prepared:
     """`analyze` in two steps, so that several windows (and accounts) share one
     read of the requests (`scan_groups`)."""
@@ -1000,23 +1061,26 @@ def prepare(
         bins.append(Bins([(last.last.time, now, since_last)]))
 
     views = segs[-shown:]
-    per_project: list[dict[str, Spend]] = [{} for _ in views]
+    per_part: list[dict[tuple[str, str], Spend]] = [{} for _ in views]
     guessed = [Spend() for _ in views]
+    types = agent_types or {}
 
-    def project_adder(d: dict[str, Spend], g: Spend) -> Callable[[Request, str, float], None]:
-        def add(r: Request, model: str, usd: float) -> None:
-            key = label(r.project_dir)
-            d.setdefault(key, Spend()).add(r, model, usd)
+    def part_adder(
+        d: dict[tuple[str, str], Spend], g: Spend
+    ) -> Callable[[Request, str, CostBreakdown], None]:
+        def add(r: Request, model: str, cost: CostBreakdown) -> None:
+            agent = MAIN if r.agent_id is None else types.get(r.agent_id) or UNKNOWN_AGENT
+            d.setdefault((label(r.project_dir), agent), Spend()).add(r, model, cost.total, cost)
             if inferred is not None and inferred(r):
-                g.add(r, model, usd)
+                g.add(r, model, cost.total)
 
         return add
 
     bins.append(
         Bins(
             [
-                (seg.start, min(seg.end, now), project_adder(d, g))
-                for seg, d, g in zip(views, per_project, guessed, strict=True)
+                (seg.start, min(seg.end, now), part_adder(d, g))
+                for seg, d, g in zip(views, per_part, guessed, strict=True)
             ]
         )
     )
@@ -1032,7 +1096,7 @@ def prepare(
             rates_spend,
             since_last,
             views,
-            per_project,
+            per_part,
             guessed,
             now,
         ),
@@ -1049,7 +1113,7 @@ def _finish(
     rates_spend: list[Spend],
     since_last: Spend,
     views: list[Segment],
-    per_project: list[dict[str, Spend]],
+    per_part: list[dict[tuple[str, str], Spend]],
     guessed: list[Spend],
     now: datetime,
 ) -> WindowView:
@@ -1079,17 +1143,9 @@ def _finish(
         fc.readings, fc.rough = result.readings, result.rough
 
     shown_views: list[SegmentView] = []
-    for seg, d, g in zip(views, per_project, guessed, strict=True):
+    for seg, d, g in zip(views, per_part, guessed, strict=True):
         total = sum(s.usd for s in d.values())
-        rows = sorted(d.items(), key=lambda kv: -kv[1].usd)
-        shown_views.append(
-            SegmentView(
-                seg,
-                [(k, s.usd, None if result is None else result.percent(s)) for k, s in rows],
-                total,
-                g.usd,
-            )
-        )
+        shown_views.append(SegmentView(seg, split_rows(d, result), total, g.usd))
     return WindowView(
         window=window,
         samples=len(own),
@@ -1110,7 +1166,8 @@ def analyze_all(
     now: datetime,
     label: Callable[[str], str] = project_label,
 ) -> dict[LimitWindow, WindowView]:
-    preps = {w: prepare(samples, w, now, label) for w in LimitWindow}
+    types = agent_types(index)
+    preps = {w: prepare(samples, w, now, label, agent_types=types) for w in LimitWindow}
     scan_groups(index, table, [p.group for p in preps.values()])
     return {w: p.finish() for w, p in preps.items()}
 

@@ -108,7 +108,8 @@ const r = await import('./router.js');
 const at = (p) => r.apiFor(new URL('http://127.0.0.1' + p));
 console.log(JSON.stringify([at('/spend'), at('/'), at('/spend?days=30&group=model'),
   at('/?group=category&range=7d'), at('/sessions'), at('/day/2026-10-20'),
-  at('/day/2026-10-20?group=agent'), at('/day/2026-10-20?group=category')]));
+  at('/day/2026-10-20?group=agent'), at('/day/2026-10-20?group=category'), at('/limits'),
+  at('/limits?days=30&group=model'), at('/limits?days=5')]));
 """
     out = subprocess.run(
         ["node", "--input-type=module", "-e", script],
@@ -127,6 +128,9 @@ console.log(JSON.stringify([at('/spend'), at('/'), at('/spend?days=30&group=mode
         ["day/2026-10-20?group=project"],  # Day follows the group picked last too
         ["day/2026-10-20?group=agent"],
         ["day/2026-10-20"],  # by category: the default path, no second job
+        ["limits?days=14&group=project"],  # Limits follows it as well
+        ["limits?days=30&group=model"],
+        ["limits?days=14&group=project"],  # a range the page does not offer: its default
     ]
 
 

@@ -6,16 +6,25 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 
-from capcom.types import Event, EventKind, LimitSample, LimitWindow, Request, Usage
+from capcom.types import AgentInfo, Event, EventKind, LimitSample, LimitWindow, Request, Usage
 
 T0 = datetime(2026, 10, 1, 8, 0, tzinfo=UTC)
 _n = iter(range(1, 10_000_000))
 
 
 class FakeIndex:
-    def __init__(self, requests: Sequence[Request] = (), events: Sequence[Event] = ()) -> None:
+    def __init__(
+        self,
+        requests: Sequence[Request] = (),
+        events: Sequence[Event] = (),
+        agents: Sequence[AgentInfo] = (),
+    ) -> None:
         self.reqs = sorted(requests, key=lambda r: r.timestamp)
         self.evs = sorted(events, key=lambda e: e.timestamp)
+        self.agent_infos = list(agents)
+
+    def agents(self, session_id: str | None = None) -> Iterator[AgentInfo]:
+        return iter(self.agent_infos)
 
     def requests(
         self,

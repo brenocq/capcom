@@ -1,5 +1,5 @@
 // Day: one local day's spend against a typical day, and where it went: the day
-// adding up with its spikes and their causes, by project and agent type, and the
+// adding up with its spikes and their causes, by project, agent type and model, and the
 // sessions. Reached from the per-day bars on Spend.
 
 import {
@@ -92,7 +92,9 @@ export async function renderDay(main, r) {
     h('h2.small', { text: 'By project' }),
     barList(d.by_project.slice(0, 6), (p) => p.usd, (p) => (p.typical_usd != null ? `typical ${usd(p.typical_usd)}` : '')),
     h('h2.small', { style: 'margin-top:18px', text: 'By agent type' }),
-    barList(d.by_agent.slice(0, 6).map((a) => ({ ...a, label: a.key === 'main' ? 'main thread' : a.label })), (a) => a.usd, (a) => `${a.count} ${a.key === 'main' ? 'session' : 'agent'}${a.count === 1 ? '' : 's'}`));
+    barList(d.by_agent.slice(0, 6).map((a) => ({ ...a, label: a.key === 'main' ? 'main thread' : a.label })), (a) => a.usd, (a) => `${a.count} ${a.key === 'main' ? 'session' : 'agent'}${a.count === 1 ? '' : 's'}`),
+    h('h2.small', { style: 'margin-top:18px', text: 'By model' }),
+    barList(d.by_model.slice(0, 6), (m) => m.usd, (m) => `${m.count} session${m.count === 1 ? '' : 's'}`));
   main.append(h('div.row-wrap', null, spikes, where));
 
   main.append(h('section.card', null,

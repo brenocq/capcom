@@ -4,10 +4,13 @@
 // costliest sessions and spikes, and its own dollars per 1%. Data from
 // /api/limit-window.
 
-import { h, api, usd, tokens, empty, monthDay, hm, barList, tableToggle, CATEGORY_LABELS, CATEGORY_ORDER } from './lib.js';
+import {
+  h, api, usd, tokens, empty, monthDay, hm, barList, tableToggle, seg, setQuery, CATEGORY_LABELS, CATEGORY_ORDER,
+  GROUPS, rememberGroup, limitWindowPath,
+} from './lib.js';
 import { limitChart } from './limits.js';
 import { sessionsTable } from './sessions.js';
-import { pickSpikes, spikeList } from './spend.js';
+import { pickSpikes, spikeList, withColors } from './spend.js';
 
 const pctText = (x, digits = 0) => `${(+x).toFixed(digits)}%`;
 const share = (x) => (x === null || x === undefined ? '' : `≈${pctText(x, x < 10 ? 1 : 0)}`);
@@ -38,6 +41,14 @@ export function windowStory(d) {
   return parts.join(' ');
 }
 
+// The fitted line's members, as the chart stacks them: named as in the lists below
+// (the main thread, models without "claude-"), colored as Spend colors its members.
+export function fittedBands(d) {
+  const label = (key) => (d.group === 'agent' && key === 'main' ? 'main thread' : d.group === 'model' ? key.replace(/^claude-/, '') : key);
+  const members = withColors(d.fitted.by.map((b) => ({ key: b.key, label: label(b.key) })), d.group);
+  return members.map((m, i) => ({ label: m.label, color: m.color, values: d.fitted.by[i].percent }));
+}
+
 // One "what spent it" list: bars with dollars, the share of the limit on hover,
 // all of it in the table.
 function spentList(title, rows) {
@@ -47,8 +58,7 @@ function spentList(title, rows) {
 
 export async function renderLimitWindow(main, r) {
   const [, account, kind, start] = r.rest || [];
-  const q = new URLSearchParams({ account: account || '', window: kind || '', start: start || '' });
-  const d = await api('limit-window?' + q.toString());
+  const d = await api(limitWindowPath(account, kind, start, r.query));
   const weekly = d.window === 'seven_day';
   const x0 = new Date(d.start).getTime();
   const x1 = new Date(d.resets_at || d.until).getTime();
@@ -70,19 +80,28 @@ export async function renderLimitWindow(main, r) {
     nav));
   main.append(h('p.story', { text: windowStory(d) }));
 
-  // how the percentage rose: the readings, and the fitted percent of the spend
-  const card = h('section.card', null, h('div.split', null, h('h2', { text: 'How it filled up' }),
-    h('div.legend', null,
-      h('span', null, h('i', { style: 'background:var(--text)' }), 'Readings'),
-      d.fit ? h('span', null, h('i', { style: 'background:var(--accent)' }), 'Fitted from the spend') : null)));
+  // how the percentage rose: the readings, and the fitted percent of the spend split
+  // by the page's group into stacked bands (each member's final share in the legend)
+  const bands = fittedBands(d);
   const fitted = d.fitted.times.map((t, i) => [t, d.fitted.percent[i]]);
+  const item = (color, label, value) => h('span', null, h('i', { style: `background:${color}` }), label, value ? h('em', null, ' ' + value) : null);
+  const card = h('section.card', null, h('div.split', null, h('h2', { text: 'How it filled up' }),
+    d.fit ? seg('Split by', GROUPS, d.group, (v) => { rememberGroup(v); setQuery({ group: v }); }) : null),
+  h('div.legend', { style: 'margin:0 0 4px' },
+    item('var(--text)', 'Readings'),
+    d.fit ? item('var(--accent)', 'Fitted from the spend', d.fitted_percent === null ? null : '≈' + pctText(d.fitted_percent, 1)) : null,
+    bands.map((b) => item(b.color, b.label, '≈' + pctText(b.values[b.values.length - 1], 1)))));
   card.append(limitChart({
     segments: [{ points: d.points, reset: false, start_known: d.start_known }],
-    fitted: d.fit ? fitted : [], now: d.current ? now : null, x0, x1: Math.max(x1, x0 + 1), height: 220, weekly, kind: d.window,
+    fitted: d.fit ? fitted : [], base: d.fitted.base, bands,
+    now: d.current ? now : null, x0, x1: Math.max(x1, x0 + 1), height: 220, weekly, kind: d.window,
   }));
   const notes = [];
-  if (d.fit) notes.push(`The dashed line is the fit's percent of what was spent, adding up: ${d.fit.note}`);
-  else notes.push('No fit of this window yet, so only the readings are drawn.');
+  if (d.fit) {
+    const by = GROUPS.find(([v]) => v === d.group)[1].toLowerCase();
+    const split = bands.length ? `, and the bands under it split it by ${by}` : '';
+    notes.push(`The dashed line is the fit's percent of what was spent, adding up${split}: ${d.fit.note}`);
+  } else notes.push('No fit of this window yet, so only the readings are drawn.');
   card.append(h('p.note', { text: notes.join(' ') }));
   main.append(card);
 

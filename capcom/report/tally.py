@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from capcom.cost.model import price
-from capcom.cost.prices import is_placeholder, normalize
+from capcom.cost.prices import canonical, is_placeholder
 from capcom.timeline.groups import MAIN_THREAD, ProjectNames, is_temporary
 from capcom.types import AgentInfo, CostBreakdown, Finding, PriceTable, Request, SessionInfo
 
@@ -198,7 +198,8 @@ class Window:
             calls = self.agent_calls.get(req.agent_id, 0)
             self.agent_calls[req.agent_id] = calls + len(req.tool_calls)
         self._group(self.by_agent, akey, akey).add(req, cost, member)
-        model = normalize(req.model)
+        # by its price-table id, the name the charts split by, so one model is one row
+        model = canonical(self.table, req.model)
         self._group(self.by_model, model, model).add(req, cost, req.session_id)
         self._session(req, cost)
         ctx = req.usage.context

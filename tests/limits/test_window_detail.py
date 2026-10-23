@@ -16,10 +16,11 @@ import pytest
 
 from capcom.limits.model import sample_json
 from capcom.report.server import Site
-from capcom.types import LimitSample, LimitWindow
+from capcom.store.index import open_index
+from capcom.types import AgentInfo, LimitSample, LimitWindow, SessionInfo
 from tests.limits.test_model import TABLE
 from tests.limits.test_pages import FAKE_DOM, STATIC
-from tests.report.conftest import FAKE, NOW, Client, ago, build_index, serve
+from tests.report.conftest import FAKE, NOW, Client, _log, _put, ago, build_index, req, serve
 
 needs_node = pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
 ISO = "new Date(t).toISOString()"
@@ -36,16 +37,58 @@ def built(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return build_index(tmp_path_factory.mktemp("window-index") / "index.sqlite")
 
 
-@pytest.fixture
-def client(built: Path, tmp_path: Path) -> Iterator[tuple[Client, Path]]:
+@pytest.fixture(scope="module")
+def mixed(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The shared index plus a session in each of eight more projects in both windows
+    of _windows(), on three models (Sonnet logged under its alias and its dated id),
+    and a builder subagent: more members than a split lists."""
+    path = build_index(tmp_path_factory.mktemp("mixed-index") / "index.sqlite")
+    ix = open_index(path)
+    models = ("claude-sonnet-4-5", "claude-sonnet-4-5-20250929", "claude-haiku-4-5")
+    for i in range(8):
+        project, session, model = f"-home-user-p{i}", f"m{i}", models[i % 3]
+        reqs = [
+            req(
+                session, ago(hours=5, minutes=5 * i), project, model=model, input=900, output=2_000
+            ),
+            req(
+                session, ago(minutes=40 - 4 * i), project, model=model, cache_read=9_000, output=500
+            ),
+        ]
+        _put(ix, _log(project, session), [SessionInfo(session, project), *reqs])
+    sonnet = "claude-sonnet-4-5-20250929"  # m0's main thread logs the alias
+    builder = [
+        req("m0", ago(hours=3), "-home-user-p0", "a9", model=sonnet, output=3_000),
+        req("m0", ago(minutes=20), "-home-user-p0", "a9", model=sonnet, output=3_000),
+    ]
+    _put(
+        ix,
+        _log("-home-user-p0", "m0", "a9"),
+        [AgentInfo("a9", "m0", agent_type="builder"), *builder],
+    )
+    ix.close()
+    return path
+
+
+def _serve(index: Path, tmp_path: Path) -> Iterator[tuple[Client, Path]]:
     folder = tmp_path / "capcom"
     folder.mkdir()
-    shutil.copy(built, folder / "index.sqlite")
+    shutil.copy(index, folder / "index.sqlite")
     state = tmp_path / "state"
     state.mkdir()
     site = Site(folder / "index.sqlite", TABLE, FAKE, clock=lambda: NOW, tz=UTC, state_dir=state)
     for c in serve(site):
         yield c, state
+
+
+@pytest.fixture
+def client(built: Path, tmp_path: Path) -> Iterator[tuple[Client, Path]]:
+    yield from _serve(built, tmp_path)
+
+
+@pytest.fixture
+def mixed_client(mixed: Path, tmp_path: Path) -> Iterator[tuple[Client, Path]]:
+    yield from _serve(mixed, tmp_path)
 
 
 def _write(state: Path, ss: list[LimitSample]) -> None:
@@ -99,9 +142,74 @@ def test_each_window_links_to_its_page_and_the_page_has_its_parts(
     assert status == 200 and cur["current"] and cur["before"] == paths[1]
 
 
+@pytest.mark.parametrize("group", ["category", "project", "model", "agent"])
+@pytest.mark.parametrize("start", ["2026-10-21T0900", "2026-10-21T1430"])
+def test_every_split_of_the_fitted_line_adds_up_to_it(
+    mixed_client: tuple[Client, Path], group: str, start: str
+) -> None:
+    """The closed window starts at a known reset (0 %); the current one's reset falls
+    before the closed one's last reading, so its start is not seen and its line
+    starts at its first reading (5 %)."""
+    c, state = mixed_client
+    _write(state, _windows())
+    acct = c.get("/api/limits")[1]["accounts"][0]["id"]
+    query = f"account={acct}&window=5-hour&start={start}&group={group}"
+    status, d, _ = c.get("/api/limit-window?" + query)
+    assert status == 200 and d["group"] == group
+    fitted = d["fitted"]
+    assert fitted["base"] == (0.0 if d["start_known"] else 5.0)
+    assert d["start_known"] == (start == "2026-10-21T0900")
+    bands = fitted["by"]
+    keys = [b["key"] for b in bands]
+    assert len(set(keys)) == len(keys) >= 2  # several members to stack
+    assert fitted["percent"][-1] > fitted["base"] + 1  # a rise to split
+    for b in bands:
+        assert len(b["percent"]) == len(fitted["times"])
+        assert b["percent"] == sorted(b["percent"])  # each member only adds up
+    for i, total in enumerate(fitted["percent"]):
+        stacked = fitted["base"] + sum(b["percent"][i] for b in bands)
+        assert stacked == pytest.approx(total, abs=0.005)
+    final = sum(b["percent"][-1] for b in bands)
+    assert final == pytest.approx(d["fitted_percent"], abs=0.005)
+    if group == "project":  # nine projects: six, then the rest as one
+        assert len(keys) == 7 and keys[-1] == "(other)"
+    if group == "model":  # by price-table id: one Sonnet, under either spelling
+        assert set(keys) == {
+            "claude-opus-5-5",
+            "claude-sonnet-4-5-20250929",
+            "claude-haiku-4-5-20251001",
+        }
+        # and "What spent it" lists the models by the same names
+        assert {g["key"] for g in d["by_model"]} == set(keys)
+        assert all(g["percent"] is not None for g in d["by_model"])
+    if group == "agent":
+        assert "builder" in keys and "main" in keys
+
+
+def test_a_session_names_its_models_by_their_price_table_ids(
+    mixed_client: tuple[Client, Path],
+) -> None:
+    c, _ = mixed_client
+    status, d, _ = c.get("/api/session/m0")
+    assert status == 200
+    assert d["session"]["models"] == ["claude-sonnet-4-5-20250929"]  # alias and dated id
+
+
+def test_the_fitted_line_splits_by_category_by_default(client: tuple[Client, Path]) -> None:
+    c, state = client
+    _write(state, _windows())
+    acct = c.get("/api/limits")[1]["accounts"][0]["id"]
+    status, d, _ = c.get(f"/api/limit-window?account={acct}&window=5-hour&start=2026-10-21T0900")
+    assert status == 200 and d["group"] == "category"
+    keys = {b["key"] for b in d["fitted"]["by"]}
+    assert keys and keys <= {"input", "cache_write", "cache_read", "output"}
+
+
 @pytest.mark.parametrize(
     ("query", "code"),
     [
+        ("account={acct}&window=5-hour&start=2026-10-21T0900&group=session", 400),
+        ("account={acct}&window=5-hour&start=2026-10-21T0900&group=bogus", 400),
         ("account=nobody&window=5-hour&start=2026-10-21T0900", 404),
         ("account={acct}&window=5-hour&start=2026-10-01T0900", 404),
         ("account={acct}&window=daily&start=2026-10-21T0900", 400),
@@ -158,3 +266,20 @@ def test_window_page_words() -> None:
         "cost about $1.48, against $1.50 on average over every window. Of the spend, $21.03 "
         "came from sessions with no reading, put on this account by time."
     )
+
+
+@needs_node
+def test_the_bands_stack_from_the_base_to_the_fitted_line() -> None:
+    # an unseen start: the line starts at the first reading (5 %), the bands on it
+    fitted = {"base": 5, "percent": [5, 7.5, 9], "by": []}
+    fitted["by"] = [
+        {"key": "main", "percent": [0, 2, 3]},
+        {"key": "scout", "percent": [0, 0.5, 1]},
+    ]
+    got = _run(
+        f"const d = {json.dumps({'group': 'agent', 'fitted': fitted})};"
+        " const lw = await import('./limitwindow.js'); const b = lw.fittedBands(d);"
+        " console.log(JSON.stringify([b.map((x) => x.label), m.stackBands(b, 3, 5)]));",
+    )
+    assert got[0] == ["main thread", "scout"]
+    assert got[1] == [[5, 7, 8], [5, 7.5, 9]]  # the last band's top is the line
