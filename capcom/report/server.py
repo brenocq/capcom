@@ -360,7 +360,7 @@ PARAMS: dict[str, tuple[str, ...]] = {
     "spikes": ("days", "spike", "project", "cause"),
     "checks": ("days",),
     "limits": ("days", "group"),
-    "limit-window": ("account", "window", "start"),
+    "limit-window": ("account", "window", "start", "group"),
     "changes": ("days",),
 }
 

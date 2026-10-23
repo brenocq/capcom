@@ -164,6 +164,11 @@ export function limitsPath(query) {
   const days = LIMIT_DAYS.includes(Number(query.get('days'))) ? Number(query.get('days')) : 14;
   return `limits?days=${days}&group=${pickedGroup(query)}`;
 }
+// a window's own page (/limits/window/<account>/<kind>/<start>), split by the group
+export function limitWindowPath(account, kind, start, query) {
+  const q = new URLSearchParams({ account: account || '', window: kind || '', start: start || '', group: pickedGroup(query) });
+  return `limit-window?${q}`;
+}
 export function dayPath(day, query) {
   return `day/${encodeURIComponent(day)}${groupQuery(pickedGroup(query))}`;
 }

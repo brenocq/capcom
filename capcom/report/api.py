@@ -1654,15 +1654,21 @@ LIMIT_SPLITS: dict[str, Split] = {
 }
 
 
+def limit_split(query: Mapping[str, str]) -> Split:
+    """The `group` of /api/limits and /api/limit-window: by category by default, a 400
+    for a split by session or an unknown group."""
+    raw = query.get("group") or GroupBy.CATEGORY.value
+    split = LIMIT_SPLITS.get(GROUP_ALIASES.get(raw, raw))
+    if split is None:
+        raise ApiError(400, "bad_query", "group must be one of: " + ", ".join(LIMIT_SPLITS))
+    return split
+
+
 def limits(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     days = _int(query, "days", 14, 1, 366)
     if days not in LIMITS_DAYS:
         raise ApiError(400, "bad_query", f"days must be one of {', '.join(map(str, LIMITS_DAYS))}")
-    raw = query.get("group") or GroupBy.CATEGORY.value
-    split = LIMIT_SPLITS.get(GROUP_ALIASES.get(raw, raw))
-    if split is None:
-        names = ", ".join(LIMIT_SPLITS)
-        raise ApiError(400, "bad_query", "group must be one of: " + names)
+    split = limit_split(query)
     return {"days": days, "group": split} | _limits(ctx, days, full=True, split=split)
 
 

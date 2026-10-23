@@ -552,7 +552,7 @@ with nothing spent or nothing left; `reset_first` is an account whose weekly
 window resets before then. The website's account filter (Overview and Limits) is applied
 in the browser and kept there (localStorage), never in the URL.
 
-### `GET /api/limit-window?account=<id>&window=5-hour&start=2026-10-22T1820`
+### `GET /api/limit-window?account=<id>&window=5-hour&start=2026-10-22T1820&group=category`
 
 One window of one account, for its page (`/limits/window/<id>/<5-hour|weekly>/<start>`,
 linked from each segment's `path`). `window` is `5-hour` or `weekly` (or the
@@ -565,7 +565,10 @@ Its cache key holds the samples' stamp, as `/api/limits`.
 {account: {id, label, current, several}, window, label, start, start_known, resets_at,
  until, current, peak, hit_limit, readings,
  points: [[ms, percent]],                       # the segment's line (0 % at a known start)
- fitted: {times: [ms], percent: [p], usd: [u]}, # the fit's percent of the spend, adding up
+ group,
+ fitted: {times: [ms], percent: [p], usd: [u],  # the fit's percent of the spend, adding up
+          base,                                 # where it starts: 0, or the first reading
+          by: [{key, percent: [p]}]},           # split by `group`, adding up at `times`
  step_minutes, bucket_minutes,
  fit: {method, usd_per_percent, rough, intervals, note} | null,
  own_usd_per_percent,                           # this window's spend / its rise; null under 1 point
@@ -580,7 +583,11 @@ Its cache key holds the samples' stamp, as `/api/limits`.
 
 The spend is the account's (as the window's `usd` on `/api/limits`); `percent` is
 the fit's percent of a part's spend (null without a fit). `fitted.percent` starts at
-0 at a known start, else at the first reading.
+`base`: 0 at a known start, else the first reading. `group` (default `category`, as
+`/api/limits`'s, with the same 400s) splits the line: `fitted.by` is each member's fit
+of its own spend, adding up, at the same `times` (up to 6 members, largest at the end
+first, plus `(other)`; empty without a fit), with keys as `/api/limits`'s `by`; at every
+time, `base` plus the members' percents is `fitted.percent`.
 
 ### `GET /api/checks?days=14`
 
