@@ -4,7 +4,7 @@
 
 import {
   h, s, api, usd, tokens, seg, empty, setQuery, hm, monthDay, dayName, showTip, hideTip, entityColors, segBar, tableToggle,
-  GROUPS, pickedGroup, rememberGroup, limitsPath,
+  GROUPS, pickedGroup, rememberGroup, limitsPath, labelSpan,
 } from './lib.js';
 import { timeTicks, xAxis } from './charts.js';
 import { withColors } from './spend.js';
@@ -622,7 +622,7 @@ function windowSection(w, now, days, since, group) {
     const groupName = GROUPS.find(([v]) => v === group)[1];
     card.append(h('div.split', null, h('h3', { text: 'What spent each window' }),
       seg('Split by', GROUPS, group, (v) => { rememberGroup(v); setQuery({ group: v }); })),
-    h('div.legend', { style: 'margin:0 0 10px' }, order.map((k) => h('span', null, h('i', { style: `background:${members.get(k).color}` }), members.get(k).label))),
+    h('div.legend', { style: 'margin:0 0 10px' }, order.map((k) => h('span', null, h('i', { style: `background:${members.get(k).color}` }), labelSpan(members.get(k).label)))),
     rows, tableToggle(['Window', groupName, 'Spent', 'Of the limit'], table));
   }
   return card;

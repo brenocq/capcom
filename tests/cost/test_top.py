@@ -174,6 +174,12 @@ def test_unpriced_models_are_named_apart() -> None:
             "temporary (-home-user-proj--worktrees-feat-x)",
         ),
         ("-tmp-claude-1000--home-user-proj", TEMPORARY),  # no session id after it
+        (
+            "-private-tmp-claude-501--Users-u-Github-kittex-"
+            "0123abcd-0123-4567-89ab-0123456789ab-scratchpad-run-kittex",
+            "temporary (-Users-u-Github-kittex)",
+        ),
+        ("-var-folders-kx-w0m-abc123-T-build", TEMPORARY),
     ],
 )
 def test_project_label(folder: str, label: str) -> None:

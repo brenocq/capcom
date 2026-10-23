@@ -136,7 +136,7 @@ dated id is one group.
 
 **Session row**: `session_id, title, project, project_path, project_dir, temporary, git_branch,
 subagents, active_seconds, first, last, peak_context, cache_read_share, usd, requests,
-estimated_output`. `temporary` is true for a folder under /tmp. Active time sums the gaps under 5 minutes between consecutive
+estimated_output`. `temporary` is true for a folder under a temporary root (/tmp; on macOS also /private/tmp and $TMPDIR under /var/folders). Active time sums the gaps under 5 minutes between consecutive
 requests of the session.
 
 **Cumulative**: `{step_s, times: [ms], members: [{key, label, final}], values:
@@ -184,8 +184,9 @@ of that cwd whose folder form is the project folder (a session that moved into a
 subfolder still names its repo); the label is that path's last part, the full path
 when two folders share it, and the folder name itself when no cwd explains it. The
 OpenClaw state dir is `openclaw` and the folders under it `openclaw (<path under
-it>)`, e.g. `openclaw (workspace)`, each its own row. Every folder under /tmp is
-temporary: Claude Code's scratchpads (`/tmp/claude-<uid>/<project folder>/<session
+it>)`, e.g. `openclaw (workspace)`, each its own row. Every folder under /tmp (on
+macOS also /private/tmp and $TMPDIR under /var/folders) is temporary: Claude Code's
+scratchpads (`<tmp>/claude-<uid>/<project folder>/<session
 id>/...`) are grouped as `temporary (<project label>)`, other temporary folders as
 `(temporary)`. The chart series (`capcom.timeline`) group all temporary folders as one
 member, labeled `temporary folders`, and all OpenClaw folders as one, labeled

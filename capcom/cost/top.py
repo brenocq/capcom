@@ -14,7 +14,7 @@ from capcom.config import Config
 from capcom.cost.calibrate import TARGET_SPREAD, calibrate
 from capcom.cost.model import price
 from capcom.cost.prices import ZERO_MODEL, canonical, is_placeholder, load_prices, normalize
-from capcom.timeline.groups import ProjectNames, temporary_project
+from capcom.timeline.groups import ProjectNames, is_temporary, temporary_project
 from capcom.types import Calibration, Index, PriceTable, Request
 
 GROUPINGS = ("project", "session", "agent", "model", "day")
@@ -57,9 +57,9 @@ class Row:
 
 
 def project_label(project_dir: str) -> str:
-    """The folder name; a temporary folder under /tmp is "(temporary)", or
-    "temporary (<project folder>)" when its name holds the project it was made for."""
-    if not project_dir.startswith("-tmp-"):
+    """The folder name; a temporary folder (groups.is_temporary) is "(temporary)",
+    or "temporary (<project folder>)" when its name holds the project it was made for."""
+    if not is_temporary(project_dir):
         return project_dir
     inner = temporary_project(project_dir)
     return f"temporary ({inner})" if inner else TEMPORARY

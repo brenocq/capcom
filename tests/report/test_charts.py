@@ -293,3 +293,26 @@ console.log(JSON.stringify({ own: [own.attrs.role, tabs(own)],
     # a part with no share is left out; on its own each part is a tab stop
     assert got["own"] == ["group", ["0", "0"]]
     assert got["inner"] == ["img", [None, None]]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_a_long_label_is_shortened_with_its_full_text_on_hover() -> None:
+    deep = "/home/user/build/area/sub-one/sub-two/sub-three/sub-four/kittex"
+    got = _node(f"""
+const m = await import('./lib.js');
+const deep = {json.dumps(deep)};
+const spans = (el) => walk(el, []).filter((n) => (n.attrs.class || n.className) === 'lbl');
+const leg = m.legend([{{ label: deep, color: 'red', value: '$1' }},
+  {{ label: 'kittex', color: 'blue', value: '$2' }}]);
+const bars = m.barList([{{ key: 'a', label: deep, usd: 3 }}], (r) => r.usd);
+const chip = m.projectChip({{ project: deep, project_path: deep }});
+const pick = (n) => ({{ text: n.textContent, title: n.attrs.title || null }});
+console.log(JSON.stringify({{ legend: spans(leg).map(pick), bars: spans(bars).map(pick),
+  chip: pick(chip), plain: m.clipLabel('short') }}));
+""")
+    short = "/home/user/build/area/sub-one/su…/kittex"  # 40 characters
+    assert len(short) == 40
+    assert got["legend"] == [{"text": short, "title": deep}, {"text": "kittex", "title": None}]
+    assert got["bars"] == [{"text": short, "title": deep}]
+    assert got["chip"] == {"text": short, "title": f"Project {deep}"}
+    assert got["plain"] == "short"
