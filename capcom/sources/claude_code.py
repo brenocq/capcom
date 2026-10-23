@@ -77,6 +77,7 @@ _USED_TYPES = (
     "api-request",
     "api-request-shape",
     "ai-title",
+    "custom-title",
     "cost-state",
 )
 _MARKERS = tuple(f'"type":"{t}"'.encode() for t in _USED_TYPES)
@@ -99,7 +100,6 @@ _IGNORED_TYPES = frozenset(
         "api-request-blob",
         "progress",
         "summary",
-        "custom-title",
         "tag",
         "agent-name",
         "agent-color",
@@ -381,6 +381,7 @@ class _BatchState:
     entrypoint: str | None = None
     git_branch: str | None = None
     title: str | None = None
+    custom_title: str | None = None  # "" when the user cleared it
 
 
 class _Parser:
@@ -409,12 +410,13 @@ class _Parser:
                 b.records.append(req)
             else:
                 b.skipped += 1
-        if b.first_seen is not None or b.title is not None:
+        if b.first_seen is not None or b.title is not None or b.custom_title is not None:
             if self.subagent:
                 info = SessionInfo(
                     session_id=self.log.session_id,
                     project_dir=self.log.project_dir,
                     title=b.title,
+                    custom_title=b.custom_title,
                     first_seen=b.first_seen,
                     last_seen=b.last_seen,
                 )
@@ -424,6 +426,7 @@ class _Parser:
                     project_dir=self.log.project_dir,
                     cwd=b.cwd,
                     title=b.title,
+                    custom_title=b.custom_title,
                     version=b.version,
                     entrypoint=b.entrypoint,
                     git_branch=b.git_branch,
@@ -493,6 +496,12 @@ class _Parser:
             title = _str(rec.get("aiTitle"), 500)
             if title:
                 b.title = title
+        elif kind == "custom-title":
+            # The name the user gave the session (`/rename`, `claude -n`); an empty
+            # one is kept as "" (cleared), so it still replaces an earlier name.
+            custom = rec.get("customTitle")
+            if isinstance(custom, str):
+                b.custom_title = custom.strip()[:500]
         elif kind == "cost-state":
             self._cost_state(rec, offset)
         elif isinstance(kind, str) and kind in _IGNORED_TYPES:

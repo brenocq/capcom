@@ -223,17 +223,21 @@ class AgentInfo:
 class SessionInfo:
     """What a batch of records says about its session. The store merges these:
     `first_seen` is the minimum, `last_seen` the maximum, and every other field
-    the latest non-None value."""
+    the latest non-None value. Read back from the store, `title` is the session's
+    name: its `custom_title` when it has a non-empty one, else its `ai-title`."""
 
     session_id: str
     project_dir: str
     cwd: str | None = None
-    title: str | None = None  # the `ai-title` record
+    title: str | None = None  # the `ai-title` record (from a source)
     version: str | None = None
     entrypoint: str | None = None
     git_branch: str | None = None
     first_seen: datetime | None = None
     last_seen: datetime | None = None
+    # The `custom-title` record: the name the user gave it (`/rename`, `claude -n`),
+    # "" when cleared. It wins over any `ai-title`, earlier or later.
+    custom_title: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

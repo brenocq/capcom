@@ -1004,6 +1004,7 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
         "session": {
             "session_id": session_id,
             "title": info.title if info else None,
+            "title_custom": bool(info and info.custom_title),
             "project": project_display(project_dir, names),
             "project_path": names.path(project_dir),
             "project_dir": project_dir,
