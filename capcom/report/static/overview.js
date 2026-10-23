@@ -3,7 +3,7 @@
 import {
   h, s, api, usd, tokens, pct, seg, legend, empty, setQuery, longDate, barList, hm,
   outputUsd, estimateNote, lowerMark, LOWER_TITLE, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor, storyLine, segBar,
-  GROUPS, pickedGroup, rememberGroup,
+  GROUPS, pickedGroup, rememberGroup, overviewPath,
 } from './lib.js';
 import { bandChart, sparkline } from './charts.js';
 import { pendingBlock } from './sessions.js';
@@ -18,7 +18,7 @@ function greeting(d) {
 export async function renderOverview(main, r) {
   const range = r.query.get('range') === '7d' ? '7d' : 'today';
   const group = pickedGroup(r.query);
-  const d = await api(group === 'category' ? 'overview' : `overview?group=${group}`);
+  const d = await api(overviewPath(r.query));
   const now = new Date(d.now);
   const block = range === 'today' ? d.today : d.week;
   const t = block.totals;

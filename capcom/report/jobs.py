@@ -139,6 +139,12 @@ class Job:
         self.last_poll = self.jobs.clock()
         self.background = False
 
+    def leave(self) -> None:
+        """The page following this job went away (its poll's connection closed: a
+        click elsewhere): it runs as background work from now on, so it yields to
+        the page clicked, until a page polls it again."""
+        self.last_poll = min(self.last_poll, self.jobs.clock() - self.jobs.abandoned - 1)
+
     @property
     def low(self) -> bool:
         """Runs as background work: the warmer's, or one no page polled lately."""

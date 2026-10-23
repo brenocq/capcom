@@ -149,6 +149,17 @@ export function rememberGroup(g) {
   try { localStorage.setItem('capcom-group', g); } catch (e) { /* storage off */ }
 }
 
+// The API path Overview and Spend ask for first, for a page's query (a
+// URLSearchParams): the pages and the router's preload use the same one, so a
+// click never starts a second job for a view the page does not show.
+export function overviewPath(query) {
+  const group = pickedGroup(query);
+  return group === 'category' ? 'overview' : `overview?group=${group}`;
+}
+export function spendPath(query) {
+  return `spend?days=${Number(query.get('days')) || 14}&group=${pickedGroup(query)}`;
+}
+
 // ------------------------------------------------------------------ API
 
 // One entry per API path: the final reply's promise (kept for the page's life, so

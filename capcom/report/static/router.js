@@ -6,7 +6,7 @@
 // content dimmed (same page) or skeleton cards (another page), a thin bar at the
 // top of each loading card, and a status line ("Loading 30 days… 62 %").
 
-import { h, apiHooks, apiState, stopLoads, prefetch, preload, renew, errorBox } from './lib.js';
+import { h, apiHooks, apiState, stopLoads, prefetch, preload, renew, errorBox, overviewPath, spendPath } from './lib.js';
 import { swapIn } from './morph.js';
 
 const GRACE_MS = 80; // a page drawn within this needs no loading state
@@ -298,14 +298,18 @@ export function go(href, { replace = false } = {}) {
   render({ scroll: 0, focus: true });
 }
 
-// The API paths a link's page asks for first, to prefetch on hover.
-function apiFor(url) {
+// The API paths a link's page asks for first, to prefetch on hover and to start
+// at once on a click. Overview's and Spend's follow the page's query and the
+// group picked last, as the pages do: another path would start a second job,
+// which the page never shows, beside the one it waits for.
+export function apiFor(url) {
   const p = url.pathname.replace(/\/+$/, '') || '/';
   const m = /^\/(session|day|changes)\/([^/]+)$/.exec(p);
   if (m) return [`${m[1]}/${encodeURIComponent(decodeURIComponent(m[2]))}`];
+  if (p === '/') return [overviewPath(url.searchParams), 'checks?days=14'];
+  if (p === '/spend') return [spendPath(url.searchParams)];
   if (url.search) return [];
   return {
-    '/': ['overview', 'checks?days=14'], '/spend': ['spend?days=14&group=category'],
     '/sessions': ['sessions?days=14&sort=usd&limit=300'], '/spikes': ['spikes?days=14'],
     '/checks': ['checks?days=14', 'changes', 'changes/noticed?days=14'], '/changes': ['changes'], '/limits': ['limits?days=14'],
   }[p] || [];

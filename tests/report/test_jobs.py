@@ -4,7 +4,9 @@ and the warmer that computes the pages' usual views ahead of the clicks."""
 
 from __future__ import annotations
 
+import json
 import shutil
+import socket
 import sqlite3
 import threading
 import time
@@ -19,7 +21,7 @@ import capcom.timeline
 from capcom.report import api
 from capcom.report.analysis import Analysis
 from capcom.report.jobs import Cancelled, Job, Jobs, Result
-from capcom.report.server import ApiCache, Site, Warmer, cache_key
+from capcom.report.server import ApiCache, Site, Warmer, cache_key, compute
 from capcom.types import (
     CauseKind,
     Confidence,
@@ -125,6 +127,31 @@ def test_slow_reply_is_202_then_200(index_path: Path, small_batches: None) -> No
     for client in serve(plain):
         assert client.get("/api/spikes?days=1")[1] == final
     assert gate.calls == 4
+
+
+def test_a_poll_whose_page_left_lowers_its_job(index_path: Path, small_batches: None) -> None:
+    # a page aborts its poll when it navigates away: its job yields to the page
+    # clicked at once, instead of after ABANDONED seconds without a poll
+    gate = Gate()
+    site = _site(index_path, gate, patience=0.05, poll_wait=5)
+    assert site.jobs is not None
+    for client in serve(site):
+        status, body, _ = client.get("/api/spikes?days=1")
+        assert status == 202
+        job = site.jobs.by_id(body["job"])
+        assert job is not None and not job.low
+        host, port = client.base.removeprefix("http://").split(":")
+        with socket.create_connection((host, int(port)), timeout=5) as sock:
+            path = f"/api/spikes?days=1&job={body['job']}"
+            sock.sendall(f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n".encode())
+            time.sleep(0.2)
+            assert not job.low  # followed: a page's job
+        deadline = time.monotonic() + 2  # well before the poll's own 5 s or ABANDONED
+        while not job.low and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert job.low
+        gate.tokens.release(99)
+        assert job.done.wait(5) and job.result is not None  # it still ends, in the background
 
 
 def test_fast_reply_is_a_plain_200(index_path: Path) -> None:
@@ -313,6 +340,66 @@ def test_warmer_forgets_views_not_opened_lately() -> None:
     tag = ("a", (("days", "30"),))
     warmer._opened[tag] -= 61  # opened a minute and a second ago
     assert warmer.order() == [("a", {"days": "14"})]
+
+
+def test_warmer_warms_the_defaults_in_the_group_picked_last() -> None:
+    site = Site(Path("/nonexistent"), TABLE, FAKE)
+    views = {
+        "overview": [{}],
+        "spend": [{"days": "14", "group": "category"}],
+        "spikes": [{"days": "14"}],
+    }
+    warmer = Warmer(site, views=views, recent=60)
+    warmer.saw("overview", {"group": "project"})  # Overview's switch: Spend follows it
+    assert warmer.order() == [
+        ("overview", {"group": "project"}),
+        ("spend", {"days": "14", "group": "project"}),
+        ("spikes", {"days": "14"}),
+    ]
+    warmer.saw("spend", {"days": "14", "group": "category"})
+    assert warmer.order()[1:] == [
+        ("overview", {"group": "project"}),  # opened lately, still warmed
+        ("overview", {}),  # by category, as Overview asks for it
+        ("spikes", {"days": "14"}),
+    ]
+    warmer.saw("spend", {"days": "14", "group": "nonsense"})  # not a group: no change
+    assert ("overview", {}) in warmer.order()
+
+
+def test_overview_group_switch_reuses_the_cached_reply(index_path: Path) -> None:
+    calls: list[str] = []
+
+    def counted(name: str, fn: Any) -> Any:
+        def wrapped(*args: Any, **kw: Any) -> Any:
+            calls.append(name)
+            return fn(*args, **kw)
+
+        return wrapped
+
+    analysis = Analysis(
+        counted("cumulative", capcom.timeline.cumulative),
+        counted("per_step", capcom.timeline.per_step),
+        counted("spikes", _spikes),
+        counted("explain", lambda *a: []),
+        fake_checks,
+    )
+    site = Site(index_path, TABLE, analysis, clock=lambda: NOW, tz=UTC, patience=10)
+    fresh = Site(index_path, TABLE, analysis, clock=lambda: NOW, tz=UTC, cache=None, jobs=None)
+    for client in serve(site):
+        status, first, _ = client.get("/api/overview")
+        assert status == 200 and first["group"] == "category"
+        for group in ("project", "model", "agent"):
+            q = {"group": group}
+            want = json.loads(compute(fresh, "overview", ["overview"], q, NOW).body)
+            calls.clear()
+            status, got, _ = client.get(f"/api/overview?group={group}")
+            assert status == 200
+            # only today's chart is computed again: no spikes, no sparkline, no story
+            assert calls == ["cumulative"]
+            assert got == want  # the same reply as one computed whole
+        calls.clear()
+        status, again, _ = client.get("/api/overview?group=category")
+        assert status == 200 and calls == ["cumulative"] and again == first
 
 
 def test_cache_keeps_a_stale_stand_in_per_view() -> None:

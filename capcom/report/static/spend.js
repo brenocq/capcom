@@ -4,7 +4,7 @@
 import {
   h, api, usd, tokens, pct, seg, legend, empty, errorBox, setQuery, monthDay, localDate, dayName, hm,
   outputUsd, estimateNote, lowerMark, SERIES, OTHER_COLOR, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor,
-  spikeText, spikeHref, projectChip, storyLine, segBar, tableToggle, tipOn, entityColors, GROUPS, pickedGroup, rememberGroup,
+  spikeText, spikeHref, projectChip, storyLine, segBar, tableToggle, tipOn, entityColors, GROUPS, pickedGroup, rememberGroup, spendPath,
 } from './lib.js';
 import { bandChart, dayBars } from './charts.js';
 import { heatCard } from './heatmap.js';
@@ -93,7 +93,7 @@ export function timelineMissing(what) {
 export async function renderSpend(main, r) {
   const days = Number(r.query.get('days')) || 14;
   const group = pickedGroup(r.query);
-  const d = await api(`spend?days=${days}&group=${group}`);
+  const d = await api(spendPath(r.query));
   const since = new Date(d.window.since), until = new Date(d.window.until);
   const t = d.totals;
 

@@ -16,7 +16,7 @@ import math
 import re
 import statistics
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from itertools import pairwise
 from pathlib import Path
@@ -389,15 +389,8 @@ def overview(ctx: Context, query: Mapping[str, str] | None = None) -> dict[str, 
 
     unavailable: list[str] = []
     step = _STEPS[1]
-    cum = _try(
-        lambda: ctx.analysis.cumulative(
-            ctx.index, ctx.table, today_since, ctx.now, group, step, top=TOP_MEMBERS
-        ),
-        unavailable,
-    )
+    cum_json = _today_chart(ctx, group, names, unavailable)
     ctx.progress(0.3)
-    if cum is not None:
-        cum = _tidy(cum, group, names)
     marks = _spike_marks(ctx, today_since, ctx.now, infos, names, unavailable)
     spark_since = max(today_since, ctx.now - timedelta(hours=2))
     spark = _try(
@@ -468,13 +461,42 @@ def overview(ctx: Context, query: Mapping[str, str] | None = None) -> dict[str, 
             "comparable": comparable,
         },
         "spending_now": {"usd_last_hour": round(last_hour.usd, 6), "spark": spark_json},
-        "cumulative_today": None if cum is None else _cumulative_json(cum, step, ctx.now),
+        "cumulative_today": cum_json,
         "group": group.value,
         "spikes_today": marks,
         "regime": _regime(ctx, ctx.today() - timedelta(days=STORY_DAYS - 1), unavailable),
         "limits": _limits(ctx, None, full=False),
         "unavailable": unavailable,
     }
+
+
+def _today_chart(
+    ctx: Context, group: GroupBy, names: ProjectNames, unavailable: list[str]
+) -> dict[str, Any] | None:
+    """Overview's cumulative chart of today, split by `group`: the one part of its
+    reply that depends on the group."""
+    step = _STEPS[1]
+    cum = _try(
+        lambda: ctx.analysis.cumulative(
+            ctx.index, ctx.table, ctx.midnight(), ctx.now, group, step, top=TOP_MEMBERS
+        ),
+        unavailable,
+    )
+    return None if cum is None else _cumulative_json(_tidy(cum, group, names), step, ctx.now)
+
+
+def overview_regroup(
+    ctx: Context, query: Mapping[str, str], base: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Overview's reply for the `group` of `query`, made from `base`, its reply for
+    another group at the same state of the index: only today's chart is computed
+    again (a few percent of the whole reply), up to the base's own `now`, so the
+    chart and the totals still describe the same moment."""
+    group = _group(query)
+    ctx = replace(ctx, now=datetime.fromisoformat(base["now"]))
+    unavailable = list(base.get("unavailable") or [])
+    chart = _today_chart(ctx, group, ctx.names(), unavailable)
+    return {**base, "cumulative_today": chart, "group": group.value, "unavailable": unavailable}
 
 
 def spend(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:

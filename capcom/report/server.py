@@ -35,6 +35,8 @@ import io
 import json
 import os
 import secrets
+import select
+import socket
 import sqlite3
 import sys
 import threading
@@ -60,7 +62,7 @@ from capcom.report.analysis import Analysis, Unavailable, default_analysis
 from capcom.report.jobs import Job, Jobs, Result, computing_body
 from capcom.report.worker import Worker
 from capcom.store.index import open_index
-from capcom.types import PriceTable
+from capcom.types import GroupBy, PriceTable
 
 HOST = "127.0.0.1"
 STATIC = Path(__file__).parent / "static"
@@ -100,6 +102,7 @@ CACHE_TTL = 300.0  # seconds: "today", "last hour" and "running" move with the c
 UNCACHED = {"status", "live"}  # cheap, and about the current minute
 PATIENCE = 0.3  # seconds a request waits for its reply before answering 202
 POLL_WAIT = 0.5  # seconds a poll waits for a newer partial reply or the end
+LEAVE_TICK = 0.05  # seconds between two looks, while a poll waits, for its page gone
 PRIORITY_HEADER = "X-Capcom-Priority"  # "low": a prefetch, run as background work
 MARKED = {"checks", "changes"}  # replies that show marks: keyed on the marks file too
 DAY_CACHE = "changes-days.sqlite"  # in the cache folder: the file `capcom changes` keeps
@@ -143,6 +146,15 @@ class ApiCache:
             self._entries.move_to_end(key)
             self.hits += 1
             return entry[1]
+
+    def entry(self, key: tuple[Any, ...], now: float) -> tuple[float, bytes] | None:
+        """When `key`'s reply was computed and the reply, if it is fresh; neither
+        counted as a hit or a miss nor moved up (a look for a reply to build on)."""
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None or now - entry[0] > self.ttl or now < entry[0]:
+                return None
+            return entry
 
     def put(self, key: tuple[Any, ...], now: float, body: bytes) -> None:
         if len(body) > self.max_bytes // 4:
@@ -385,6 +397,9 @@ WARM_VIEWS: dict[str, list[dict[str, str]]] = {
     "checks": [{"days": d} for d in ("14", "7", "30")],
     "limits": [{"days": d} for d in ("14", "7", "30", "90")],
 }
+# the pages whose default view follows the group picked last (their shared "Split
+# by" switch): the warmer warms those defaults with the group the pages ask for
+GROUPED = frozenset({"overview", "spend"})
 WARM_IDLE = 1800.0  # seconds without a page request after which the warmer rests
 WARM_REST = 3.0  # after each reply, rest this many times as long as it took (~1/4 core)
 WARM_RECENT = 1800.0  # a view a page opened this many seconds ago is still warmed
@@ -394,7 +409,8 @@ class Warmer:
     """One low-priority thread that fills the cache with the pages' usual views
     after startup and whenever the index's generation (or the date) changes: the
     views a page asked for in the last `recent` seconds, newest first, then every
-    page's default view. Its jobs run as background jobs (`capcom.report.jobs`),
+    page's default view (Overview's and Spend's split by the group a page picked
+    last, as the pages ask for it). Its jobs run as background jobs (`capcom.report.jobs`),
     so a page's request never waits for it; a new generation stops its job and
     starts the round over. It rests `rest` times as long as each reply took, so
     it keeps about 1 / (1 + rest) of a core busy at most, and stops warming when
@@ -422,12 +438,17 @@ class Warmer:
         self._seen = time.monotonic()
         self._warm: tuple[Any, ...] | None = None  # the (generation, date) last warmed
         self.computed = 0  # replies the warmer computed
+        self.group: str | None = None  # the group Overview or Spend asked for last
 
     def saw(self, name: str, query: dict[str, str]) -> None:
         """A page asked for `name` with `query`: that view is warmed first for the
         next `recent` seconds."""
         now = time.monotonic()
         self._seen = now
+        group = query.get("group") or "category"
+        if name in GROUPED and group in {g.value for g in GroupBy} and group != self.group:
+            self.group = group
+            self._warm = None  # the defaults changed: warm them again
         if name in self.views:
             tag = (name, tuple(sorted(query.items())))
             self._opened.pop(tag, None)
@@ -441,7 +462,11 @@ class Warmer:
         page's default view."""
         now = time.monotonic()
         opened = [tag for tag, when in reversed(self._opened.items()) if now - when <= self.recent]
-        defaults = [(n, tuple(sorted(vs[0].items()))) for n, vs in self.views.items() if vs]
+        defaults = [
+            (n, tuple(sorted(self._default(n, vs[0]).items())))
+            for n, vs in self.views.items()
+            if vs
+        ]
         out: list[tuple[str, dict[str, str]]] = []
         seen: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
         for tag in [*opened, *defaults]:
@@ -449,6 +474,15 @@ class Warmer:
                 seen.add(tag)
                 out.append((tag[0], dict(tag[1])))
         return out
+
+    def _default(self, name: str, query: dict[str, str]) -> dict[str, str]:
+        """A page's default view, split by the group picked last when it has the
+        switch (Overview leaves `group` out for the default, by category)."""
+        if self.group is None or name not in GROUPED:
+            return query
+        if "group" in query or self.group != "category":
+            return {**query, "group": self.group}
+        return query
 
     def warm_round(self) -> bool:
         """Compute the views not cached yet; True when the round got through."""
@@ -820,8 +854,10 @@ class Handler(BaseHTTPRequestHandler):
             job.poll()
         if not job_id:
             job.done.wait(site.patience)
-        else:  # a poll: wait for a newer partial reply or the end, so the page hears at once
-            job.wait_news(job.version, site.poll_wait)
+        elif not self._wait_news(job, site.poll_wait):
+            job.leave()  # its page stopped following it: the page clicked goes first
+            self.close_connection = True
+            return
         if job.result is not None:
             self._send(job.result.status, job.result.body, _ctype(job.result))
         elif job.timed_out() or job.cancelled == "timeout":
@@ -835,6 +871,30 @@ class Handler(BaseHTTPRequestHandler):
                 partial, source = site.cache.stale(key), "stale"
             body = computing_body(job, partial, source if partial is not None else None)
             self._send(HTTPStatus.ACCEPTED, body, TYPES[".json"])
+
+    def _wait_news(self, job: Job, timeout: float) -> bool:
+        """A poll's wait: until `job` ends or has a newer partial reply, at most
+        `timeout` seconds, looking every LEAVE_TICK seconds whether the page closed
+        the connection (it aborts its poll when it navigates away); False if so."""
+        version = job.version
+        end = time.monotonic() + timeout
+        while job.version == version and not job.done.is_set():
+            left = end - time.monotonic()
+            if left <= 0:
+                break
+            job.wait_news(version, min(LEAVE_TICK, left))
+            if self._gone():
+                return False
+        return True
+
+    def _gone(self) -> bool:
+        """The client closed the connection: it is readable with nothing to read (a
+        page sends nothing more while it waits for a reply)."""
+        try:
+            ready, _, _ = select.select([self.connection], [], [], 0)
+            return bool(ready) and self.connection.recv(1, socket.MSG_PEEK) == b""
+        except OSError:
+            return True
 
 
 def version(site: Site) -> dict[str, Any]:
@@ -915,8 +975,8 @@ def _work(
     def here(job: Job) -> Result:
         return compute(site, name, parts, query, now, key, job.step)
 
-    if not background or worker is None:
-        return here
+    if not background or worker is None or _base(site, name, parts, query, now) is not None:
+        return here  # (a reply made from another one is quick: no need for the worker)
 
     def there(job: Job) -> Result:
         result = worker.run(job, name, parts, query, now, lambda: here(job))
@@ -983,10 +1043,16 @@ def compute(
         )
     try:
         ctx = context(site, index, now, step)
-        payload = ENDPOINTS[name](ctx, parts[1] if len(parts) == 2 else "", query)
+        base = _base(site, name, parts, query, now)
+        stamp = now.timestamp()
+        if base is not None:
+            # as old as the reply it is made from: it shows the same moment
+            stamp, payload = base[0], REGROUP[name](ctx, query, json.loads(base[1]))
+        else:
+            payload = ENDPOINTS[name](ctx, parts[1] if len(parts) == 2 else "", query)
         body = _encode(payload)
         if key is not None and site.cache is not None and not ctx.scanning:
-            site.cache.put(key, now.timestamp(), body)
+            site.cache.put(key, stamp, body)
         return Result(HTTPStatus.OK, body, cacheable=not ctx.scanning)
     except api.ApiError as err:
         return _err(err.status, err.code, err.message)
@@ -1002,6 +1068,33 @@ def compute(
         return _err(HTTPStatus.SERVICE_UNAVAILABLE, "index_busy", "The index could not be read.")
     finally:
         index.close()
+
+
+# Replies made from the cached reply of the same view split by another group, at a
+# fraction of the cost: only Overview's chart of today depends on its group, so a
+# click on its group switch computes that chart, not the whole page again.
+REGROUP: dict[str, Callable[[api.Context, dict[str, str], dict[str, Any]], Any]] = {
+    "overview": api.overview_regroup,
+}
+
+
+def _base(
+    site: Site, name: str, parts: list[str], query: dict[str, str], now: datetime
+) -> tuple[float, bytes] | None:
+    """A cached reply that `name`'s reply for `query` can be made from (`REGROUP`):
+    the same view split by another group, at the same state of the index (and of
+    the usage samples), with when it was computed."""
+    if name not in REGROUP or site.cache is None:
+        return None
+    key = cache_key(site, name, parts, query, now)
+    others = [{}, *({**query, "group": g.value} for g in GroupBy)]
+    for other in others:
+        okey = cache_key(site, name, parts, other, now)
+        if okey != key:
+            entry = site.cache.entry(okey, now.timestamp())
+            if entry is not None:
+                return entry
+    return None
 
 
 Endpoint = Callable[[api.Context, str, dict[str, str]], Any]

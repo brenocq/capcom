@@ -48,7 +48,8 @@ request without the header (the click) lifts the same job to a page's priority.
 At most 3 jobs compute at once. Background work (low-priority jobs, and the warmer)
 waits while any page's request or job is in flight, and for 0.5 s after the last one,
 so a click never shares the CPU with it. The warmer computes the views pages asked for
-in the last 30 minutes (newest first) and then every page's default view, after startup
+in the last 30 minutes (newest first) and then every page's default view (Overview's
+and Spend's split by the group a page asked for last), after startup
 and whenever the index changes, in a child process of its own (`capcom.report.worker`),
 which is stopped (SIGSTOP) while a page needs the CPU and continued after; it rests
 three times as long as each reply took (about a quarter of a core at most), and it
@@ -202,7 +203,9 @@ calls and one `PRAGMA data_version`.
 ### `GET /api/overview?group=category|project|model|agent`
 
 `group` (default `category`, the same names as `/api/spend`) splits today's
-cumulative chart only.
+cumulative chart only. `capcom serve` makes the reply for one group from its cached
+reply for another (same index, same usage samples): only that chart is computed again,
+up to the cached reply's `now`.
 
 ```
 {now, running_sessions,
