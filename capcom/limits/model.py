@@ -46,7 +46,15 @@ from capcom.cost.model import price
 from capcom.cost.prices import canonical, is_placeholder
 from capcom.cost.top import project_label
 from capcom.limits.record import LOCK_FILE, SAMPLES_FILE
-from capcom.types import EventKind, Index, LimitSample, LimitWindow, PriceTable, Request
+from capcom.types import (
+    CostBreakdown,
+    EventKind,
+    Index,
+    LimitSample,
+    LimitWindow,
+    PriceTable,
+    Request,
+)
 
 LENGTH = {LimitWindow.FIVE_HOUR: timedelta(hours=5), LimitWindow.SEVEN_DAY: timedelta(days=7)}
 BUCKET = {LimitWindow.FIVE_HOUR: timedelta(minutes=15), LimitWindow.SEVEN_DAY: timedelta(hours=1)}
@@ -72,6 +80,8 @@ T80 = (
     1.323, 1.321, 1.319, 1.318, 1.316, 1.315, 1.314, 1.313, 1.311, 1.310,
 )  # fmt: skip
 PER_TYPE_MIN = 12  # intervals before a per-type fit is tried
+MIN_SHARE = 0.01  # a kind of token with less of the spend is weighed with the other small ones
+MERGED: Key = ("", "merged")  # the column of the merged kinds, in `Fit.spread`
 DRAWS = 400
 FAN_POINTS = 24
 SOURCES = ("statusline", "rate_limit_error")
@@ -359,11 +369,21 @@ class Spend:
     usd: float = 0.0
     tokens: dict[Key, float] = field(default_factory=dict)
     requests: int = 0
+    usd_by: dict[Key, float] = field(default_factory=dict)  # dollars per (model, category)
 
-    def add(self, r: Request, model: str, usd: float) -> None:
+    def add(self, r: Request, model: str, usd: float, cost: CostBreakdown | None = None) -> None:
         self.usd += usd
         self.requests += 1
         u = r.usage
+        if cost is not None:
+            for cat, x in zip(
+                CATEGORIES,
+                (cost.input, cost.cache_write, cost.cache_read, cost.output + cost.web),
+                strict=True,
+            ):
+                if x:
+                    k = (model, cat)
+                    self.usd_by[k] = self.usd_by.get(k, 0.0) + x
         for cat, n in zip(
             CATEGORIES, (u.input, u.cache_write, u.cache_read, u.output), strict=True
         ):
@@ -419,18 +439,18 @@ def scan_spend(
             if not counted(r) or (keep is not None and not keep(r)):
                 continue
             model = canonical(table, r.model)
-            usd = price(r, table).total
-            _add(bins, r, model, usd)
-            on_request(r, model, usd)
+            cost = price(r, table)
+            _add(bins, r, model, cost)
+            on_request(r, model, cost.total)
 
 
-def _add(bins: Sequence[Bins], r: Request, model: str, usd: float) -> None:
+def _add(bins: Sequence[Bins], r: Request, model: str, cost: CostBreakdown) -> None:
     for b in bins:
         payload = b.find(r.timestamp)
         if isinstance(payload, Spend):
-            payload.add(r, model, usd)
+            payload.add(r, model, cost.total, cost)
         elif payload is not None:
-            payload(r, model, usd)
+            payload(r, model, cost.total)
 
 
 Group = tuple[Sequence[Bins], Callable[[Request], bool] | None]
@@ -445,12 +465,12 @@ def scan_groups(index: Index, table: PriceTable, groups: Sequence[Group]) -> Non
         for r in index.requests(since=since, until=until):
             if not counted(r):
                 continue
-            priced: tuple[str, float] | None = None
+            priced: tuple[str, CostBreakdown] | None = None
             for bins, keep in groups:
                 if keep is not None and not keep(r):
                     continue
                 if priced is None:
-                    priced = (canonical(table, r.model), price(r, table).total)
+                    priced = (canonical(table, r.model), price(r, table))
                 _add(bins, r, *priced)
 
 
@@ -539,10 +559,24 @@ class Fit:
     r2: float | None = None
     rate_factor: float = PRIOR_FACTOR  # the rate's 80 % range: divided to multiplied by it
     readings: int = 0  # recorded readings the intervals come from
+    # per_type: the kinds of token with too small a share of the spend to weigh on their
+    # own (`MIN_SHARE`), weighed together by their dollars (percent per dollar)
+    merged: tuple[Key, ...] = ()
+    merged_per_usd: float = 0.0
+    # per_type: each positive weight's 80 % half-range, in its own unit (none when the
+    # rises cannot measure it; `MERGED` for the merged kinds), and the tokens and
+    # dollars behind each kind
+    spread: dict[Key, float] = field(default_factory=dict)
+    behind: dict[Key, float] = field(default_factory=dict)
+    usd_behind: dict[Key, float] = field(default_factory=dict)
 
     def percent(self, spend: Spend) -> float:
         if self.method == "per_type":
-            return sum(self.weights.get(k, 0.0) * n / 1e6 for k, n in spend.tokens.items())
+            own = sum(self.weights.get(k, 0.0) * n / 1e6 for k, n in spend.tokens.items())
+            if self.merged_per_usd:
+                rest = sum(v for k, v in spend.usd_by.items() if k not in self.weights)
+                own += self.merged_per_usd * rest
+            return own
         return self.per_usd * spend.usd
 
     @property
@@ -594,6 +628,53 @@ def rate_factor(ys: Sequence[float], preds: Sequence[float], segments: int = 1) 
     return min(math.exp(half), MAX_FACTOR)
 
 
+def _spread(
+    rows: Sequence[Sequence[float]], ys: Sequence[float], keys: Sequence[Key], w: Sequence[float]
+) -> dict[Key, float]:
+    """Each positive weight's 80 % half-range: the least-squares standard error on the
+    weights the fit kept (the others held at zero), from the residuals' variance, times
+    the t quantile on the degrees of freedom left. A weight the rises cannot tell apart
+    from the others (too few of its tokens, or tokens that always come with another
+    kind) gets a range as wide as the data leave it, or none at all."""
+    act = [j for j, v in enumerate(w) if v > 0]
+    n, p = len(ys), len(act)
+    if p == 0 or n <= p:
+        return {}
+    resid = [y - sum(r[j] * w[j] for j in act) for r, y in zip(rows, ys, strict=True)]
+    s2 = sum(e * e for e in resid) / (n - p)
+    # on columns scaled to unit norm, for a well-conditioned solve
+    norms = [math.sqrt(sum(r[j] ** 2 for r in rows)) for j in act]
+    if not all(norms):
+        return {}
+    xtx = [
+        [sum(r[i] * r[j] for r in rows) / (ni * nj) for j, nj in zip(act, norms, strict=True)]
+        for i, ni in zip(act, norms, strict=True)
+    ]
+    out: dict[Key, float] = {}
+    t = _t80(n - p)
+    for a, j in enumerate(act):
+        unit = [1.0 if b == a else 0.0 for b in range(p)]
+        var = _solve(xtx, unit)[a] * s2 / norms[a] ** 2
+        if math.isfinite(var) and var >= 0:
+            out[keys[j]] = t * math.sqrt(var)
+    return out
+
+
+def _own_keys(
+    items: Sequence[tuple[Interval, Spend]], keys: Sequence[Key], usd: float
+) -> tuple[list[Key], list[Key]]:
+    """The kinds of token weighed on their own, and those weighed together by their
+    dollars: a kind with under `MIN_SHARE` of the spend has too few tokens for the
+    rises to measure its weight (a few hundred input tokens, say, which then soak up
+    whatever else varies from rise to rise). Without dollars per kind (spend not read
+    from the index) every kind is its own."""
+    by = {k: sum(sp.usd_by.get(k, 0.0) for _, sp in items) for k in keys}
+    if not any(by.values()):
+        return list(keys), []
+    small = [k for k in keys if by[k] < MIN_SHARE * usd]
+    return [k for k in keys if k not in small], small
+
+
 def fit(
     window: LimitWindow,
     items: Sequence[tuple[Interval, Spend]],
@@ -613,12 +694,23 @@ def fit(
     ys = [iv.rise for iv, _ in items]
     per_usd = rise / usd
     result = Fit(window, "per_usd", len(items), samples, per_usd, readings=readings)
-    if len(items) >= max(PER_TYPE_MIN, 3 * len(keys)):
-        rows = [[sp.tokens.get(k, 0.0) / 1e6 for k in keys] for _, sp in items]
+    own, merged = _own_keys(items, keys, usd)
+    cols = [*own, MERGED] if merged else own
+    if len(items) >= max(PER_TYPE_MIN, 3 * len(cols)):
+        rows = [
+            [sp.tokens.get(k, 0.0) / 1e6 for k in own]
+            + ([sum(sp.usd_by.get(k, 0.0) for k in merged)] if merged else [])
+            for _, sp in items
+        ]
         w = nnls(rows, ys)
-        weights = {k: v for k, v in zip(keys, w, strict=True)}
+        weights = dict(zip(own, w[: len(own)], strict=True))
         typed = Fit(window, "per_type", len(items), samples, per_usd, weights, readings=readings)
+        typed.merged = tuple(merged)
+        typed.merged_per_usd = w[len(own)] if merged else 0.0
         typed.per_usd = sum(typed.percent(sp) for _, sp in items) / usd
+        typed.spread = _spread(rows, ys, cols, w)
+        typed.behind = {k: sum(sp.tokens.get(k, 0.0) for _, sp in items) for k in keys}
+        typed.usd_behind = {k: sum(sp.usd_by.get(k, 0.0) for _, sp in items) for k in keys}
         result = typed
     pred = [result.percent(sp) for _, sp in items]
     result.mean_abs_error = sum(abs(p - y) for p, y in zip(pred, ys, strict=True)) / len(ys)

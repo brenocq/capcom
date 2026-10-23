@@ -17,7 +17,10 @@ from capcom.limits.accounts import (
     load_known,
 )
 from capcom.limits.model import (
+    MERGED,
+    MIN_SHARE,
     NOT_ENOUGH,
+    Fit,
     Forecast,
     WindowView,
     load_samples,
@@ -58,6 +61,85 @@ def _projects(rows: Sequence[tuple[str, float, float | None]]) -> list[dict[str,
     return out
 
 
+CATEGORY_WORDS = {
+    "input": "input",
+    "cache_write": "cache writes",
+    "cache_read": "cache reads",
+    "output": "output",
+}
+ROUGH = 2.0  # a range whose high end is more than this times its low end is rough
+
+
+def _model_word(model: str) -> str:
+    return model.removeprefix("claude-")
+
+
+def _range(w: float, spread: float | None) -> tuple[float, float] | None:
+    """A weight's 80 % range, or None when it reaches zero (or is unknown)."""
+    if spread is None or w - spread <= 0:
+        return None
+    return w - spread, w + spread
+
+
+def costs_json(f: Fit) -> dict[str, Any] | None:
+    """What 1 % of the window costs, by model and token type (per_type fits): the
+    tokens of each kind that make 1 % and their API-equivalent dollars, each with its
+    80 % range ("rough" when the high end is more than twice the low end). A kind is
+    left out when its range reaches zero (the readings cannot tell its cost from
+    zero); the kinds with too small a share of the spend to measure alone are one row,
+    in dollars."""
+    if f.method != "per_type":
+        return None
+    rows: list[dict[str, Any]] = []
+    left_out: list[str] = []
+    for (m, c), w in sorted(f.weights.items(), key=lambda kv: kv[1]):
+        if w <= 0:
+            continue
+        label = f"{_model_word(m)} {CATEGORY_WORDS.get(c, c)}"
+        rng = _range(w, f.spread.get((m, c)))
+        if rng is None:
+            left_out.append(label)
+            continue
+        tokens = f.behind.get((m, c), 0.0)
+        per_token = f.usd_behind.get((m, c), 0.0) / tokens if tokens else None
+        tok = 1e6 / w
+        rough = rng[1] > ROUGH * rng[0]
+        row: dict[str, Any] = {
+            "model": m,
+            "category": c,
+            "label": label,
+            "tokens": round(tok),
+            "tokens_low": round(1e6 / rng[1]),
+            "tokens_high": round(1e6 / rng[0]),
+            "usd": None if per_token is None else _r(tok * per_token, 4),
+            "usd_low": None if per_token is None else _r(1e6 / rng[1] * per_token, 4),
+            "usd_high": None if per_token is None else _r(1e6 / rng[0] * per_token, 4),
+            "rough": rough,
+        }
+        rows.append(row)
+    merged: dict[str, Any] | None = None
+    if f.merged:
+        labels = [f"{_model_word(m)} {CATEGORY_WORDS.get(c, c)}" for m, c in f.merged]
+        rng = _range(f.merged_per_usd, f.spread.get(MERGED))
+        share = sum(f.usd_behind.get(k, 0.0) for k in f.merged)
+        total = sum(f.usd_behind.values())
+        merged = {
+            "kinds": labels,
+            "share": _r(share / total, 4) if total else None,
+            "usd": None if rng is None else _r(1 / f.merged_per_usd, 4),
+            "usd_low": None if rng is None else _r(1 / rng[1], 4),
+            "usd_high": None if rng is None else _r(1 / rng[0], 4),
+            "rough": rng is not None and rng[1] > ROUGH * rng[0],
+        }
+    return {
+        "rows": rows,
+        "merged": merged,
+        "left_out": left_out,
+        "min_share": MIN_SHARE,
+        "rough_ratio": ROUGH,
+    }
+
+
 def window_json(
     v: WindowView, now: datetime, tz: tzinfo | None, since: datetime | None, full: bool
 ) -> dict[str, Any]:
@@ -96,6 +178,7 @@ def window_json(
                 for (m, c), w in sorted(f.weights.items(), key=lambda kv: -kv[1])
                 if w > 0
             ],
+            "costs": costs_json(f),
         },
         "forecast": None
         if fc is None
@@ -367,13 +450,25 @@ def format_views(
         f = v.fit
         if f is not None:
             lines.append(f"  {f.note} ({v.samples} samples recorded)")
-            if f.method == "per_type":
+            costs = costs_json(f)
+            if costs is not None and (costs["rows"] or costs["merged"]):
                 lines.append("  what 1% costs, by model and token type:")
-                top = sorted(f.weights.items(), key=lambda kv: -kv[1])[:6]
-                for (m, c), wt in top:
-                    if wt > 0:
-                        tok = 1e6 / wt  # the weight is percent per million tokens
-                        lines.append(f"    {m} {c.replace('_', ' ')}: {tok:,.0f} tokens")
+                for row in costs["rows"]:
+                    tok = f"{row['tokens']:,.0f} tokens"
+                    if row["rough"]:
+                        tok = (
+                            f"{row['tokens_low']:,.0f} to {row['tokens_high']:,.0f} tokens (rough)"
+                        )
+                    usd = "" if row["usd"] is None else f", {_money(row['usd'])}"
+                    lines.append(f"    {row['label']}: {tok}{usd}")
+                mg = costs["merged"]
+                if mg is not None and mg["usd"] is not None:
+                    lines.append(
+                        f"    the {len(mg['kinds'])} small kinds together: "
+                        f"{_money(mg['usd'])}{' (rough)' if mg['rough'] else ''}"
+                    )
+                if costs["left_out"]:
+                    lines.append("    too little data to tell: " + ", ".join(costs["left_out"]))
         else:
             lines.append(f"  fit: {NOT_ENOUGH} ({v.samples} so far)")
         if v.shown and v.current:

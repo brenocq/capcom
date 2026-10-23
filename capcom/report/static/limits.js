@@ -412,6 +412,65 @@ export function chartStart(segs, now, days) {
   return Number.isFinite(x0) && x0 < now ? x0 : now - days * 864e5;
 }
 
+// "What 1% costs": how many tokens of each kind make 1% of the window and their
+// dollars, from the fit's own uncertainty (capcom/limits/view.py costs_json): each
+// kind with its 80% range ("rough" when it spans more than 2×), the small kinds
+// together in dollars, and the kinds the readings cannot tell from zero named apart.
+const TOKEN_WORDS = { input: 'input tokens', cache_write: 'cache-write tokens', cache_read: 'cache-read tokens', output: 'output tokens' };
+// The merged kinds in few words: "all fable-5 and haiku-5-5 tokens, and opus-5-5
+// input" (labels are "<model> <kind>", as costs_json writes them).
+export function kindsText(kinds) {
+  const by = new Map();
+  for (const k of kinds) {
+    const i = k.indexOf(' ');
+    const m = i < 0 ? k : k.slice(0, i);
+    if (!by.has(m)) by.set(m, []);
+    by.get(m).push(i < 0 ? '' : k.slice(i + 1));
+  }
+  const and = (xs) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
+  const whole = [...by].filter(([, ks]) => ks.length >= 4).map(([m]) => m);
+  const parts = [...by].filter(([, ks]) => ks.length < 4).map(([m, ks]) => `${m} ${and(ks)}`);
+  return and([...(whole.length ? [`all ${and(whole)} tokens`] : []), ...parts]);
+}
+const money = (x) => (x === null || x === undefined ? '–' : usd(x, x >= 100 ? 0 : 2));
+export function costsBlock(w) {
+  const c = w.fit && w.fit.costs;
+  if (!c || (!c.rows.length && !c.merged)) return null;
+  const model = (m) => m.replace(/^claude-/, '');
+  const out = [h('h3', { text: 'What 1% costs, by model and token type' })];
+  const lead = [`How many tokens of each kind use up 1% of your ${w.label}, and what they would cost at API prices.`];
+  const byTok = [...c.rows].sort((a, b) => b.tokens - a.tokens);
+  if (byTok.length > 1) {
+    const lo = byTok[0], hi = byTok[byTok.length - 1];
+    const name = (r) => `${model(r.model)} ${TOKEN_WORDS[r.category] || r.category}`;
+    const cap = (t) => t[0].toUpperCase() + t.slice(1);
+    lead.push(`${cap(name(lo))} count the least: ${tokens(lo.tokens)} of them make 1%. ${cap(name(hi))} count the most: ${tokens(hi.tokens)} make 1%.`);
+  }
+  out.push(h('p.note', { style: 'margin:0 0 8px', text: lead.join(' ') }));
+  const list = h('div.blist');
+  for (const r of byTok) {
+    const range = `${tokens(r.tokens_low)} and ${tokens(r.tokens_high)}`;
+    list.append(h('div.bitem', null,
+      h('div.top', null, h('span', { text: r.label }),
+        h('span.mono', { text: `${tokens(r.tokens)} tokens · ${money(r.usd)}` })),
+      h('span.note', { text: r.rough ? `Rough: between ${range} tokens (${money(r.usd_low)} to ${money(r.usd_high)}).` : `Likely between ${range} tokens.` })));
+  }
+  const mg = c.merged;
+  if (mg && mg.usd !== null) {
+    const share = mg.share === null ? '' : `, ${pctText(mg.share * 100, mg.share < 0.1 ? 1 : 0)} of the spend`;
+    list.append(h('div.bitem', null,
+      h('div.top', null, h('span', { text: `Everything else (${mg.kinds.length} kind${mg.kinds.length === 1 ? '' : 's'}${share})` }), h('span.mono', { text: money(mg.usd) })),
+      h('span.note', { text: `${mg.rough ? `Rough: between ${money(mg.usd_low)} and ${money(mg.usd_high)}. ` : ''}That is ${kindsText(mg.kinds)}.`, title: mg.kinds.join(', ') })));
+  }
+  out.push(list);
+  const rule = [`A kind with less than ${pctText(c.min_share * 100)} of the spend has too few tokens to measure alone, so those are counted together, by their dollars.`];
+  if (mg && mg.usd === null) rule.push(`Even together (${kindsText(mg.kinds)}), the readings cannot tell their cost from zero.`);
+  if (c.left_out.length) rule.push(`Left out, as the readings cannot tell their cost from zero: ${c.left_out.join(', ')}.`);
+  rule.push('The ranges are 80% ranges.');
+  out.push(h('p.note', { style: 'margin:8px 0 0', text: rule.join(' ') }));
+  return out;
+}
+
 function windowSection(w, now, days, since) {
   const weekly = isWeekly(w);
   const card = h('section.card', null, h('div.split', null, h('h2', { text: w.label[0].toUpperCase() + w.label.slice(1) }),
@@ -429,12 +488,8 @@ function windowSection(w, now, days, since) {
   }));
   const fit = fitNote(w);
   if (fit) card.append(h('p.note', { text: fit }));
-  if (w.fit && w.fit.method === 'per_type' && w.fit.weights.length > 1) {
-    card.append(h('h3', { text: 'What 1% costs, by model and token type' }));
-    card.append(h('div.blist', null, w.fit.weights.slice(0, 8).map((x) => h('div.bitem', null, h('div.top', null,
-      h('span', { text: `${x.model.replace(/^claude-/, '')} ${x.category.replace('_', ' ')}` }),
-      h('span.mono', { text: `${tokens(Math.round(1 / x.percent_per_mtok * 1e6))} tokens` }))))));
-  }
+  const costs = costsBlock(w);
+  if (costs) card.append(...costs);
   // what spent each window, newest first: one bar per window, a color per project
   // (the same project keeps its color in every window); each part's dollars and
   // share of the limit on hover, all of them in the table
