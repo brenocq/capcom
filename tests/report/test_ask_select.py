@@ -86,7 +86,7 @@ def test_button_beside_a_selection(tmp_path: Path, runs: Path, chrome: layout.Ch
             " && b.left >= 0 && b.right <= innerWidth; })()"
         )
         assert near
-        assert chrome.js("document.querySelector('.asksel').textContent") == "Ask Claude"
+        assert chrome.js("document.querySelector('.asksel').textContent") == "Ask Roger"
         assert chrome.js("!!document.querySelector('.asksel svg.mascot.mini')")
 
         # it follows the text as the page scrolls

@@ -1,7 +1,7 @@
 // Ask Claude: a chat in the corner that explains the dense parts of a page. A
 // round button (capcom's mascot, who waves now and then) opens a small panel; the
 // small "Explain" marks on dense cards open it already asking about that card, and
-// the "Ask Claude" button beside any text the user selects asks about that text.
+// the "Ask Roger" button beside any text the user selects asks about that text.
 //
 // Answers come from the user's own `claude` CLI, which `capcom serve` starts per
 // question (POST /api/ask, capcom/report/ask.py), streamed as they are written.
@@ -598,7 +598,7 @@ export function selectionTopic(range) {
   };
 }
 
-// The "Ask Claude" button beside a selection: shown once the selection settles
+// The "Ask Roger" button beside a selection: shown once the selection settles
 // (a mouse button let go, or a pause while the keyboard or touch handles move
 // it), placed under its end (above its start when there is no room), moved as the
 // page scrolls, and gone when the selection is cleared or on Escape. Never for
@@ -658,8 +658,8 @@ function askSelection() {
 }
 
 function buildPick() {
-  const b = h('button.asksel', { type: 'button', hidden: true, title: 'Ask Claude about the text you selected', 'aria-label': 'Ask Claude about the selected text' },
-    mascot(18, true), h('span', { text: 'Ask Claude' }));
+  const b = h('button.asksel', { type: 'button', hidden: true, title: named(`Ask ${MASCOT_NAME} about the text you selected`, 'Ask Claude about the text you selected'), 'aria-label': named(`Ask ${MASCOT_NAME} about the selected text`, 'Ask Claude about the selected text') },
+    mascot(18, true), h('span', { text: named(`Ask ${MASCOT_NAME}`, 'Ask Claude') }));
   // keep the selection: a press on the button must not clear it
   const hold = (e) => { e.preventDefault(); pick.pressing = true; };
   b.addEventListener('pointerdown', hold);
