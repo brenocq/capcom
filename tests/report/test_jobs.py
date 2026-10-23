@@ -541,6 +541,74 @@ def test_the_worker_stops_its_child_while_a_page_needs_the_cpu(index_path: Path)
         site.worker.close()
 
 
+def _warm_once(site: Site, name: str, query: dict[str, str]) -> Job:
+    """One background job through the worker, waited for, its thread ended."""
+    from capcom.report.server import _work
+
+    key = cache_key(site, name, [name], query, NOW)
+    work = _work(site, name, [name], query, NOW, key, background=True)
+    assert site.jobs is not None
+    job = site.jobs.submit(key, key[0], work, name, background=True)
+    assert job.done.wait(30) and job.result is not None
+    deadline = time.monotonic() + 5
+    while any(t.name == "capcom-job" for t in threading.enumerate()):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    return job
+
+
+def test_the_worker_child_outlives_the_job_thread_that_started_it(index_path: Path) -> None:
+    from capcom.report.analysis import default_analysis
+    from capcom.report.worker import Worker
+
+    site = Site(index_path, TABLE, default_analysis(), clock=lambda: NOW, tz=UTC)
+    site.jobs = Jobs(quiet=0.05)
+    site.worker = Worker(site)
+    try:
+        first = _warm_once(site, "sessions", {"days": "14"})
+        assert first.result is not None and first.result.status == 200
+        proc = site.worker._proc
+        assert proc is not None
+        time.sleep(0.3)  # a death signal tied to the ended thread would have landed by now
+        assert proc.poll() is None  # the child lives on, ready for the next reply
+        second = _warm_once(site, "sessions", {"days": "7"})
+        assert second.result is not None and second.result.status == 200
+        assert site.worker._proc is proc and site.worker.started == 1
+    finally:
+        site.worker.close()
+
+
+def test_the_worker_restarts_a_child_that_died_and_retries_the_reply(
+    index_path: Path, tmp_path: Path
+) -> None:
+    import sys
+
+    from capcom.report.analysis import default_analysis
+    from capcom.report.worker import Worker
+
+    marker = tmp_path / "died"
+    flaky = (  # a child that dies on its first request, then works like the real one
+        "import sys, pathlib\n"
+        f"marker = pathlib.Path({str(marker)!r})\n"
+        "if not marker.exists():\n"
+        "    sys.stdin.buffer.readline(); sys.stdin.buffer.readline()\n"
+        "    marker.touch(); raise SystemExit(1)\n"
+        "from capcom.report.worker import main\n"
+        "raise SystemExit(main())\n"
+    )
+    site = Site(index_path, TABLE, default_analysis(), clock=lambda: NOW, tz=UTC)
+    site.jobs = Jobs(quiet=0.05)
+    site.worker = Worker(site, [sys.executable, "-c", flaky])
+    try:
+        here = compute(site, "sessions", ["sessions"], {"days": "14"}, NOW)
+        job = _warm_once(site, "sessions", {"days": "14"})
+        assert job.result is not None
+        assert job.result.status == 200 and job.result.body == here.body
+        assert marker.exists() and site.worker.started == 2
+    finally:
+        site.worker.close()
+
+
 # --------------------------------------------------------------------------- live pages
 
 

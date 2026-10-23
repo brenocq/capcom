@@ -10,7 +10,11 @@ header line, then `n` bytes of body. The child sends "step" frames (progress and
 now and then, the reply so far) and one "done" frame (status, body). It reads the
 index read-only, like the server, and caches nothing: the parent caches the reply.
 It exits on end of input, and dies with the parent (PR_SET_PDEATHSIG), so a
-stopped child never outlives a killed server.
+stopped child never outlives a killed server. Linux sends that signal when the
+thread that forked the child ends, not the process, so every child is forked
+from one thread that lives as long as the server (`_spawn`), never from the job
+thread that happened to need it first. A child that dies anyway is started
+again, and the reply asked of it once more.
 
     python -m capcom.report.worker   # the child; spoken to over stdin and stdout
 """
@@ -19,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import select
 import signal
 import subprocess
@@ -37,6 +42,51 @@ if TYPE_CHECKING:
 
 PARTIAL_EVERY = 0.25  # seconds between two replies so far sent by the child
 TICK = 0.05  # seconds between two looks at whether the child must pause
+PARENT_ENV = "CAPCOM_WORKER_PARENT"  # the server's pid, for the child to check
+
+
+class _Spawner:
+    """One daemon thread that forks every child, for the life of the process: the
+    child's death signal is tied to the thread that forked it (prctl(2)), so a
+    child forked from a job's thread was killed as soon as that job ended."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._todo: queue.SimpleQueue[tuple[list[str], dict[str, Any], threading.Event]]
+        self._todo = queue.SimpleQueue()
+        self._thread: threading.Thread | None = None
+
+    def popen(self, argv: list[str]) -> subprocess.Popen[bytes]:
+        with self._lock:
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(
+                    target=self._loop, name="capcom-worker-spawn", daemon=True
+                )
+                self._thread.start()
+        box: dict[str, Any] = {}
+        done = threading.Event()
+        self._todo.put((argv, box, done))
+        done.wait()
+        if "error" in box:
+            raise box["error"]
+        proc: subprocess.Popen[bytes] = box["proc"]
+        return proc
+
+    def _loop(self) -> None:
+        env = os.environ | {PARENT_ENV: str(os.getpid())}
+        while True:
+            argv, box, done = self._todo.get()
+            try:
+                box["proc"] = subprocess.Popen(
+                    argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, close_fds=True, env=env
+                )
+            except Exception as err:  # (OSError, mostly) raised in the asking thread
+                box["error"] = err
+            finally:
+                done.set()
+
+
+_spawn = _Spawner()
 
 
 def _spec(site: Site) -> dict[str, Any]:
@@ -95,9 +145,7 @@ class Worker:
     def _ensure(self) -> subprocess.Popen[bytes]:
         if self._proc is not None and self._proc.poll() is None:
             return self._proc
-        self._proc = subprocess.Popen(
-            self.argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, close_fds=True
-        )
+        self._proc = _spawn.popen(self.argv)
         self._buf = b""
         self.started += 1
         self._write({"spec": _spec(self.site)})
@@ -178,6 +226,16 @@ class Worker:
     def _run(
         self, job: Job, name: str, parts: list[str], query: dict[str, str], now: datetime
     ) -> Result:
+        try:
+            return self._once(job, name, parts, query, now)
+        except (OSError, EOFError, ValueError):
+            pass  # the child died under it: ask a fresh one, once (a second death is raised)
+        return self._once(job, name, parts, query, now)
+
+    def _once(
+        self, job: Job, name: str, parts: list[str], query: dict[str, str], now: datetime
+    ) -> Result:
+        """One attempt at the reply; a child that ended or garbled it is killed."""
         jobs = job.jobs
         try:
             self._ensure()
@@ -229,6 +287,9 @@ def _die_with_parent() -> None:
         libc.prctl(1, signal.SIGKILL)  # PR_SET_PDEATHSIG
     except (OSError, AttributeError):
         pass  # not Linux: end of input still ends the child
+    parent = os.environ.get(PARENT_ENV)
+    if parent is not None and parent != str(os.getppid()):
+        os._exit(0)  # the server ended before the signal was armed: nobody to answer
 
 
 def main(stdin: IO[bytes] | None = None, stdout: IO[bytes] | None = None) -> int:
