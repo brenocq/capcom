@@ -1,7 +1,7 @@
 // The sessions table (Spend and the Sessions page), and the block shown for a
 // part whose analysis module is not built yet.
 
-import { h, api, usd, tokens, pct, duration, stamp, seg, empty, setQuery, sessionHref, ApiError, LOWER_TITLE, tipOn } from './lib.js';
+import { h, api, usd, tokens, pct, duration, stamp, seg, empty, setQuery, sessionHref, sessionDot, ApiError, LOWER_TITLE, tipOn } from './lib.js';
 
 export function sessionsTable(rows, sort, onSort) {
   const th = (key, label, cls) => {
@@ -14,7 +14,7 @@ export function sessionsTable(rows, sort, onSort) {
       th('peak_context', 'Peak context', 'num'), th(null, 'Cache reads'), th('last', 'Last record', 'num'), th('usd', 'Cost', 'num'))),
     h('tbody', null, rows.map((r) => h('tr', null,
       h('td', null, h('a.title', { href: sessionHref(r.session_id) },
-        h('span', { text: r.title || 'Untitled session ' + r.session_id.slice(0, 8) }),
+        h(r.color ? 'span.sname' : 'span', null, sessionDot(r.color), h('span', null, r.title || 'Untitled session ' + r.session_id.slice(0, 8))),
         h('span', { text: r.project + (r.git_branch ? ' · ' + r.git_branch : ''), title: r.project_path || null }))),
       h('td.num', { text: String(r.subagents) }),
       h('td.num', { text: r.active_seconds ? duration(r.active_seconds) : '<1 min' }),

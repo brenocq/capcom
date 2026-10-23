@@ -135,6 +135,9 @@ def _put(
     ix.apply(log, Batch(list(records), 100), FileState(log.path, 1, 100, 1, 100))
 
 
+COLORS = ("purple", "green", "blue", "orange", "red", "yellow", "cyan", "pink")
+
+
 def build_index(path: Path, now: datetime) -> None:
     """Thirty days of made-up sessions over six projects: long titles and project
     names, subagents, a burst that makes a spike, and eight sessions live now."""
@@ -186,6 +189,7 @@ def build_index(path: Path, now: datetime) -> None:
                 git_branch="main",
                 first_seen=reqs[0].timestamp,
                 last_seen=reqs[-1].timestamp,
+                color=COLORS[n % len(COLORS)] if n % 2 == 0 else None,  # Claude Code's /color
             )
             recs: list[Record] = [info, *reqs]
             if n % 5 == 0:
@@ -246,6 +250,7 @@ def build_index(path: Path, now: datetime) -> None:
             title=TITLES[(k + 1) % len(TITLES)],
             first_seen=reqs[0].timestamp,
             last_seen=reqs[-1].timestamp,
+            color=COLORS[k % len(COLORS)] if k % 2 == 0 else None,
         )
         _put(ix, f"/logs/{project}/{sid}.jsonl", LogKind.SESSION, project, sid, None, [info, *reqs])
     ix.close()

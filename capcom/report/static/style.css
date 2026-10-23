@@ -11,6 +11,9 @@
   --good: #1D7347; --good-bg: #E1F0E7; --meh: #7E5300; --meh-bg: #F6EAD0;
   --wait: #4D4C48; --wait-bg: #EBE8DF; --bar-before: #A9A598;
   --shadow: 0 1px 2px rgba(20,20,19,0.08);
+  /* a session's /color in Claude Code, as a dot (at least 3:1 on the grounds) */
+  --sc-red: #C8402F; --sc-orange: #C8601A; --sc-yellow: #A87E00; --sc-green: #3C8A3A;
+  --sc-cyan: #12879A; --sc-blue: #2F6FD0; --sc-purple: #8A55C9; --sc-pink: #C2477F;
   color-scheme: light;
 }
 [data-theme="dark"] {
@@ -24,6 +27,8 @@
   --fan-fill: 0.22;
   --good: #5FC795; --good-bg: rgba(95,199,149,0.15); --meh: #E3B04B; --meh-bg: rgba(227,176,75,0.15);
   --wait: #C9C6BD; --wait-bg: rgba(201,198,189,0.14); --bar-before: #8A877E;
+  --sc-red: #EE6B5B; --sc-orange: #F0904A; --sc-yellow: #E8C14A; --sc-green: #6CC36A;
+  --sc-cyan: #4CC3D4; --sc-blue: #6EA2F2; --sc-purple: #B78AF0; --sc-pink: #EE85BC;
   color-scheme: dark;
 }
 :root {
@@ -65,6 +70,12 @@ button { font: inherit; color: inherit; }
 .live a:hover { background: var(--sel); }
 .dot { width: 8px; height: 8px; border-radius: 999px; flex: 0 0 8px; background: var(--ok); }
 .dot.hot { background: var(--accent); }
+.sdot { display: inline-block; width: 8px; height: 8px; border-radius: 999px; margin-right: 6px; vertical-align: 0.05em; flex: none; }
+h1 .sdot { width: 12px; height: 12px; margin-right: 10px; vertical-align: 0.08em; }
+/* a name that wraps keeps its dot beside the first line, not alone above it */
+.sname { display: flex; align-items: flex-start; }
+.sname > .sdot { margin-top: calc((1lh - 8px) / 2); }
+h1.sname > .sdot { margin-top: calc((1lh - 12px) / 2); }
 .live .name { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 .live .name span:first-child { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .live .rate { font-family: var(--mono); font-size: 12px; color: var(--muted); }
@@ -218,8 +229,8 @@ table.data th:last-child, table.data td:last-child { padding-right: 0; }
 table.data .num { text-align: right; font-family: var(--mono); font-size: 12px; white-space: nowrap; }
 table.data .cost { text-align: right; font-family: var(--mono); font-weight: 500; white-space: nowrap; }
 table.data a.title { display: flex; flex-direction: column; gap: 2px; text-decoration: none; }
-table.data a.title span:first-child { font-weight: 500; }
-table.data a.title span:last-child { font-size: 12px; color: var(--muted); }
+table.data a.title > span:first-child { font-weight: 500; }
+table.data a.title > span:last-child { font-size: 12px; color: var(--muted); }
 .sw { width: 10px; height: 10px; border-radius: 3px; display: inline-block; flex: 0 0 10px; }
 
 /* session view */

@@ -3,7 +3,7 @@
 
 import {
   h, usd, stamp, hm, monthDay, seg, empty, setQuery, sessionHref, maxOf, spikeText, daysText, CONFIDENCE, projectChip,
-  pct, tipOn, tableToggle,
+  pct, tipOn, tableToggle, sessionDot,
 } from './lib.js';
 import { pendingBlock } from './sessions.js';
 
@@ -174,7 +174,7 @@ export async function renderSpikes(main, r) {
       h('span.body', null,
         h('span.row', null, h('span.t', { text: txt.title }), h('span.plus', { text: '+' + usd(it.excess_usd) })),
         txt.rest ? h('span.rest', { text: txt.rest }) : null,
-        h('span.meta', null, projectChip(it), h('span', { text: `${when(it.start)} · ${where(it)}` }))));
+        h('span.meta', null, projectChip(it), h('span', null, `${when(it.start)} · `, sessionDot(it.color), where(it)))));
   }));
   main.append(h('div.row-wrap', { style: 'align-items:flex-start' }, h('div.spikecol', null, controls, list), detail(sel)));
   settle(list, controls);

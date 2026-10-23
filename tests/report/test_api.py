@@ -138,6 +138,8 @@ def test_spend_sessions_and_buckets(client: Client) -> None:
     )
     s1 = next(r for r in rows if r["session_id"] == "s1")
     assert s1["title"] == "Alpha work" and s1["project"] == "alpha"
+    assert s1["color"] == "purple"
+    assert next(r for r in rows if r["session_id"] != "s1")["color"] is None
     assert s1["subagents"] == 1
     assert s1["peak_context"] == 60_000
     # gaps under 5 minutes: 2 + 1 + 1 minutes between the morning requests
@@ -170,6 +172,10 @@ def test_sessions_list(client: Client) -> None:
     )
     found = client.get("/api/sessions?days=0&q=scout")[1]["sessions"]
     assert [r["session_id"] for r in found] == ["s1"]
+    # search finds a renamed session by its own name, not by Claude Code's title
+    found = client.get("/api/sessions?days=0&q=alpha%20work")[1]["sessions"]
+    assert [(r["session_id"], r["color"]) for r in found] == [("s1", "purple")]
+    assert client.get("/api/sessions?days=0&q=alpha%20draft")[1]["sessions"] == []
     found = client.get("/api/sessions?days=0&q=beta")[1]["sessions"]
     assert {r["session_id"] for r in found} == {"s3", "s4"}
     last = client.get("/api/sessions?days=0&sort=last&limit=1")[1]["sessions"]
@@ -183,6 +189,7 @@ def test_session_detail(client: Client) -> None:
     assert status == 200
     s = data["session"]
     assert s["title"] == "Alpha work" and s["project"] == "alpha"
+    assert s["title_custom"] is True and s["color"] == "purple"
     assert s["running"] is True
     assert s["models"] == ["claude-opus-5-5"]
     assert close(data["totals"]["usd"], usd(TODAY))
@@ -284,6 +291,7 @@ def test_live(client: Client) -> None:
     assert data["window_s"] == 600
     [s] = data["sessions"]
     assert s["session_id"] == "s1" and s["title"] == "Alpha work"
+    assert s["color"] == "purple"
     assert close(s["usd_last_10_min"], usd(S1_MAIN[-1:]))
     assert s["usd_per_hour"] == pytest.approx(6 * s["usd_last_10_min"], abs=1e-5)
     # the test server never scans: it must say so and how old the index is, so the

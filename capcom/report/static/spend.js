@@ -4,7 +4,7 @@
 import {
   h, api, usd, tokens, pct, seg, legend, empty, errorBox, setQuery, monthDay, localDate, dayName, hm,
   outputUsd, estimateNote, lowerMark, SERIES, OTHER_COLOR, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor,
-  spikeText, spikeHref, projectChip, storyLine, segBar, tableToggle, tipOn, entityColors, GROUPS, pickedGroup, rememberGroup, spendPath,
+  spikeText, spikeHref, projectChip, storyLine, segBar, tableToggle, tipOn, entityColors, GROUPS, pickedGroup, rememberGroup, spendPath, sessionDot,
 } from './lib.js';
 import { bandChart, dayBars } from './charts.js';
 import { heatCard } from './heatmap.js';
@@ -38,6 +38,12 @@ function spikeWhen(m) {
   const thread = m.scope === 'session' ? 'session-wide' : m.agent_id ? 'subagent' : 'main thread';
   const where = [m.title || (m.session_id ? m.session_id.slice(0, 8) : null), thread].filter(Boolean);
   return [`${monthDay(d)} ${hm(d)}`, ...where].join(' · ');
+}
+
+// The same, with the session's color dot before its title.
+function spikeWhenParts(m) {
+  const [at, ...rest] = spikeWhen(m).split(' · ');
+  return rest.length ? [`${at} · `, m.session_id ? sessionDot(m.color) : null, rest.join(' · ')] : [at];
 }
 
 // The markers that fit a chart from x0 to x1 (ms): the `keep` largest by excess
@@ -74,7 +80,7 @@ export function spikeList(sp, days, limit = 4) {
   const out = rows.map((m) => h('a.spikerow', { href: spikeHref(m.key, m.t, days) },
     h('span.num', { text: String(m.n) }),
     h('span.body', null,
-      h('span.meta', null, projectChip(m), h('span', { text: spikeWhen(m) })),
+      h('span.meta', null, projectChip(m), h('span', null, ...spikeWhenParts(m))),
       h('b', { text: spikeText(m).title }),
       spikeText(m).rest ? h('span.rest', { text: spikeText(m).rest }) : null,
       h('span.tags', null, spikeText(m).same ? null : h('span.tag', { text: spikeText(m).tag }),
