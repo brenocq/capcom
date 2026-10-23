@@ -219,7 +219,7 @@ def test_a_subagent_cache_expiring_during_a_tool_call_is_its_own_finding() -> No
     f = only(found, "subagent_cache_expiry")
     assert f.saving_usd_per_week == pytest.approx(100_000 * (5 - 0.2) / 1e6)
     assert f.change is None  # no setting changes a subagent's cache lifetime
-    assert "background" in f.advice
+    assert "background" in f.advice and "every 4 minutes" in f.advice
     assert "approve the command sooner" in f.advice  # a permission wait looks the same
     assert "Bash (1)" in f.summary and "12 min" in f.summary
     assert f.metrics["rewrites"] == 1 and f.metrics["tools"] == ("Bash",)
