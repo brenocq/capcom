@@ -1258,11 +1258,12 @@ def subagent_cache_expiry(facts: Facts) -> list[Finding]:
         title="Caches expired during long tool calls",
         what="after a tool call ran past the cache lifetime",
         advice=(
-            "Run long commands (builds, test suites, wait loops) in the background and "
-            "poll their output in short steps, or split the work so a subagent doesn't "
-            "wait on a long command: a subagent's cache lasts 5 minutes. A command "
-            "waiting on a permission prompt looks the same here (the logs record no "
-            "run time): allow it in the agent's settings, or approve the command sooner."
+            "A subagent's cache lasts 5 idle minutes. Run a command that may take longer "
+            "(a build, a test suite, a wait for a lock) in the background and check its "
+            "output at least every 4 minutes, or do other work meanwhile: each check "
+            "keeps the cache warm for about a twelfth of what rewriting it costs. A "
+            "command waiting on a permission prompt looks the same here (the logs record "
+            "no run time): allow it in the agent's settings, or approve the command sooner."
         ),
     )
     grouped = _by_group(facts.tool_waits)
