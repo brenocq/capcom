@@ -21,6 +21,12 @@ session and subagent on one timeline, why the spend jumped, which habits of your
 setup cost the most with the change to make, and where your usage limits will be
 at their reset.
 
+> [!NOTE]
+> capcom is new and may still get things wrong. Its costs, causes, savings and
+> forecasts are estimates from the logs, not your bill: check anything you act on
+> against Claude Code's own `/usage`, and [open an
+> issue](https://github.com/brenocq/capcom/issues) when something looks off.
+
 ## Install
 
 ```
