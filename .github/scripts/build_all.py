@@ -10,7 +10,7 @@
    Chrome, once per GitHub theme: demo-light.webp, demo-dark.webp and a still
    of each, demo-light.png and demo-dark.png.
 4. social/build.py composes social.png, the 1280 x 640 social preview card, from
-   the banner and the dark still (uploaded by hand: Settings, Social preview).
+   the banner and its chart (uploaded by hand: Settings, Social preview).
 
 Everything lands in --out (default .github/assets/, gitignored); then
 .github/scripts/publish-assets.sh puts it on the `assets` branch. With --check,
@@ -87,9 +87,8 @@ def main() -> None:
                 ["--stills", str(stills)] if stills else []
             )
             record.main()
-        if (out / "demo-dark.png").exists():
-            social = load(HERE / "social" / "build.py", "social_build")
-            print(social.build(out))
+        social = load(HERE / "social" / "build.py", "social_build")
+        print(social.build(out, numbers))
 
         if stills:
             import page
