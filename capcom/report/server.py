@@ -123,9 +123,9 @@ class ApiCache:
         self.misses = 0
         self._watch: DataVersion | None = None
         # the last reply of each view (the key without its generation and date),
-        # kept after its generation ended: shown, marked stale, while the new one
-        # is computed
-        self._stale: OrderedDict[tuple[Any, ...], bytes] = OrderedDict()
+        # kept after its generation ended, with when it was computed: shown, marked
+        # stale, while the new one is computed
+        self._stale: OrderedDict[tuple[Any, ...], tuple[float, bytes]] = OrderedDict()
         self._stale_bytes = 0
 
     def watch(self, index_path: Path) -> DataVersion:
@@ -162,8 +162,16 @@ class ApiCache:
         with self._lock:
             if key in self._entries:
                 self._drop(key)
+            others = [k for k in self._entries if k[0] != key[0]]
+            if any(self._entries[k][0] > now for k in others):
+                # asked for before a reply of a newer generation was (a job that
+                # began before the index changed): already outdated, it only stands
+                # in for its view, and the newer generation's replies stay (a
+                # group switch is made from them, server.py REGROUP)
+                self._keep_stale(key[2:], now, body)
+                return
             # entries of an older generation are dead: drop them first
-            for old in [k for k in self._entries if k[0] != key[0]]:
+            for old in others:
                 self._retire(old)
             self._entries[key] = (now, body)
             self._bytes += len(body)
@@ -171,14 +179,20 @@ class ApiCache:
                 self._drop(next(iter(self._entries)))
 
     def stale(self, key: tuple[Any, ...]) -> bytes | None:
-        """The last reply of `key`'s view from an earlier generation or day, if kept."""
+        """The newest reply of `key`'s view from an earlier generation or day, if
+        kept: the one computed last, so a stand-in never shows older totals than
+        another one would."""
         with self._lock:
             view = key[2:]
+            best: tuple[float, bytes] | None = None
             # an entry of an older generation is retired only when a newer one is put
             for k in reversed(self._entries):
-                if k[2:] == view and k != key:
-                    return self._entries[k][1]
-            return self._stale.get(view)
+                if k[2:] == view and k != key and (best is None or self._entries[k][0] > best[0]):
+                    best = self._entries[k]
+            kept = self._stale.get(view)
+            if kept is not None and (best is None or kept[0] > best[0]):
+                best = kept
+            return best[1] if best is not None else None
 
     def _drop(self, key: tuple[Any, ...]) -> None:
         _, body = self._entries.pop(key)
@@ -187,15 +201,21 @@ class ApiCache:
     def _retire(self, key: tuple[Any, ...]) -> None:
         """Drop an entry, keeping its reply as its view's stale stand-in (bounded
         by half the cache's bytes)."""
-        body = self._entries[key][1]
+        stamp, body = self._entries[key]
         self._drop(key)
-        view = key[2:]
-        if view in self._stale:
-            self._stale_bytes -= len(self._stale.pop(view))
-        self._stale[view] = body
+        self._keep_stale(key[2:], stamp, body)
+
+    def _keep_stale(self, view: tuple[Any, ...], stamp: float, body: bytes) -> None:
+        """Keep `body` as `view`'s stale stand-in, unless the one kept is newer."""
+        kept = self._stale.get(view)
+        if kept is not None:
+            if kept[0] > stamp:
+                return
+            self._stale_bytes -= len(self._stale.pop(view)[1])
+        self._stale[view] = (stamp, body)
         self._stale_bytes += len(body)
         while self._stale_bytes > self.max_bytes // 2:
-            self._stale_bytes -= len(self._stale.popitem(last=False)[1])
+            self._stale_bytes -= len(self._stale.popitem(last=False)[1][1])
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -1083,18 +1103,20 @@ def _base(
 ) -> tuple[float, bytes] | None:
     """A cached reply that `name`'s reply for `query` can be made from (`REGROUP`):
     the same view split by another group, at the same state of the index (and of
-    the usage samples), with when it was computed."""
+    the usage samples), with when it was computed. The newest one, when several
+    are: the reply a page shows last, whose moment its switch keeps."""
     if name not in REGROUP or site.cache is None:
         return None
     key = cache_key(site, name, parts, query, now)
     others = [{}, *({**query, "group": g.value} for g in GroupBy)]
+    best: tuple[float, bytes] | None = None
     for other in others:
         okey = cache_key(site, name, parts, other, now)
         if okey != key:
             entry = site.cache.entry(okey, now.timestamp())
-            if entry is not None:
-                return entry
-    return None
+            if entry is not None and (best is None or entry[0] > best[0]):
+                best = entry
+    return best
 
 
 Endpoint = Callable[[api.Context, str, dict[str, str]], Any]

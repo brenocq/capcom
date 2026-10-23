@@ -124,3 +124,37 @@ console.log(JSON.stringify([at('/spend'), at('/'), at('/spend?days=30&group=mode
         ["overview", "checks?days=14"],
         ["sessions?days=14&sort=usd&limit=300"],
     ]
+
+
+def test_kept_replies_older_than_the_page_are_fetched_again() -> None:
+    # Overview's group switch: a split kept from before the index changed came in
+    # before the reply on screen, so it is dropped and asked again (the server makes
+    # it from the reply on screen); a split that came in after it is kept
+    script = """
+let n = 0;
+globalThis.fetch = async (url) => ({ status: 200, ok: true, json: async () => ({ url, n: ++n }) });
+const lib = await import('./lib.js');
+await lib.api('overview?group=project');
+await lib.api('overview?group=agent');
+await lib.api('checks?days=14');
+lib.outdate(new Set(['overview?group=project', 'checks?days=14']),
+  new Set(['overview?group=agent', 'checks?days=14']));
+const dropped = lib.apiState('overview?group=project') === null;
+const again = (await lib.api('overview?group=project')).n;
+lib.outdate(new Set(['overview?group=agent']), new Set(['overview?group=project']));
+const before = lib.apiState('overview?group=agent') === null;
+await lib.api('overview?group=model');
+lib.outdate(new Set(['overview?group=model']), new Set(['overview?group=project']));
+const after = lib.apiState('overview?group=model') !== null;
+const checks = lib.apiState('checks?days=14') !== null;
+console.log(JSON.stringify([dropped, checks, again, before, after]));
+"""
+    out = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=STATIC,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    assert json.loads(out.stdout) == [True, True, 4, True, True]

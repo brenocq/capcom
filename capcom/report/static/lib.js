@@ -169,6 +169,8 @@ export function spendPath(query) {
 const store = new Map();
 // the newest partial of a path whose poll was stopped, to start from next time
 const partials = new Map();
+// replies in so far: a kept reply's `seq` says which came in after which
+let arrivals = 0;
 // `onPartial(path, partial, progress, source)` sees each 202; `pass`, set by the
 // frame while it draws a page, takes the page's api() calls (router.js).
 export const apiHooks = { onPartial: null, pass: null };
@@ -190,7 +192,9 @@ export class ApiError extends Error {
 
 function load(path, low = false) {
   const ctrl = new AbortController();
-  const e = { path, ctrl, low, done: false, error: null, data: null, partial: partials.get(path) || null, progress: 0, source: null, waiters: new Set() };
+  // a partial kept from a stopped poll is from before: its source says so ('kept')
+  const kept = partials.get(path) || null;
+  const e = { path, ctrl, low, done: false, error: null, data: null, partial: kept, progress: 0, source: kept ? 'kept' : null, seq: 0, waiters: new Set() };
   const wake = () => { for (const w of e.waiters) w(); };
   e.promise = getProgressive(path, {
     signal: ctrl.signal,
@@ -202,7 +206,7 @@ function load(path, low = false) {
       if (apiHooks.onPartial) apiHooks.onPartial(path, partial, progress, source);
     },
   }).then((data) => {
-    Object.assign(e, { done: true, data, progress: 1 });
+    Object.assign(e, { done: true, data, progress: 1, seq: ++arrivals });
     partials.delete(path);
     wake();
     return data;
@@ -274,9 +278,27 @@ export async function renew(paths) {
     const old = store.get(path);
     if (old && !old.done) return; // a newer load started meanwhile: it wins
     const data = fresh[i];
-    store.set(path, { path, ctrl: new AbortController(), low: false, done: true, error: null, data, partial: null, progress: 1, source: null, waiters: new Set(), promise: Promise.resolve(data) });
+    store.set(path, { path, ctrl: new AbortController(), low: false, done: true, error: null, data, partial: null, progress: 1, source: null, seq: ++arrivals, waiters: new Set(), promise: Promise.resolve(data) });
   });
   return true;
+}
+
+// Drop the kept replies of `paths` that came in before the newest of `shown` (the
+// paths whose replies are on screen), so the next draw fetches them again instead
+// of showing them: a reply kept from before the data changed would show older
+// totals than the page already does (Overview's group switch, from a split loaded
+// before the index changed). Asked again, the server answers from its cache, or
+// makes the reply from the one on screen (server.py REGROUP), at the same moment.
+export function outdate(paths, shown) {
+  let newest = 0;
+  for (const path of shown) {
+    const e = store.get(path);
+    if (e && e.done) newest = Math.max(newest, e.seq);
+  }
+  for (const path of paths) {
+    const e = store.get(path);
+    if (e && e.done && !shown.has(path) && e.seq < newest) store.delete(path);
+  }
 }
 
 // Start the server on `path` ahead of a click (a hover on a link to its page):

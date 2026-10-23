@@ -6,7 +6,7 @@
 // content dimmed (same page) or skeleton cards (another page), a thin bar at the
 // top of each loading card, and a status line ("Loading 30 days… 62 %").
 
-import { h, apiHooks, apiState, stopLoads, prefetch, preload, renew, errorBox, overviewPath, spendPath } from './lib.js';
+import { h, apiHooks, apiState, stopLoads, prefetch, preload, renew, outdate, errorBox, overviewPath, spendPath } from './lib.js';
 import { swapIn } from './morph.js';
 
 const GRACE_MS = 80; // a page drawn within this needs no loading state
@@ -49,6 +49,16 @@ const mark = (name) => { try { performance.mark('capcom:' + name); } catch (e) {
 
 // ------------------------------------------------------------------ one draw
 
+// The partial reply of a load the view may draw. A view that replaced the same
+// page's content (a group or range switch, `v.hold`) draws none from before (the
+// server's stand-in from an earlier index, or one kept from a stopped poll): it
+// can be older than the content on screen, whose totals would then go back. The
+// old content stays, dimmed, until a newer reply is in.
+const BEFORE = new Set(['stale', 'kept']);
+function usable(v, e) {
+  return e.partial && !(v.hold && BEFORE.has(e.source)) ? e.partial : null;
+}
+
 // The pass's hook into api(): it records each path the page read and how far it
 // had come, and hands the page the first data there is.
 function makePass(v, node) {
@@ -58,14 +68,16 @@ function makePass(v, node) {
     if (e.done) { p.used.set(path, 'final'); return e.promise; }
     if (e.error) { p.used.set(path, 'error'); return e.promise; }
     begin();
-    if (e.partial) { p.used.set(path, e.partial); return Promise.resolve(e.partial); }
+    const part = usable(v, e);
+    if (part) { p.used.set(path, part); return Promise.resolve(part); }
     p.used.set(path, null);
     if (view === v) waiting(v, p);
     return new Promise((resolve, reject) => {
       const w = () => {
-        if (!(e.done || e.error || e.partial)) return;
+        const got = usable(v, e);
+        if (!(e.done || e.error || got)) return;
         e.waiters.delete(w);
-        if (e.error) { p.used.set(path, 'error'); reject(e.error); } else if (e.done) { p.used.set(path, 'final'); resolve(e.data); } else { p.used.set(path, e.partial); resolve(e.partial); }
+        if (e.error) { p.used.set(path, 'error'); reject(e.error); } else if (e.done) { p.used.set(path, 'final'); resolve(e.data); } else { p.used.set(path, got); resolve(got); }
       };
       e.waiters.add(w);
     });
@@ -177,7 +189,8 @@ function tick(v) {
     if (st.done) { if (was !== 'final' && !v.running) changed = true; continue; }
     n++;
     sum += st.progress;
-    if (!v.running && st.partial && st.partial !== was) changed = true;
+    const part = usable(v, st);
+    if (!v.running && part && part !== was) changed = true;
   }
   const loading = n > 0;
   const live = document.getElementById('main');
@@ -267,17 +280,22 @@ export function render({ scroll = null, focus = false } = {}) {
   const prev = view;
   const changed = !prev || prev.key !== key;
   if (prev) stop(prev);
-  const v = { key, r, id: ++seq, used: new Map(), mark: null, shown: false, running: false, dirty: false, last: 0, timer: 0, pending: 0, scroll, focus };
+  const live = document.getElementById('main');
+  const drawn = live && live.childElementCount > 0 && !live.hasAttribute('data-skeleton');
+  // the same page with other settings (only the query changed), over its content
+  // on screen: its totals never go back (see usable() and lib.js outdate)
+  const hold = changed && !!prev && prev.path === location.pathname && prev.shown && drawn;
+  const v = { key, path: location.pathname, r, id: ++seq, used: new Map(), mark: null, shown: false, running: false, dirty: false, last: 0, timer: 0, pending: 0, scroll, focus, hold };
   view = v;
   if (changed) {
     // the old view's loads stop, except the ones this page asks for first
     const first = new Set(apiFor(new URL(location.href)));
+    if (hold) outdate(first, new Set(prev.used.keys()));
     stopLoads(first);
     for (const path of first) preload(path);
   }
   if (changed) {
     const samePage = prev && prev.r.name === r.name;
-    const live = document.getElementById('main');
     if (!live.childElementCount) placeholder(v, false);
     else v.grace = setTimeout(() => placeholder(v, samePage), GRACE_MS);
   }
