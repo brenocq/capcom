@@ -269,12 +269,15 @@ export function limitChart(opts) {
 
 // ------------------------------------------------------------------ overview cards
 
-export function limitCard(label, w, lim) {
+// `account` (optional): the account the card is for, named under its label.
+export function limitCard(label, w, lim, account) {
   const head = (pct, big, small, warn) => h('div', { style: 'display:flex;align-items:center;gap:16px' }, ring(pct, warn),
-    h('div', { style: 'display:flex;flex-direction:column;gap:2px' }, h('span.label', { text: label }),
+    h('div', { style: 'display:flex;flex-direction:column;gap:2px;min-width:0' }, h('span.label', { text: label }),
+      account ? h('span.note.acct', { text: account.label + (account.current ? ' · current' : ''), title: account.label }) : null,
       h('span.big', { style: big ? null : 'color:var(--muted)' }, big || 'No data yet', small ? h('small', { text: ' ' + small }) : null)));
   if (!lim || !lim.available || !w || !w.reading) {
-    return h('section.card', null, head(0, null, null, false), notRecording(lim || {}));
+    const none = lim && lim.recording ? empty(null, account ? 'No reading of this window for this account yet.' : 'No reading of this window yet.') : notRecording(lim || {});
+    return h('section.card', null, head(0, null, null, false), none);
   }
   const fc = w.forecast;
   const weekly = isWeekly(w);
@@ -294,6 +297,101 @@ export function limitCard(label, w, lim) {
   if (!lim.recording) card.append(notRecording(lim));
   card.append(h('a.note', { href: '/limits', text: 'Every window, and what spent it →' }));
   return card;
+}
+
+// ------------------------------------------------------------------ accounts
+
+// An account's key in the remembered choice: its email, or its id when there is none.
+export const accountKey = (a) => a.email || a.id;
+const STORE = 'capcom.limits.account';
+
+// The account Overview and Limits show: 'all', or one of `lim.accounts`, as last
+// picked in this browser (never in the URL: it holds an email); 'all' when nothing
+// is remembered, storage is off or the account is gone. A single account is always
+// itself.
+export function chosenAccount(lim) {
+  const list = lim.accounts || [];
+  if (list.length < 2) return list[0] || null;
+  let key = null;
+  try { key = localStorage.getItem(STORE); } catch (e) { /* storage off */ }
+  return list.find((a) => accountKey(a) === key || a.id === key) || 'all';
+}
+
+// Draw the page again for a new choice: the same URL, so the router redraws from
+// the replies it has (app.js renders on `capcom-route`).
+const redraw = () => window.dispatchEvent(new Event('capcom-route'));
+// a choice made in another tab shows here too
+if (typeof window !== 'undefined' && window.addEventListener) {
+  window.addEventListener('storage', (e) => { if (e.key === STORE) redraw(); });
+}
+
+export function accountTabs(lim, chosen) {
+  const list = lim.accounts || [];
+  if (list.length < 2) return null;
+  const cur = chosen === 'all' ? 'all' : accountKey(chosen);
+  const el = seg('Account', [['all', 'All accounts'], ...list.map((a) => [accountKey(a), a.label])], cur, (v) => {
+    try { localStorage.setItem(STORE, v); } catch (e) { /* storage off: not remembered */ }
+    redraw();
+  });
+  el.classList.add('acct');
+  for (const b of el.querySelectorAll('button')) b.title = b.textContent;
+  return el;
+}
+
+// Dollars of API-equivalent spend left before every account's weekly limit, from
+// each account's own fit, and when all of it is spent at the recent pace.
+export function combinedCard(lim) {
+  const c = lim.combined;
+  if (!c) return null;
+  const labels = new Map((lim.accounts || []).map((a) => [a.id, a.label]));
+  const card = h('section.card', { style: 'grid-column:1/-1' },
+    h('div', { style: 'display:flex;flex-direction:column;gap:2px' },
+      h('span.label', { text: 'All accounts, before their weekly limits' }),
+      h('span.big', { style: c.usd_left === null ? 'color:var(--muted)' : null }, c.usd_left === null ? 'No fit yet' : usd(c.usd_left),
+        c.usd_left === null ? null : h('small', { text: ' of API-equivalent spend left' }))));
+  const max = Math.max(1e-9, ...c.accounts.map((a) => a.usd_left || 0));
+  const rows = h('div.blist');
+  for (const a of c.accounts) {
+    const pct = a.percent === null ? 'no reading' : `${pctText(a.percent)} used`;
+    const per = a.usd_per_percent === null ? 'no fit yet' : `${usd(a.usd_per_percent)} per 1%`;
+    const reset = a.resets_at ? ` · resets ${when(a.resets_at, true)}` : '';
+    rows.append(h('div.bitem', null,
+      h('div.top', null, h('span', { text: a.label }), h('span.mono', { text: a.usd_left === null ? '–' : usd(a.usd_left) })),
+      h('div.stackbar', { 'aria-hidden': 'true' }, h('span', { style: `width:${((a.usd_left || 0) / max * 100).toFixed(2)}%;background:var(--accent)` })),
+      h('span.note', { text: `${pct} · ${per}${reset}` })));
+  }
+  card.append(rows);
+  let line = null;
+  if (c.runs_out_at) {
+    line = `At the pace of the last ${c.pace_hours} hours (${usd(c.pace_usd_per_hour)} an hour), all of it is spent around ${when(c.runs_out_at, true)}.`;
+    if (c.reset_first) line += ` Before then, ${labels.get(c.reset_first.id) || 'one account'}'s week resets (${when(c.reset_first.resets_at, true)}).`;
+  } else if (c.usd_left === 0) {
+    line = 'Every account with a fit is at its weekly limit.';
+  } else if (c.usd_left !== null) {
+    line = `Nothing spent in the last ${c.pace_hours} hours, so no run-out time.`;
+  }
+  if (line) card.append(h('span.note', { text: line }));
+  const missing = c.accounts.filter((a) => a.usd_left === null).map((a) => a.label);
+  if (missing.length) card.append(h('span.note', { text: `Not counted: ${missing.join(', ')} (no fit of its weekly limit yet; it needs two weekly readings with spend between them).` }));
+  const earlier = c.accounts.some((a) => a.id === 'unknown') ? ' "Earlier account": readings from before capcom recorded accounts, on no known account\'s weekly cycle.' : '';
+  card.append(h('span.note', { text: `Each account's dollars left: (100% − its weekly percentage) × its own dollars per 1%.${earlier}` }));
+  return card;
+}
+
+// The Overview's limit cards: the current account's two (or the chosen one's), or
+// with "All accounts" every account's two side by side and the combined card.
+export function limitCards(lim) {
+  const list = lim.accounts || [];
+  const chosen = chosenAccount(lim);
+  const wins = (a) => (a && a.windows) || lim.windows || {};
+  const pair = (a, named) => [limitCard('5-hour window', wins(a).five_hour, lim, named ? a : null), limitCard('Weekly limit', wins(a).seven_day, lim, named ? a : null)];
+  const out = [];
+  const tabs = accountTabs(lim, chosen);
+  if (tabs) out.push(h('div.split', null, h('span.label', { text: 'Limits by account' }), tabs));
+  const named = list.length > 1 || (list[0] && list[0].email);
+  const cards = chosen === 'all' ? [...list.flatMap((a) => pair(a, true)), combinedCard(lim)] : pair(chosen, named);
+  out.push(h('div.grid', { style: '--min:440px' }, cards));
+  return out;
 }
 
 // ------------------------------------------------------------------ page
@@ -359,7 +457,8 @@ function windowSection(w, now, days, since) {
       }));
       rows.append(h('div.bitem', null,
         h('div.top', null, h('span', { text: `${span} · peak ${pctText(sg.peak)}${sg.hit_limit ? ' · limit hit' : ''}` }), h('span.mono', { text: usd(sg.usd) })),
-        segBar(parts, { aria: `${span}: ${usd(sg.usd)}` })));
+        segBar(parts, { aria: `${span}: ${usd(sg.usd)}` }),
+        sg.inferred_usd >= 0.005 ? h('span.note', { text: `Of which ${usd(sg.inferred_usd)} from sessions with no reading, put on this account by time (inferred).` }) : null));
       for (const p of sg.by_project) table.push([span, p.project, usd(p.usd), p.percent === null ? '' : '≈' + pctText(p.percent, 1)]);
     }
     card.append(h('h3', { text: 'What spent each window' }),
@@ -396,9 +495,20 @@ export async function renderLimits(main, r) {
     return;
   }
   if (!d.recording) main.append(h('section.card', null, notRecording(d)));
-  for (const key of ['five_hour', 'seven_day']) {
-    const w = d.windows[key];
-    if (w) main.append(windowSection(w, now, days, since ? since.getTime() : null));
+  const chosen = chosenAccount(d);
+  const tabs = accountTabs(d, chosen);
+  if (tabs) main.append(h('div.split', null, h('span.label', { text: 'Account' }), tabs));
+  const sections = (wins) => ['five_hour', 'seven_day'].filter((k) => wins[k]).map((k) => windowSection(wins[k], now, days, since ? since.getTime() : null));
+  if (chosen === 'all') {
+    const comb = combinedCard(d);
+    if (comb) main.append(h('div.grid', null, comb));
+    for (const a of d.accounts) {
+      main.append(h('div.split', null, h('h2.small.acct', { text: a.label }), h('span.note', { text: a.current ? 'current account' : `${a.samples} samples` })),
+        h('div.grid', { style: '--min:520px' }, sections(a.windows)));
+    }
+  } else {
+    if (chosen && chosen.email && (d.accounts || []).length > 1) main.append(h('h2.small.acct', { text: chosen.label }));
+    for (const el of sections((chosen && chosen.windows) || d.windows)) main.append(el);
   }
   main.append(h('p.note', { text: 'Percentages come from Claude Code\'s status line. Usage from other machines or claude.ai counts toward the limits but is not in these logs, so the fit treats it as error.' }));
 }

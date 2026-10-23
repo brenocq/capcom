@@ -718,6 +718,7 @@ class LimitSample:
     resets_at: datetime | None = None
     session_id: str | None = None
     source: str = "statusline"  # "statusline" or "rate_limit_error" (a seed from the logs)
+    account: str | None = None  # the account's oauthAccount.accountUuid; None: not labeled
 
 
 # --------------------------------------------------------------------------- did it work?

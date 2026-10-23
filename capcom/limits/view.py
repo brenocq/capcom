@@ -10,11 +10,16 @@ from pathlib import Path
 from typing import Any
 
 from capcom.cost.top import project_label
+from capcom.limits.accounts import (
+    AccountView,
+    Combined,
+    analyze_accounts,
+    load_known,
+)
 from capcom.limits.model import (
     NOT_ENOUGH,
     Forecast,
     WindowView,
-    analyze_all,
     load_samples,
     samples_path,
 )
@@ -135,6 +140,8 @@ def window_json(
                     "points": [[_ms(t), p] for t, p in seg.points()],
                     "reset": seg.resets_at is not None and seg.resets_at <= now,
                     "usd": None if sv is None else _r(sv.usd, 4),
+                    # of usd, from sessions no reading names, put on the account by time
+                    "inferred_usd": None if sv is None else _r(sv.inferred_usd, 4),
                     "by_project": None if sv is None else _projects(sv.by_project),
                 }
             )
@@ -174,9 +181,48 @@ def limits_json(
         base["windows"] = {w.value: None for w in LimitWindow}
         return base
     since = now - timedelta(days=days) if days else None
-    views = analyze_all(index, table, samples, now, label)
-    base["windows"] = {w.value: window_json(views[w], now, tz, since, full) for w in LimitWindow}
+    accounts, comb = analyze_accounts(index, table, samples, load_known(state_dir), now, label)
+    out = [
+        {
+            "id": a.account.id,
+            "email": a.account.email,
+            "label": a.account.label,
+            "current": a.account.current,
+            "samples": len(a.samples),
+            "windows": {
+                w.value: window_json(a.views[w], now, tz, since, full) for w in LimitWindow
+            },
+        }
+        for a in accounts
+    ]
+    base["accounts"] = out
+    # the current account's windows, as before accounts were recorded
+    base["windows"] = out[0]["windows"]
+    base["combined"] = combined_json(comb, tz) if len(accounts) > 1 else None
     return base
+
+
+def combined_json(c: Combined, tz: tzinfo | None) -> dict[str, Any]:
+    return {
+        "usd_left": _r(c.usd_left, 2),
+        "pace_usd_per_hour": _r(c.pace_usd_per_hour, 4),
+        "pace_hours": 24,
+        "runs_out_at": _iso(c.runs_out_at, tz),
+        "reset_first": None
+        if c.reset_first is None
+        else {"id": c.reset_first.account.id, "resets_at": _iso(c.reset_first.resets_at, tz)},
+        "accounts": [
+            {
+                "id": s.account.id,
+                "label": s.account.label,
+                "percent": _r(s.percent),
+                "usd_per_percent": _r(s.usd_per_percent, 4),
+                "usd_left": _r(s.usd_left, 2),
+                "resets_at": _iso(s.resets_at, tz),
+            }
+            for s in c.shares
+        ],
+    }
 
 
 # --------------------------------------------------------------------------- text
@@ -230,8 +276,63 @@ def runs_out_text(fc: Forecast, when: Callable[[datetime], str]) -> str | None:
     return None
 
 
+def _money(x: float) -> str:
+    return f"${x:,.0f}" if x >= 100 else f"${x:,.2f}"
+
+
+def format_combined(c: Combined) -> str:
+    """The combined line of `capcom limits`: dollars left before every account's
+    weekly limit, and when all of it is spent at the recent pace."""
+    parts = [f"{s.account.label} {_money(s.usd_left)}" for s in c.shares if s.usd_left is not None]
+    if c.usd_left is None:
+        return "All accounts: no fit of the weekly limit yet, so no dollars left to add up."
+    out = (
+        f"All accounts: about {_money(c.usd_left)} of API-equivalent spend left before "
+        f"the weekly limits ({', '.join(parts)})"
+    )
+    if c.missing:
+        out += f"; no fit yet for {', '.join(a.label for a in c.missing)}"
+    if c.usd_left <= 0:
+        out += ". Every account with a fit is at its weekly limit"
+    elif c.runs_out_at is not None:
+        out += (
+            f". At the pace of the last 24 hours ({_money(c.pace_usd_per_hour)} an hour) "
+            f"all of it is spent around {_local(c.runs_out_at)}"
+        )
+        if c.reset_first is not None:
+            out += (
+                f", but {c.reset_first.account.label}'s week resets first, "
+                f"{_local(c.reset_first.resets_at)}"
+            )
+    return out + "."
+
+
+def format_accounts(
+    accounts: Sequence[AccountView],
+    comb: Combined | None,
+    samples: Sequence[LimitSample],
+    now: datetime,
+) -> str:
+    """`capcom limits` for each account (with a heading when there are several) and
+    the combined line."""
+    if len(accounts) == 1:
+        return format_views(accounts[0].views, samples, now)
+    blocks: list[str] = []
+    for a in accounts:
+        head = a.account.label + (" (current)" if a.account.current else "")
+        blocks.append(f"== {head}\n" + format_views(a.views, a.samples, now, hint=False))
+    if comb is not None:
+        blocks.append(format_combined(comb))
+    if not any(s.source == "statusline" for s in samples):
+        blocks.append(NOT_RECORDING)
+    return "\n\n".join(blocks)
+
+
 def format_views(
-    views: Mapping[LimitWindow, WindowView], samples: Sequence[LimitSample], now: datetime
+    views: Mapping[LimitWindow, WindowView],
+    samples: Sequence[LimitSample],
+    now: datetime,
+    hint: bool = True,
 ) -> str:
     lines: list[str] = []
     for w in LimitWindow:
@@ -282,7 +383,12 @@ def format_views(
                 parts.append(f"{k} ${u:,.2f}" + ("" if p is None else f" ({p:.1f}%)"))
             if parts:
                 lines.append("  this window by project: " + ", ".join(parts))
+            if sv.inferred_usd >= 0.005:
+                lines.append(
+                    f"  of which {_money(sv.inferred_usd)} from sessions with no reading, "
+                    "put on this account by time"
+                )
         lines.append("")
-    if not any(s.source == "statusline" for s in samples):
+    if hint and not any(s.source == "statusline" for s in samples):
         lines.append(NOT_RECORDING)
     return "\n".join(lines).rstrip()

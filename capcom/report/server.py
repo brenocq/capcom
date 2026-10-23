@@ -57,6 +57,7 @@ from capcom.config import Config
 from capcom.cost.prices import load_prices
 from capcom.limits.cli import adopt_samples
 from capcom.limits.model import samples_path
+from capcom.limits.record import ACCOUNTS_FILE, SESSIONS_FILE
 from capcom.report import api, didit
 from capcom.report.analysis import Analysis, Unavailable, default_analysis
 from capcom.report.jobs import Job, Jobs, Result, computing_body
@@ -297,14 +298,20 @@ def _changes_stamp(site: Site) -> tuple[int, int]:
 
 
 def _limits_stamp(state_dir: Path | None) -> tuple[int, int]:
-    """Size and modification time of the usage samples."""
+    """Size and modification time of the usage samples, plus those of the accounts
+    the recorder keeps beside them (a switch changes what the cards show)."""
     if state_dir is None:
         return (-1, -1)
     try:
         st = os.stat(samples_path(state_dir))
     except OSError:
         return (-1, -1)
-    return (st.st_size, st.st_mtime_ns)
+    size, mtime = st.st_size, st.st_mtime_ns
+    for name in (ACCOUNTS_FILE, SESSIONS_FILE):
+        with contextlib.suppress(OSError):
+            extra = os.stat(state_dir / name)
+            size, mtime = size + extra.st_size, max(mtime, extra.st_mtime_ns)
+    return (size, mtime)
 
 
 # the endpoints whose replies read the usage samples (their limits cards)

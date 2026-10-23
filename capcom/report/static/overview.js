@@ -7,7 +7,7 @@ import {
 } from './lib.js';
 import { bandChart, sparkline } from './charts.js';
 import { pendingBlock } from './sessions.js';
-import { limitCard } from './limits.js';
+import { limitCards } from './limits.js';
 import { withColors, timelineMissing, spikeMarks, spikeList, pickSpikes } from './spend.js';
 
 function greeting(d) {
@@ -31,8 +31,7 @@ export async function renderOverview(main, r) {
   if (story) main.append(story);
 
   const lim = d.limits || {};
-  const wins = lim.windows || {};
-  main.append(h('div.grid', { style: '--min:440px' }, limitCard('5-hour window', wins.five_hour, lim), limitCard('Weekly limit', wins.seven_day, lim)));
+  main.append(...limitCards(lim));
 
   // KPI cards
   // today so far against the previous days with history up to the same time of day

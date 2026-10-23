@@ -251,19 +251,68 @@ def build_index(path: Path, now: datetime) -> None:
     ix.close()
 
 
+ACCOUNT_A = "aaaaaaaa-0000-4000-8000-00000000000a"
+ACCOUNT_B = "bbbbbbbb-0000-4000-8000-00000000000b"
+EMAILS = {
+    ACCOUNT_A: "a.rather.long.address.for.overflow.checks@example-company.test",
+    ACCOUNT_B: "second@example.test",
+}
+
+
 def write_limits(state_dir: Path, now: datetime) -> None:
-    """Three days of status-line readings of both windows, rising between resets."""
+    """Three days of status-line readings of both windows, rising between resets, on
+    account A; for the last day also account B (its own weekly reset), the current
+    one, with a session of A still reporting A's readings."""
     samples = []
-    t = now - timedelta(days=3)
+    start = now - timedelta(days=3)
+    t = start
     while t <= now:
-        hours = (t - (now - timedelta(days=3))).total_seconds() / 3600
-        five_reset = now - timedelta(days=3) + timedelta(hours=5 * (int(hours // 5) + 1))
+        hours = (t - start).total_seconds() / 3600
+        five_reset = start + timedelta(hours=5 * (int(hours // 5) + 1))
         five = min(99.0, 3 + (hours % 5) * 9)
         week = min(99.0, 10 + hours * 0.8)
-        samples.append(LimitSample(t, LimitWindow.FIVE_HOUR, five, five_reset, "s001"))
-        samples.append(LimitSample(t, LimitWindow.SEVEN_DAY, week, now + timedelta(days=4), "s001"))
+        a_now = t < now - timedelta(days=1)
+        if a_now or int(hours * 3) % 18 == 0:  # A's old session, every 6 hours
+            samples.append(
+                LimitSample(t, LimitWindow.FIVE_HOUR, five, five_reset, "s001", account=ACCOUNT_A)
+            )
+            samples.append(
+                LimitSample(
+                    t,
+                    LimitWindow.SEVEN_DAY,
+                    week,
+                    now + timedelta(days=4),
+                    "s001",
+                    account=ACCOUNT_A,
+                )
+            )
+        if not a_now:
+            b = hours - 48
+            samples.append(
+                LimitSample(
+                    t,
+                    LimitWindow.FIVE_HOUR,
+                    min(99.0, 2 + (hours % 5) * 7),
+                    five_reset,
+                    "s002",
+                    account=ACCOUNT_B,
+                )
+            )
+            samples.append(
+                LimitSample(
+                    t,
+                    LimitWindow.SEVEN_DAY,
+                    5 + b * 1.2,
+                    now + timedelta(days=2, hours=5),
+                    "s002",
+                    account=ACCOUNT_B,
+                )
+            )
         t += timedelta(minutes=20)
     append_samples(state_dir, samples)
+    (state_dir / "limits.accounts.json").write_text(
+        json.dumps({"current": ACCOUNT_B, "emails": EMAILS})
+    )
 
 
 def findings(index: Index, table: PriceTable, since: datetime, until: datetime) -> list[Finding]:

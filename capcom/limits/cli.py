@@ -10,15 +10,15 @@ from typing import TextIO
 
 from capcom.config import Config
 from capcom.cost.prices import load_prices
+from capcom.limits.accounts import analyze_accounts, find_account, load_known
 from capcom.limits.model import (
-    analyze_all,
     append_samples,
     load_samples,
     samples_path,
     seed_samples,
 )
 from capcom.limits.record import adopt
-from capcom.limits.view import NOT_RECORDING, format_views
+from capcom.limits.view import NOT_RECORDING, format_accounts, format_views
 from capcom.types import Index
 
 
@@ -51,6 +51,7 @@ def run_limits(
     out: TextIO | None = None,
     now: datetime | None = None,
     index: Index | None = None,
+    account: str | None = None,
 ) -> int:
     out = out or sys.stdout
     now = now or datetime.now(UTC)
@@ -83,7 +84,23 @@ def run_limits(
     from capcom.timeline.groups import ProjectNames
 
     names = ProjectNames.build(index.sessions(), config.openclaw_root)
-    views = analyze_all(index, load_prices(), samples, now, lambda d: names.label(names.key(d)))
+    accounts, comb = analyze_accounts(
+        index,
+        load_prices(),
+        samples,
+        load_known(config.state_dir),
+        now,
+        lambda d: names.label(names.key(d)),
+    )
     print(f"capcom limits ({len(samples)} samples, {samples_path(config.state_dir)})\n", file=out)
-    print(format_views(views, samples, now), file=out)
+    if account is not None:
+        one = find_account(accounts, account)
+        if one is None:
+            known = ", ".join(a.account.label for a in accounts)
+            print(f"capcom: no account {account!r} in the samples (there are: {known})", file=out)
+            return 1
+        print(f"== {one.account.label}", file=out)
+        print(format_views(one.views, one.samples, now), file=out)
+        return 0
+    print(format_accounts(accounts, comb, samples, now), file=out)
     return 0
