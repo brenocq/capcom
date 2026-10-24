@@ -274,7 +274,7 @@ def test_thin_keeps_maxima_and_spikes() -> None:
     usd_col[1234] = 50.0
     context[777] = 900_000
     kept = api.thin(threads, usd_col, context, {4321})
-    assert len(kept) <= 4_000 + 5 * 4 + 1
+    assert len(kept) <= api.MAX_POINTS + 5 * 4 + 1
     assert kept == sorted(set(kept))
     assert {1234, 777, 4321, 0, n - 1} <= set(kept)
     assert api.thin(threads[:50], usd_col[:50], context[:50], set()) == list(range(50))

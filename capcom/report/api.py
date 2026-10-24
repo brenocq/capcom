@@ -75,7 +75,7 @@ TOP_MEMBERS = 6  # series beyond these are folded into "other"
 SPEND_DAYS = (1, 7, 14, 30, 90)
 OTHER = "(other)"
 MAX_MARKERS = 12  # spike markers on a cumulative chart: the largest by excess
-MAX_POINTS = 4000  # per-request columns of a session above this are thinned
+MAX_POINTS = 8000  # per-request columns of a session above this are thinned
 MAX_SESSION_SPIKES = 8  # spikes listed on a session's page: the largest by excess
 
 # Cumulative-chart step per window length, so a chart has a few hundred points.

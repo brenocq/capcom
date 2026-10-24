@@ -227,9 +227,16 @@ function detail(it) {
       : h('p.note', { text: causes.length ? 'No log record was cited.' : it.explanations ? 'No cause was matched.' : 'Causes are matched from milestone 3.' }));
   const fix = h('div.fix', null, h('h3', { text: 'What to change' }),
     spikeAdvice(causes).map((a) => h('p', { text: a })),
-    it.session_id ? h('a.link', { href: sessionHref(it.session_id), text: 'Open the session' }) : null);
+    it.session_id ? h('a.link', { href: sessionAt(it), text: 'Open the session' }) : null);
   box.append(h('div.row-wrap', { style: 'gap:24px' }, facts, fix));
   return box;
+}
+
+// The spike's session, its timeline opened on the spike (`at` to `to`, shaded there)
+function sessionAt(it) {
+  const iso = (t) => new Date(t).toISOString();
+  const q = new URLSearchParams({ at: iso(it.start), to: iso(it.end || it.start) });
+  return sessionHref(it.session_id) + '?' + q;
 }
 
 // Bars around the spike: the usual pace in gray, the extra above it in the accent.

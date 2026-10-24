@@ -405,14 +405,14 @@ def test_thin_is_capped_whatever_the_threads() -> None:
     context = [(i * 104729 % 50_000) for i in range(n)]
     usd_col[54_321] = 99.0
     kept = api.thin(threads, usd_col, context, set())
-    assert len(kept) <= 4_000 + 10
+    assert len(kept) <= api.MAX_POINTS + 10
     assert kept == sorted(set(kept)) and {0, n - 1, 54_321} <= set(kept)
     main = [i for i in kept if threads[i] == -1]
     assert len(main) > 800  # the main thread keeps its own runs
     # many spike requests are thinned too, with a finer run
     spikes = set(range(0, n, 3))
     kept = api.thin(threads, usd_col, context, spikes)
-    assert len(kept) <= 4_000 + 10
+    assert len(kept) <= api.MAX_POINTS + 10
     assert len(spikes & set(kept)) >= 1_500
 
 

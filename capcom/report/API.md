@@ -386,8 +386,8 @@ counts every matching session, temporary folders included (`temporary` of them).
 `capcom.explain` is not available); null when `capcom.timeline` is not.
 
 `requests.agent` is an index into `agents`, or -1 for the main thread. A session of
-more than 4,000 requests has its columns thinned for the charts (`thinned` says how
-many were kept), to about 4,000 points whatever the number of threads: the spike
+more than 8,000 requests has its columns thinned for the charts (`thinned` says how
+many were kept), to about 8,000 points whatever the number of threads: the spike
 requests (`find_spikes` on the session) get up to half of them, all when they fit,
 else cut into runs that each keep their costliest request and their largest and
 smallest context; the other requests get the rest the same way, in the shortest runs
