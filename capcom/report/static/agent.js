@@ -438,7 +438,7 @@ function timeCard(d, working) {
       h('td.num', { text: took(k.seconds) }),
       h('td.num', { text: pct(k.seconds / total) }),
       h('td.num', { text: k.key === 'think' ? plural(k.steps, 'request') : k.steps.toLocaleString('en-US') }),
-      h('td.num', { text: usd(k.usd) })))));
+      k.moved ? h('td.num', { text: '–', title: MOVED_NOTE }) : h('td.num', { text: usd(k.usd) })))));
   return h('section.card.agcard.agtime', null, h('h2', { text: 'Where the time went' }), bar, h('div.scroll', null, table),
     timeSentence(d, rows, working));
 }

@@ -792,6 +792,7 @@ def timeline_json(
                 "seconds": round(sum(st.seconds for st in own), 1),
                 "steps": len(own),
                 "usd": round(sum(st.usd for st in own), 6),
+                "moved": any(st.moved for st in own) and sum(st.usd for st in own) < 0.005,
             }
         )
     return {

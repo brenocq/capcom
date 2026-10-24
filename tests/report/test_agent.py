@@ -121,6 +121,8 @@ def test_steps_and_costs_of_a_subagent_without_a_todo_list(config: Config) -> No
     assert all(p["guessed"] for p in d["phases"])
     assert any("a.py" in n for n in names) and any("pytest" in n for n in names)
     kinds_row = {k["key"]: k for k in d["kinds"]}
+    # the thinking row would read $0.00 (its requests are costed on tool steps): a dash
+    assert kinds_row["think"]["moved"] is True and kinds_row["test"]["moved"] is False
     assert kinds_row["test"]["seconds"] == pytest.approx(360)
 
 
