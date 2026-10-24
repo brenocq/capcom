@@ -9,6 +9,10 @@ import {
 } from './lib.js';
 import { niceTicks, activeAxis, thinned, bandChart } from './charts.js';
 import { timelineMissing } from './spend.js';
+import { modelName } from './agent.js';
+
+const agentHref = (sid, aid) => `/session/${encodeURIComponent(sid)}/agent/${encodeURIComponent(aid)}`;
+const OPEN_NOTE = 'Click to open its timeline';
 
 // agent types whose lanes are open, kept across redraws (a theme switch, another session)
 const expandedTypes = new Set();
@@ -61,6 +65,7 @@ export async function renderSession(main, r) {
     h('a.link', { href: '/checks', text: 'See the checks' }));
   main.append(h('div.row-wrap', { style: 'align-items:flex-start' }, why, helped));
 
+  if (d.agents.length || d.main) main.append(agentLives(d));
   main.append(agentsTable(d));
 
   if (d.calibration) main.append(calFold(d.calibration, t));
@@ -441,12 +446,14 @@ function unfolded(d, r) {
 
   // lanes: main thread, then one lane per agent type
   const lanes = [];
+  const sid = d.session.session_id;
   const gapMarks = x.gaps.map((g) => h('div.gapmark', { style: `left:${pc(x(g.start))};width:${pc(x(g.end) - x(g.start))};border-left:0;background:var(--card)` }));
   const span = (a) => `left:${pc(x(a.first))};width:max(3px, ${pc(Math.max(x(a.last) - x(a.first), 0))})`;
   if (d.main) {
     lanes.push(h('div.lab', null, h('b', { text: 'Main thread' })),
-      h('div.lane', { style: 'background:transparent' }, tipOn(h('span', { style: `${span(d.main)};background:${entityColor('main', 'agent')}` }),
-        'Main thread', [{ label: 'Requests', value: String(d.main.requests) }, { label: 'Cost', value: usd(d.main.usd) }]), gapMarks));
+      h('div.lane', { style: 'background:transparent' }, tipOn(h('a.lanebar', { 'data-mark': '', href: agentHref(sid, 'main'), style: `${span(d.main)};background:${entityColor('main', 'agent')}` }),
+        'Main thread', [{ label: 'Requests', value: String(d.main.requests) }, { label: 'Cost', value: usd(d.main.usd) }, { note: OPEN_NOTE }],
+        { native: true, aria: 'Main thread: open its timeline' }), gapMarks));
   }
   const byType = new Map();
   d.agents.forEach((a) => { if (!byType.has(a.agent_type)) byType.set(a.agent_type, []); byType.get(a.agent_type).push(a); });
@@ -454,10 +461,12 @@ function unfolded(d, r) {
   types.forEach(([type, list]) => {
     const color = entityColor(type, 'agent');
     const maxUsd = maxOf(list.map((a) => a.usd), 1e-9);
-    const bar = (a) => tipOn(h('span', { style: `${span(a)};background:${color};opacity:${(0.45 + 0.55 * a.usd / maxUsd).toFixed(2)}` }),
-      `${a.description || type} · ${hm(new Date(a.first))} to ${hm(new Date(a.last))}`, [
+    const bar = (a) => tipOn(h('a.lanebar', { 'data-mark': '', href: agentHref(sid, a.agent_id), style: `${span(a)};background:${color};opacity:${(0.45 + 0.55 * a.usd / maxUsd).toFixed(2)}` }),
+      `${a.description || type} · ${type}${a.model ? ' · ' + modelName(a.model) : ''}`, [
+        { label: `${hm(new Date(a.first))} to ${hm(new Date(a.last))}`, value: a.alive_seconds != null ? duration(a.alive_seconds) : '' },
         { label: 'Requests', value: String(a.requests) }, { label: 'Tool calls', value: String(a.tool_calls) },
-        { label: 'Peak context', value: tokens(a.peak_context) }, { label: 'Cost', value: usd(a.usd) }], { focus: false });
+        { label: 'Peak context', value: tokens(a.peak_context) }, { label: 'Cost', value: usd(a.usd) }, { note: OPEN_NOTE }],
+      { native: true, aria: `${type} agent: open its timeline` });
     if (list.length === 1) {
       const [a] = list;
       lanes.push(h('div.lab', null, h('span', null, h('b', { text: type }), ' ×1'),
@@ -585,8 +594,61 @@ function unfolded(d, r) {
   return card;
 }
 
+// Each subagent's life, the longest first: when it was spawned, how long it lived,
+// how much of it the model worked and its tools ran; each opens the agent's page.
+const LIVES_SHOWN = 12; // agents listed before "All N agents"
+
+function agentLives(d) {
+  const sid = d.session.session_id;
+  const list = [...d.agents].sort((a, b) => (b.alive_seconds || 0) - (a.alive_seconds || 0));
+  const days = new Set(list.map((a) => (a.spawned ? new Date(a.spawned).toDateString() : '')));
+  const when = (t) => { const x = new Date(t); return days.size > 1 ? `${monthDay(x)} ${hm(x)}` : hm(x); };
+  const row = (a) => {
+    const name = a.description || a.agent_type;
+    const work = a.model_seconds || 0, tools = a.tool_seconds || 0, both = work + tools || 1;
+    return h('tr', null,
+      h('td', null, h('a.title', { href: agentHref(sid, a.agent_id) }, h('span.privname', { text: name }),
+        h('span', { text: `${a.agent_type}${a.model ? ' · ' + modelName(a.model) : ''}` }))),
+      h('td', { style: 'font-family:var(--mono);font-size:12px;color:var(--muted)', text: a.spawned ? when(a.spawned) : '' }),
+      h('td.num', { text: a.alive_seconds != null ? lifeText(a.alive_seconds) : '' }),
+      h('td', null, h('div.agbar', { role: 'img', 'aria-label': `Model working ${pct(work / both)}, tools ${pct(tools / both)}` },
+        tipOn(h('span', { style: `flex:${work.toFixed(1)} 1 0;background:var(--s1)` }), 'Model working', [{ label: lifeText(work), value: pct(work / both) }], { focus: false }),
+        tipOn(h('span', { style: `flex:${tools.toFixed(1)} 1 0;background:var(--s3)` }), 'Tools running', [{ label: lifeText(tools), value: pct(tools / both) }], { focus: false }))),
+      h('td.num', { text: String(a.requests) }),
+      h('td.cost', { text: usd(a.usd) }));
+  };
+  const body = h('tbody');
+  let all = false;
+  const more = list.length > LIVES_SHOWN ? h('button.link.agmore', { type: 'button' }) : null;
+  const fill = () => {
+    body.replaceChildren(...(all ? list : list.slice(0, LIVES_SHOWN)).map(row));
+    if (more) { more.textContent = all ? `Only the ${LIVES_SHOWN} longest` : `All ${list.length} agents`; more.setAttribute('aria-expanded', String(all)); }
+  };
+  if (more) more.addEventListener('click', () => { all = !all; fill(); });
+  fill();
+  // the lane bars of the timeline link the threads too, but they are thin marks: every
+  // thread has a full-size link here, the main thread's beside the heading
+  const mainLink = d.main ? h('a.agmain', { href: agentHref(sid, 'main'), text: "The main thread's timeline" }) : null;
+  const card = h('section.card', null, h('div.aghrow', null, h('h2', { text: 'Agents in this session' }),
+    h('span.note', null, list.length ? 'Sorted by time alive' : '', mainLink && list.length ? ' · ' : '', mainLink)));
+  if (!list.length) { card.append(h('p.note', { text: 'No subagents: only the main thread ran in this session.' })); return card; }
+  card.append(h('div.scroll', null, h('table.data', { style: 'min-width:720px' },
+    h('thead', null, h('tr', null, ['Agent', 'Spawned', 'Alive', 'Model working · tools', 'Requests', 'Cost'].map((c, i) =>
+      h('th', { scope: 'col', class: i === 2 || i >= 4 ? 'num' : null, style: i === 3 ? 'width:220px' : null, text: c })))),
+    body)));
+  card.append(h('div.aglegend', null, h('span', null, h('i', { style: 'background:var(--s1)' }), 'Model working'),
+    h('span', null, h('i', { style: 'background:var(--s3)' }), 'Tools running')), more);
+  return card;
+}
+
+function lifeText(sec) {
+  if (sec < 60) return `${Math.round(sec)} s`;
+  const m = Math.round(sec / 60);
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} min`;
+}
+
 function agentsTable(d) {
-  const card = h('section.card', null, h('h2', { text: 'Agents in this session' }));
+  const card = h('section.card', null, h('h2', { text: 'Agent types' }));
   if (!d.agent_types.length) { card.append(empty(null, 'No requests.')); return card; }
   card.append(h('div.scroll', null, h('table.data', null,
     h('thead', null, h('tr', null, ['Agent', 'Spawns', 'Tool calls (median)', 'Peak context (average)', 'Share of cost', 'Cost'].map((c, i) =>

@@ -8,6 +8,7 @@ import { liveRows, line, inPhase } from './skeleton.js';
 import { renderOverview } from './overview.js';
 import { renderSpend } from './spend.js';
 import { renderSession } from './session.js';
+import { renderAgent } from './agent.js';
 import { renderDay } from './day.js';
 import { renderSessions } from './sessions.js';
 import { renderSpikes } from './spikes.js';
@@ -222,7 +223,7 @@ const PAGES = {
   overview: renderOverview,
   spend: renderSpend,
   sessions: renderSessions,
-  session: renderSession,
+  session: (main, r) => (r.rest[1] === 'agent' ? renderAgent(main, r) : renderSession(main, r)),
   day: renderDay,
   spikes: renderSpikes,
   checks: renderChecks,

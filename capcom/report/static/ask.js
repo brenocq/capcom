@@ -57,9 +57,9 @@ const reducedMotion = () => !!(window.matchMedia && window.matchMedia('(prefers-
 
 function route() {
   const parts = location.pathname.replace(/^\/+|\/+$/g, '').split('/');
-  return { name: parts[0] || 'overview', arg: parts[1] || null };
+  return { name: parts[0] || 'overview', arg: parts[1] || null, sub: parts[2] || null };
 }
-const pageName = () => PAGE_NAMES[route().name] || 'Overview';
+const pageName = () => (route().name === 'session' && route().sub === 'agent' ? 'Agent timeline' : PAGE_NAMES[route().name] || 'Overview');
 
 // What a part is about, for the facts capcom serve adds to a question (ask.py,
 // parse_ref, checks each field): a finding on Checks, a spike's session, else the
@@ -125,7 +125,7 @@ export function mascot(size, mini = false) {
 const DROP = [
   '.askmark', 'button', 'form', 'pre', 'svg', 'input', 'textarea', 'select', 'script', 'style',
   '.facts', '.evidence', 'details.astable', 'table', '.usernote', '.markform', '.tip', '[hidden]',
-  '.detail .tags > .note', '.spikelist', '.spikerow .meta', '.lab .what', '.ylab', '.wx', '.histlabs', '.thrlab', '.legend',
+  '.detail .tags > .note', '.spikelist', '.spikerow .meta', '.lab .what', '.privname', '.ylab', '.wx', '.histlabs', '.thrlab', '.legend',
 ].join(',');
 
 // The private pieces of a page, by what they are: text from the logs (session
@@ -134,7 +134,7 @@ const DROP = [
 // their kind (capcom/report/ask.py, LEFT_OUT, takes only these names).
 const PRIVATE = [
   ['a[href^="/session/"], a[href^="/session?"], .spikelist .meta, .spikerow .meta, .detail .tags > .note', 'session names'],
-  ['.lab .what', 'agent names'],
+  ['.lab .what, .privname', 'agent names'],
   ['.facts, .evidence', 'evidence rows'],
   ['.usernote, .markform, input, textarea, select, [contenteditable]', 'your notes'],
   ['pre', 'pasted config'],
@@ -158,7 +158,7 @@ const MAX_ROWS = 10;
 const CELL_DROP = '.tip, [hidden], script, style, svg, .askmark';
 const PRIVATE_CELL = [
   ['a[href^="/session/"], a[href^="/session?"], .spikelist .meta, .spikerow .meta, .detail .tags > .note', 'a session'],
-  ['.lab .what', 'an agent'],
+  ['.lab .what, .privname', 'an agent'],
   ['.facts, .evidence, .usernote, .markform, input, textarea, select, [contenteditable], pre', '[left out]'],
 ];
 function cellText(c) {

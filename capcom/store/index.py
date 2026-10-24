@@ -780,6 +780,17 @@ class SqliteIndex:
             out.setdefault(sid, []).append(int(start))
         return out
 
+    def thread_files(self, session_id: str, agent_id: str | None) -> list[Path]:
+        """The log files holding a thread's requests (`agent_id` None: the main
+        thread), for a reader that needs what the index does not keep."""
+        cond = "agent_id IS NULL" if agent_id is None else "agent_id = ?"
+        args = [session_id] if agent_id is None else [session_id, agent_id]
+        rows = self._con.execute(
+            f"SELECT DISTINCT file FROM requests WHERE session_id = ? AND {cond} ORDER BY file",
+            args,
+        )
+        return [Path(r[0]) for r in rows]
+
     def shared_replies(
         self, session_id: str, since: datetime | None = None, until: datetime | None = None
     ) -> int:

@@ -80,7 +80,7 @@ from capcom.types import GroupBy, PriceTable
 HOST = "127.0.0.1"
 STATIC = Path(__file__).parent / "static"
 PAGES = {"", "spend", "sessions", "session", "day", "spikes", "checks", "changes", "limits"}
-WITH_ARG = {"session", "day"}  # pages and endpoints that take one path segment
+WITH_ARG = {"session", "day", "agent"}  # pages and endpoints that take one path segment
 MAY_ARG = {"changes"}  # pages and endpoints with or without one
 MAX_BODY = 4096  # bytes: the one POST's JSON body
 TOKEN_HEADER = "X-Capcom-Token"
@@ -358,6 +358,7 @@ PARAMS: dict[str, tuple[str, ...]] = {
     "typical-hours": ("day",),
     "sessions": ("days", "limit", "sort", "dir", "q"),
     "session": (),
+    "agent": ("agent",),
     "day": ("group",),
     "hour": ("start",),
     "spikes": ("days", "spike", "project", "cause"),
@@ -944,8 +945,12 @@ class Handler(BaseHTTPRequestHandler):
     def _page(self, path: str) -> None:
         parts = path.strip("/").split("/")
         window = len(parts) == 5 and parts[:2] == ["limits", "window"]  # a usage window
-        if not window and (
-            parts[0] not in PAGES or len(parts) > (2 if parts[0] in WITH_ARG | MAY_ARG else 1)
+        # a thread of a session: /session/<id>/agent/<agent id or "main">
+        thread = len(parts) == 4 and parts[0] == "session" and parts[2] == "agent" and parts[3]
+        if (
+            not window
+            and not thread
+            and (parts[0] not in PAGES or len(parts) > (2 if parts[0] in WITH_ARG | MAY_ARG else 1))
         ):
             self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
             return
@@ -1299,6 +1304,7 @@ ENDPOINTS: dict[str, Endpoint] = {
     "spend": lambda c, _, q: api.spend(c, q),
     "sessions": lambda c, _, q: api.sessions(c, q),
     "session": lambda c, sid, q: api.session(c, sid),
+    "agent": lambda c, sid, q: api.agent(c, sid, q),
     "day": lambda c, d, q: api.day(c, d, q),
     "hour": lambda c, _, q: api.hour(c, q),
     "typical-hours": lambda c, _, q: api.typical_hours(c, q),

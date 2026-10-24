@@ -705,3 +705,116 @@ h2.acct { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 @media (max-width: 899.98px) {
   .loadstatus { top: 64px; right: 16px; }
 }
+
+/* ------------------------------------------------------------------ agent page (agent.js) */
+:root { --ctx: #c64fbf; }
+.aghead { display: flex; flex-direction: column; gap: 8px; }
+.aghead .crumb { flex-wrap: wrap; }
+.agtitle { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 12px; }
+.agtitle h1 { font-size: 34px; font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
+.agnavs { display: flex; gap: 8px; font-size: 13px; }
+.agnav { padding: 8px 12px; border: 0.5px solid var(--l15); border-radius: 8px; background: var(--card); color: var(--ink); text-decoration: none; white-space: nowrap; }
+.agnav:hover { border-color: var(--l35); color: var(--text); }
+.agnav.off { color: var(--muted); opacity: 0.5; cursor: default; }
+.agsub { font-size: 14px; color: var(--muted); }
+.agsub a { color: var(--clay); }
+.agsum { margin: 6px 0 0; font-size: 16px; line-height: 1.55; color: var(--ink); max-width: 860px; }
+.agsum b { color: var(--text); }
+.agtiles { gap: 12px; }
+.card.agtile { border-radius: 12px; padding: 14px 16px; gap: 4px; }
+.agtile .label, .agtile .note { font-size: 12px; }
+.agtile .v { font-family: var(--serif); font-size: 26px; line-height: 1.1; }
+.aglower { display: flex; flex-direction: column; gap: 22px; }
+.agpair { gap: 22px; align-items: flex-start; }
+.agpair > .agtime { flex: 1 1 520px; }
+.agpair > .agslow { flex: 1 1 420px; }
+.agcard h2 { font-size: 21px; }
+.aghrow { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 10px; }
+.aglegend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--ink); }
+.aglegend span { display: inline-flex; align-items: center; gap: 6px; }
+.aglegend i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.aglegend i.ctx { height: 2px; border-radius: 1px; background: var(--ctx); }
+.aglegend i.gap { background: repeating-linear-gradient(135deg, var(--l35) 0 1.5px, transparent 1.5px 5px); }
+.agscroll { overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; }
+.agtl { display: grid; grid-template-columns: 112px minmax(0, 1fr); min-width: 100%; }
+.agtl > .lab { position: sticky; left: 0; z-index: 3; background: var(--card); font-size: 12px; color: var(--muted); padding-right: 8px; }
+.agphases { position: relative; height: 38px; margin-bottom: 10px; }
+.agtl > .lab:nth-child(1) { padding-top: 11px; }
+.agtl > .lab:nth-child(3) { padding-top: 8px; }
+.agtl > .lab:nth-child(5), .agtl > .lab:nth-child(7) { padding-top: 4px; }
+.agphase { position: absolute; top: 0; height: 38px; box-sizing: border-box; display: flex; align-items: center; gap: 6px; padding: 0 6px; min-width: 0;
+  border-radius: 6px; border: 1.5px solid transparent; background: var(--subtle); color: var(--text); font: inherit; font-size: 12px; text-align: left; overflow: hidden; cursor: pointer; }
+.agphase:hover { border-color: var(--l35); }
+.agphase.on { background: var(--sel); border-color: var(--text); }
+.agphase.guessed, .agpbtn.guessed { color: var(--muted); font-style: italic; }
+.agphase:focus-visible, .agpbtn:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
+.agpname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.agbadge { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 18px; height: 18px; border-radius: 50%;
+  background: var(--ink); color: var(--panel); font-size: 11px; font-family: var(--mono); font-style: normal; }
+.on .agbadge, .agphase.on .agbadge { background: var(--text); }
+.agdoing { position: relative; height: 62px; }
+.agband { position: absolute; top: -5px; height: 38px; background: var(--sel); border-radius: 5px; }
+.agtrack, .agstrip { position: absolute; left: 0; right: 0; top: 0; height: 28px; }
+.agtrack { background: var(--subtle); border-radius: 4px; }
+.agseg { position: absolute; top: 0; bottom: 0; border-radius: 2px; }
+.agstrip:has(.agseg:hover) .agseg:not(:hover) { opacity: 0.55; }
+.aglabs { position: absolute; left: 0; right: 0; top: 34px; height: 16px; pointer-events: none; }
+.seglab { position: absolute; top: 0; font-size: 11px; color: var(--muted); font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+.agchart { position: relative; height: 84px; border-bottom: 0.5px solid var(--l15); }
+.agchart + .lab + .agchart { margin-top: 0; }
+.agchart svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.agmax, .agend { position: absolute; font-size: 11px; color: var(--muted); font-family: var(--mono); z-index: 1; pointer-events: none; }
+.agmax { left: 4px; top: 0; }
+.agend { right: 4px; background: var(--card); padding: 0 2px; border-radius: 3px; }
+.agend.bold { font-size: 12px; font-weight: 600; color: var(--text); }
+.agmid { position: absolute; left: 0; right: 0; top: 50%; border-top: 1px dashed var(--l15); }
+.agctxfill { fill: var(--ctx); fill-opacity: 0.16; }
+.agctxline { fill: none; stroke: var(--ctx); stroke-width: 2; stroke-linejoin: round; }
+.agdots { fill: none; stroke: var(--s2); opacity: 0.55; stroke-width: 3; stroke-linecap: round; }
+.agcumline { fill: none; stroke: var(--text); stroke-width: 2; stroke-linejoin: round; }
+.aggap { position: absolute; top: 0; bottom: 0; z-index: 1; background: repeating-linear-gradient(135deg, var(--l15) 0 1.5px, transparent 1.5px 5px); }
+.agticks { position: relative; height: 22px; font-size: 11px; color: var(--muted); font-family: var(--mono); }
+.agticks span { position: absolute; top: 4px; white-space: nowrap; }
+.agnote { margin: 0; line-height: 1.5; }
+table.agtable { min-width: 640px; }
+.agprow { cursor: pointer; }
+.agprow:hover { background: var(--subtle); }
+.agprow.on, tr.agsrow { background: var(--sel); }
+.agpbtn { border: 0; padding: 0; background: none; font: inherit; color: var(--text); text-align: left; cursor: pointer; min-height: 24px; }
+.agprow.on .agpbtn { font-weight: 600; }
+table.data td.when { font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+tr.agsrow td { padding-top: 6px; padding-bottom: 6px; font-size: 12px; }
+tr.agsrow .agstep { padding-left: 20px; color: var(--ink); }
+.agstep { display: inline-flex; align-items: center; gap: 8px; }
+.agtime table.data td, .agtime table.data th, .agslow table.data td, .agslow table.data th { padding-left: 6px; padding-right: 6px; }
+.agtime table.data td:first-child, .agtime table.data th:first-child, .agslow table.data td:first-child, .agslow table.data th:first-child { padding-left: 0; }
+.agtime table.data td:last-child, .agtime table.data th:last-child, .agslow table.data td:last-child, .agslow table.data th:last-child { padding-right: 0; }
+.agslow table.data td.when { padding-right: 8px; }
+table.data td.stepname { width: 100%; max-width: 0; overflow: hidden; }
+.agstep:has(.agname) { display: flex; min-width: 0; }
+.agname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agstep i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; flex: none; }
+.agmix { height: 8px; border-radius: 3px; }
+.agtime .stackbar.tall { height: 14px; border-radius: 4px; }
+.agline { margin: 0; font-size: 13px; color: var(--ink); line-height: 1.5; }
+a.agmain { display: inline-flex; align-items: center; min-height: 24px; }
+button.agmore { align-self: flex-start; border: 0; padding: 0; background: none; cursor: pointer; min-height: 24px; }
+@media (max-width: 899.98px) {
+  .agphases, .agphase { height: 44px; }
+  .agpbtn, button.agmore, a.agmain { min-height: 44px; }
+}
+@media (max-width: 560px) {
+  .agtitle h1 { font-size: 28px; }
+  .agsum { font-size: 15px; }
+  .agtl { grid-template-columns: 84px minmax(0, 1fr); }
+  .agtile .v { font-size: 22px; }
+  .agtime table.data td, .agtime table.data th, .agslow table.data td, .agslow table.data th { padding-left: 4px; padding-right: 4px; }
+  .agtime table.data .num, .agslow table.data .num, .agslow table.data td.when { font-size: 11px; }
+  .agtime table.data th:nth-child(3), .agtime table.data td:nth-child(3) { display: none; }
+}
+/* the session page's agent bars open the agent's page */
+a.lanebar { position: absolute; top: 5px; height: 12px; min-width: 3px; border-radius: 3px; }
+.lane.sub a.lanebar { top: 3px; height: 10px; }
+a.lanebar:hover, a.lanebar:focus-visible { outline: 1.5px solid var(--text); outline-offset: 2px; opacity: 1 !important; }
+.agbar { display: flex; height: 10px; gap: 2px; border-radius: 3px; overflow: hidden; width: 200px; }
+.agbar > span { min-width: 2px; }
