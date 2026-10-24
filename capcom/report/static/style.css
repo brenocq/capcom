@@ -222,7 +222,9 @@ a.day:hover .bar, a.day:focus-visible .bar { filter: brightness(1.15); }
 table.data { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 13px; }
 table.data th { text-align: left; color: var(--muted); font-size: 12px; font-weight: 500; padding: 8px 10px; border-bottom: 0.5px solid var(--l15); white-space: nowrap; }
 table.data th button { border: 0; background: none; padding: 0; color: inherit; font-size: 12px; cursor: pointer; }
-table.data th button[aria-pressed="true"] { color: var(--text); font-weight: 600; }
+table.data th[aria-sort="ascending"] button, table.data th[aria-sort="descending"] button { color: var(--text); font-weight: 600; }
+table.data th .sortarrow { margin-left: 3px; }
+table.data th .sortarrow:empty { display: none; }
 table.data td { padding: 10px; border-bottom: 0.5px solid var(--l10); vertical-align: middle; }
 table.data th:first-child, table.data td:first-child { padding-left: 0; }
 table.data th:last-child, table.data td:last-child { padding-right: 0; }

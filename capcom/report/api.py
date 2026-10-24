@@ -929,6 +929,9 @@ def sessions(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     keys = {"usd", "last", "peak_context", "active_seconds", "subagents", "requests"}
     if sort not in keys:
         raise ApiError(400, "bad_query", "sort must be one of: " + ", ".join(sorted(keys)))
+    direction = query.get("dir") or "desc"
+    if direction not in ("asc", "desc"):
+        raise ApiError(400, "bad_query", "dir must be asc or desc")
     q = (query.get("q") or "").strip().lower()
     since = ctx.midnight(days - 1) if days > 0 else None
     w = _window(ctx)
@@ -949,8 +952,11 @@ def sessions(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
             or q in r["project_dir"].lower()
             or any(q in t for t in types.get(r["session_id"], ()))
         ]
-    # numbers stay numbers, ISO times stay strings; a missing value sorts last
-    rows.sort(key=lambda r: (r[sort] is not None, r[sort] or 0, r["usd"]), reverse=True)
+    # numbers stay numbers, ISO times stay strings; ties go by cost in the same
+    # direction, and a missing value sorts last either way (costliest first)
+    known = [r for r in rows if r[sort] is not None]
+    known.sort(key=lambda r: (r[sort], r["usd"]), reverse=direction == "desc")
+    rows = known + sorted((r for r in rows if r[sort] is None), key=lambda r: -r["usd"])
     return {
         "window": {"days": days, "since": iso(since, ctx.tz), "until": iso(ctx.now, ctx.tz)},
         "total": len(rows),

@@ -348,12 +348,13 @@ before. `causes` sums their named causes (never the unexplained rest) by cause, 
 first; `title` is the headline of the largest. `spikes` is null without
 `capcom.timeline`, `causes` without `capcom.explain` (both listed in `unavailable`).
 
-### `GET /api/sessions?days=14&q=&sort=usd&limit=200`
+### `GET /api/sessions?days=14&q=&sort=usd&dir=desc&limit=200`
 
 `days` 0 means all time. `q` matches the title, the project label or folder, or an
 agent type of the session (case-insensitive). `sort`: `usd`, `last`, `peak_context`,
-`active_seconds`, `subagents`, `requests` (descending, ties by cost; zeros sort as
-numbers, missing values last).
+`active_seconds`, `subagents`, `requests`; `dir`: `desc` (the default) or `asc`.
+Ties go by cost in the same direction; zeros sort as numbers, and missing values
+come last in both directions (costliest first among them).
 `{window: {days, since, until}, total, temporary, sessions: [Session row]}`: `total`
 counts every matching session, temporary folders included (`temporary` of them).
 
