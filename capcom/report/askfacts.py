@@ -1,4 +1,4 @@
-"""What stands behind a part of a page, for Ask Claude, and the answers of its tools.
+"""What stands behind a part of a page, for Ask Roger, and the answers of its tools.
 
 Two uses, one vocabulary. `context` turns a part's reference (a finding, a marked
 change, a session, a day, a page's range) into a few compact lines that go into

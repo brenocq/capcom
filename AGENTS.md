@@ -33,7 +33,7 @@ modules. Never add or commit anything under `docs/`.
   by a generator in `tests/`. In chat and reports, quote no conversation text
   beyond a tool name, a file path or a short label.
 - **No network.** capcom makes no network requests at run time. The one
-  exception is Ask Claude (`capcom/report/ask.py`): when the user asks in a
+  exception is Ask Roger (`capcom/report/ask.py`): when the user asks in a
   page of `capcom serve` (after turning it on there once), capcom starts the
   user's own `claude` CLI headless (Haiku; every built-in tool, other MCP
   server, slash command and setting source off; no session saved), which makes
@@ -44,7 +44,8 @@ modules. Never add or commit anything under `docs/`.
   (`capcom/report/askfacts.py`: spend and requests by project, model, agent
   type and day, session ids, project folders and the paths of the files that
   define an agent, skill or command). The only tools allowed are capcom's own
-  read-only lookups of those same totals (`spend`, `session`, `findings`,
+  read-only lookups of those same totals and of the Checks findings with their
+  generated titles and summaries (`spend`, `session`, `findings`,
   `where_defined`), served by `python -m capcom.report.asktools` over stdio for
   that one question, at most 4 lookups and 6 turns. Never session titles, file
   contents, tool inputs or other text from the logs beyond tool names, file

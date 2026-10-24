@@ -1,5 +1,5 @@
 # ruff: noqa: E501  (the fixtures and stub keep their lines whole)
-"""Ask Claude with what stands behind a part and capcom's lookups (ask.py, server.py):
+"""Ask Roger with what stands behind a part and capcom's lookups (ask.py, server.py):
 the references a page may send, the facts in the prompt, the CLI's arguments (only
 capcom's tools), the "looking up" lines, and an end-to-end run with a stub `claude`
 that starts capcom's MCP server from its --mcp-config and uses a tool, as the real

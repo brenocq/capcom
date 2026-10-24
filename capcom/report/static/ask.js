@@ -1,4 +1,4 @@
-// Ask Claude: a chat in the corner that explains the dense parts of a page. A
+// Ask Roger: a chat in the corner that explains the dense parts of a page. A
 // round button (capcom's mascot, who waves now and then) opens a small panel; the
 // small "Explain" marks on dense cards open it already asking about that card, and
 // the "Ask Roger" button beside any text the user selects asks about that text.
@@ -15,7 +15,7 @@
 // sits and its card's text as partText builds it. Never a session's text.
 // With the part goes its reference (refOf: a finding's kind and scope, a session
 // id, a marked change's id, a day, the page's range), from which capcom serve adds
-// what stands behind it (capcom/report/askfacts.py); Claude may look up more with
+// what stands behind it (capcom/report/askfacts.py); Roger may look up more with
 // capcom's own tools, which the chat shows as "Looking up ..." while they run.
 
 import { h, s } from './lib.js';
@@ -33,19 +33,19 @@ const MAX_QUESTION = 600;
 // the question an Explain mark asks (capcom/report/ask.py, EXPLAIN, adds how to answer it)
 const EXPLAIN = 'What does this show, and what stands out?';
 const EXPLAIN_SELECTION = 'Explain the text I selected, very shortly and simply.';
-export const NOTICE = 'Ask Claude sends the numbers and labels on this part of the page, or the text you select, to Claude through your own claude CLI, with capcom’s totals behind them: spend by project, model, agent type and day, session ids and the paths of the files that define your agents. Claude may look up more of these totals. No text from your logs is sent, not even session titles.';
+export const NOTICE = 'Ask Roger sends the numbers and labels on this part of the page, or the text you select, to Claude through your own claude CLI, with capcom’s totals behind them: spend by project, model, agent type and day, session ids and the paths of the files that define your agents. Roger may look up more of these totals and capcom’s Checks findings, with their titles and summaries. No text from your logs is sent, not even session titles.';
 // The mascot's name ("Roger that", on the radio): the greeting, the panel's
-// title, the opt-in's heading and the round button's label say it. The opt-in
-// notice's text and the sidebar say Claude, since Claude is what answers.
+// title, the opt-in's heading, its notice, the sidebar and the round button's label
+// say it; "Claude" is left for the model behind the user's claude CLI.
 export const MASCOT_NAME = 'Roger';
 const named = (yes, no) => (MASCOT_NAME ? yes : no);
 // The first message of every chat, written by capcom (instant, and nothing sent).
-export const GREETING = `Hi${named(`, I’m ${MASCOT_NAME}`, '')}! I explain what you see here in a few short, plain words. Tap “Explain” on a card, select any text and tap “${named(`Ask ${MASCOT_NAME}`, 'Ask Claude')}”, or ask me anything about this page.`;
+export const GREETING = `Hi${named(`, I’m ${MASCOT_NAME}`, '')}! I explain what you see here in a few short, plain words. Tap “Explain” on a card, select any text and tap “${named(`Ask ${MASCOT_NAME}`, 'Ask Roger')}”, or ask me anything about this page.`;
 
-// The sidebar's promise (app.js draws it): true with Ask Claude off, and saying
+// The sidebar's promise (app.js draws it): true with Ask Roger off, and saying
 // what goes out while it is on in this browser.
 export const NET_OFF = 'Local and read-only. No network.';
-export const NET_ON = 'Local and read-only. Only Ask Claude uses the network, through your claude CLI.';
+export const NET_ON = 'Local and read-only. Only Ask Roger uses the network, through your claude CLI.';
 export function networkNote() { return !ASK_OFF && enabled() ? NET_ON : NET_OFF; }
 function syncNote() { for (const el of document.querySelectorAll('.netnote')) el.textContent = networkNote(); }
 
@@ -271,8 +271,8 @@ function decorate() {
       const label = p.label(el) || 'This part';
       if (!worth(partText(el, p.extra ? p.extra(el) : []), label)) { unworthy.set(el, size); continue; }
       anchor.append(h('button.askmark', {
-        type: 'button', title: named(`Ask ${MASCOT_NAME} to explain this`, 'Ask Claude to explain this'),
-        'aria-label': `${named(`Ask ${MASCOT_NAME}`, 'Ask Claude')} to explain: ${label}`,
+        type: 'button', title: named(`Ask ${MASCOT_NAME} to explain this`, 'Ask Roger to explain this'),
+        'aria-label': `${named(`Ask ${MASCOT_NAME}`, 'Ask Roger')} to explain: ${label}`,
         onclick: (e) => { e.preventDefault(); e.stopPropagation(); explain(el, p, label); },
       }, mascot(18, true), h('span', { 'aria-hidden': 'true', text: 'Explain' })));
     }
@@ -335,14 +335,14 @@ const ICON = {
 const icon = (d, size = 18) => s('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 2, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' }, s('path', { d }));
 
 function build() {
-  const bubble = h('button.askbtn', { type: 'button', 'aria-label': named(`Ask ${MASCOT_NAME}`, 'Ask Claude'), 'aria-expanded': 'false', 'aria-controls': 'askpanel', title: named(`Ask ${MASCOT_NAME} about this page`, 'Ask Claude about this page'), onclick: () => (state.open ? closePanel() : openPanel()) }, mascot(44));
+  const bubble = h('button.askbtn', { type: 'button', 'aria-label': named(`Ask ${MASCOT_NAME}`, 'Ask Roger'), 'aria-expanded': 'false', 'aria-controls': 'askpanel', title: named(`Ask ${MASCOT_NAME} about this page`, 'Ask Roger about this page'), onclick: () => (state.open ? closePanel() : openPanel()) }, mascot(44));
   const log = h('div.asklog', { role: 'log', 'aria-live': 'polite', 'aria-label': 'Conversation' });
   const input = h('textarea.askinput', { rows: 1, maxlength: MAX_QUESTION, placeholder: 'Ask about this page…', 'aria-label': 'Your question' });
   const sendBtn = h('button.asksend', { type: 'submit', 'aria-label': 'Send' }, icon(ICON.send));
   const form = h('form.askform', null, input, sendBtn);
   const foot = h('div.askfoot', null, form,
     h('p.asknote', null, 'Haiku, through your claude CLI. ', h('button.asklink', { type: 'button', text: 'Turn off', onclick: turnOff })));
-  const title = named(`Ask ${MASCOT_NAME}`, 'Ask Claude');
+  const title = named(`Ask ${MASCOT_NAME}`, 'Ask Roger');
   const panel = h('section.askpanel', { id: 'askpanel', role: 'dialog', 'aria-label': title, hidden: true },
     h('header.askhead', null, mascot(34),
       h('div.asktitle', null, h('strong', { text: title }), h('span', { text: 'Short answers about your numbers' })),
@@ -428,7 +428,7 @@ function draw() {
     const about = topic ? (topic.selection != null ? 'the text you selected' : topic.label) : null;
     ui.log.replaceChildren(h('div.askoptin', null,
       mascot(56),
-      h('strong', { text: `Turn on ${named(`Ask ${MASCOT_NAME}`, 'Ask Claude')}?` }),
+      h('strong', { text: `Turn on ${named(`Ask ${MASCOT_NAME}`, 'Ask Roger')}?` }),
       h('p', { text: NOTICE }),
       h('p.note', { text: 'It runs your claude CLI with the Haiku model, so each question counts toward your Claude usage. You can turn it off again under the chat.' }),
       about ? h('p.note', null, `Then ${named(MASCOT_NAME, 'Claude')} explains `, h('b', { text: about }), '.') : null,
@@ -479,7 +479,7 @@ function message(m, last) {
   return next.length ? h('div', null, row, suggestions(next, false, m)) : row;
 }
 
-// A reply's bubble: the lookups Claude made (the one running, with dots, until
+// A reply's bubble: the lookups Roger made (the one running, with dots, until
 // the answer goes on), then the answer so far, or the dots while it starts.
 function paint(body, m) {
   const looks = m.lookups || [];
@@ -559,7 +559,7 @@ export async function ask(question, topic = null, again = false) {
     if (!r.ok) {
       let data = null;
       try { data = await r.json(); } catch (e) { /* not JSON */ }
-      fail(r.status === 405 ? 'Ask Claude is turned off on this capcom serve (--no-ask).'
+      fail(r.status === 405 ? 'Ask Roger is turned off on this capcom serve (--no-ask).'
         : (data && data.message) || `capcom serve answered ${r.status}.`);
     } else {
       await read(r, reply);
@@ -607,7 +607,7 @@ function handle(ev, reply) {
   } else if (ev.type === 'done') {
     reply.suggestions = (ev.suggestions || []).slice(0, 3);
   } else if (ev.type === 'error') {
-    reply.error = ev.message || 'Claude could not answer.';
+    reply.error = ev.message || 'Roger could not answer.';
   }
 }
 
@@ -778,8 +778,8 @@ function askSelection() {
 }
 
 function buildPick() {
-  const b = h('button.asksel', { type: 'button', hidden: true, title: named(`Ask ${MASCOT_NAME} about the text you selected`, 'Ask Claude about the text you selected'), 'aria-label': named(`Ask ${MASCOT_NAME} about the selected text`, 'Ask Claude about the selected text') },
-    mascot(18, true), h('span', { text: named(`Ask ${MASCOT_NAME}`, 'Ask Claude') }));
+  const b = h('button.asksel', { type: 'button', hidden: true, title: named(`Ask ${MASCOT_NAME} about the text you selected`, 'Ask Roger about the text you selected'), 'aria-label': named(`Ask ${MASCOT_NAME} about the selected text`, 'Ask Roger about the selected text') },
+    mascot(18, true), h('span', { text: named(`Ask ${MASCOT_NAME}`, 'Ask Roger') }));
   // keep the selection: a press on the button must not clear it
   const hold = (e) => { e.preventDefault(); pick.pressing = true; };
   b.addEventListener('pointerdown', hold);

@@ -1,5 +1,5 @@
 # ruff: noqa: E501  (the fixtures and stub keep their lines whole)
-"""Ask Claude's lookups as an MCP server (capcom/report/asktools.py): the JSON-RPC
+"""Ask Roger's lookups as an MCP server (capcom/report/asktools.py): the JSON-RPC
 it speaks, each tool's answer, the cap on calls, and the real process over a
 synthetic index, as the CLI starts it. All data here is made up."""
 

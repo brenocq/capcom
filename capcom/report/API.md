@@ -2,7 +2,7 @@
 
 `capcom serve` listens on `127.0.0.1` only (default port 8787). Every endpoint is a
 `GET` (`HEAD` gives the same headers without the body) but two: `POST /api/changes`
-(the marks of "Did it work?", below) and `POST /api/ask` (Ask Claude, at the end);
+(the marks of "Did it work?", below) and `POST /api/ask` (Ask Roger, at the end);
 other methods and paths get 405. There are no CORS headers, and a request whose `Host`
 header is not `127.0.0.1` or `localhost` gets 403 (DNS rebinding). Each request opens
 the index read-only and closes it before answering.
@@ -780,7 +780,7 @@ before the first day the index holds; `id` must be an open mark (404). The reply
 `{mark: Mark}`, or `{unmarked: id}`. `capcom serve --read-only` answers 405 and the
 pages leave out every button that writes.
 
-### Ask Claude
+### Ask Roger
 
 #### `POST /api/ask`
 

@@ -201,7 +201,7 @@ function detail(it) {
   const top = pool.length ? pool.reduce((a, b) => (b.excess_usd > a.excess_usd ? b : a)) : null;
   const conf = top ? top.confidence : null;
   const box = h('section.card.detail');
-  if (it.session_id) box.dataset.askSession = it.session_id; // for Ask Claude's facts (ask.js)
+  if (it.session_id) box.dataset.askSession = it.session_id; // for Ask Roger's facts (ask.js)
   box.append(h('div.tags', null,
     projectChip(it),
     txt.same ? null : h('span.tag', { text: txt.tag }),

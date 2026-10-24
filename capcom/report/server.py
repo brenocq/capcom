@@ -394,7 +394,7 @@ class Site:
     day_cache: Path | None = None  # capcom.changes' finished days; None: not kept
     agent_dirs: Sequence[Path] | None = None  # where noticed() reads; None: its own
     request_timeout: float = 30.0  # seconds a client may take to send its request
-    ask_on: bool = True  # False (--no-ask): no POST /api/ask, no Ask Claude in the pages
+    ask_on: bool = True  # False (--no-ask): no POST /api/ask, no Ask Roger in the pages
     ask_slots: threading.BoundedSemaphore = field(
         default_factory=lambda: threading.BoundedSemaphore(ask.SLOTS)
     )
@@ -864,7 +864,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error(
                 HTTPStatus.TOO_MANY_REQUESTS,
                 "busy",
-                f"Claude is answering {ask.SLOTS} questions already: wait for one to finish.",
+                f"Roger is answering {ask.SLOTS} questions already: wait for one to finish.",
             )
             return
         child = None
@@ -1357,7 +1357,7 @@ def run_serve(
     url = f"http://{HOST}:{server.server_address[1]}/"
     fresh = f"rescanning every {SCAN_INTERVAL:g} s" if scanner else "no background scan"
     fresh += ", read-only" if read_only else ""
-    fresh += "" if ask_claude else ", no Ask Claude"
+    fresh += "" if ask_claude else ", no Ask Roger"
     print(f"capcom: serving {url} (local only, {fresh}; Ctrl+C to stop)", flush=True)
     if scanner is not None:
         scanner.start()

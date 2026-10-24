@@ -1,4 +1,4 @@
-"""Ask Claude's lookups: a small MCP server over capcom's index, for one question.
+"""Ask Roger's lookups: a small MCP server over capcom's index, for one question.
 
 `ask.command` gives the headless `claude` CLI this server, and only it, through
 `--mcp-config` (with `--strict-mcp-config`, every built-in tool off and only these

@@ -1,4 +1,4 @@
-"""Ask Claude: the website's chat, answered by the user's own `claude` CLI.
+"""Ask Roger: the website's chat, answered by the user's own `claude` CLI.
 
 `POST /api/ask` (server.py) takes a question about a part of a page, builds a
 prompt from the few fields allowed in (`build_prompt`), and runs `claude -p`
@@ -586,9 +586,7 @@ def stream(
                     yield line
             elif event.get("type") == "result" and event.get("subtype") == "error_max_turns":
                 if not split.text:
-                    error = (
-                        "Claude used all its lookups without an answer. Ask a narrower question."
-                    )
+                    error = "Roger used all his lookups without an answer. Ask a narrower question."
             elif event.get("type") == "result" and event.get("is_error"):
                 said = event.get("result")
                 ok = isinstance(said, str) and bool(said)

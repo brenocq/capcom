@@ -1,4 +1,4 @@
-/* Ask Claude (ask.js): the mascot button, the chat panel and the "Explain" marks.
+/* Ask Roger (ask.js): the mascot button, the chat panel and the "Explain" marks.
    Colors come from style.css's tokens, so both themes follow. */
 :root, [data-theme="light"] {
   --mz-body: #D97757; --mz-face: #FFF7EF; --mz-ink: #2B2A27; --mz-cheek: #F2A0A0; --mz-band: #3D3D3A;

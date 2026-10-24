@@ -150,7 +150,7 @@ export function totalLabel(t) {
 function card(f, scoped = false) {
   const scopeName = f.scope && f.scope !== 'all' ? (f.scope_label || f.scope) : 'Every project';
   const box = h('section.card.check');
-  // what the card is about, for Ask Claude's facts (ask.js, refOf)
+  // what the card is about, for Ask Roger's facts (ask.js, refOf)
   box.dataset.askFinding = f.kind;
   box.dataset.askScope = f.scope || 'all';
   box.append(h('div.chead', null,
