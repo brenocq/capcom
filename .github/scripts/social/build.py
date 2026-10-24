@@ -4,7 +4,7 @@
 
 <data.json> is demo/data.py's output; <assets-dir> holds banner.svg (build_all.py
 makes both, from the synthetic logs). Writes social.png there: on GitHub's dark
-page color, the banner's mark, wordmark, Roger with his "Roger that!" bubble and
+page color, the banner's Roger with his "Roger that!" bubble, wordmark and
 the subtitle (its chart cropped away, its still frame: reduced motion), the
 install command under them, and on the right the banner's spend chart, drawn
 larger by the banner's own code (banner/build.py chart_svg) in its final frame.
@@ -27,8 +27,8 @@ from chrome import Chrome
 HERE = Path(__file__).resolve().parents[1]  # .github/scripts
 W, H = 1280, 640
 INSTALL = "uv tool install git+https://github.com/brenocq/capcom"
-# The banner's left part, in its own units: the mark, "capcom", Roger, his bubble
-# and the subtitle (its chart hidden, as the bubble reaches over its left edge).
+# The banner's left part, in its own units: Roger, his bubble, "capcom"
+# and the subtitle, its chart hidden.
 CROP = (10, 4, 540, 170)  # x, y, w, h
 # The chart, in its own units, drawn at twice that size: its plot, and room above
 # for the spike markers and right of it for the total's label.

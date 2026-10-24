@@ -1,5 +1,5 @@
 <div align="center">
-  <img alt="capcom: a radio-signal mark, the word capcom and Roger, a terracotta capsule in mission-control headphones, beside a two-week spend chart drawing itself, with numbered spike markers; Roger waves and says: Roger that! Mission control for your Claude Code spend." src="https://github.com/brenocq/capcom/raw/assets/banner.svg" width="880">
+  <img alt="capcom: Roger, a terracotta capsule in mission-control headphones, and the word capcom, beside a two-week spend chart drawing itself, with numbered spike markers; Roger waves and says: Roger that! Mission control for your Claude Code spend." src="https://github.com/brenocq/capcom/raw/assets/banner.svg" width="880">
 
   <a href="#install">Install</a> · <a href="#what-you-get">What you get</a> · <a href="#commands">Commands</a> · <a href="#faq">FAQ</a>
 
