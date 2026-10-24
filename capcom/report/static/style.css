@@ -260,6 +260,9 @@ table.calparts tr.sum td { border-top: 1px solid var(--l25); border-bottom: 0; f
    vertical wheel stays the page's, a swipe past either end does not go back a page */
 .tlscroll { overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; padding-top: 6px; }
 .tlscroll .tl { --tllab: 160px; min-width: 100%; width: max-content; }
+.tlscroll { touch-action: pan-x pan-y; }
+.tlzoom { width: max-content; margin: 0 0 6px auto; }
+.tlzoom button { min-height: 28px; padding: 0 10px; font-size: 12px; }
 /* at phone width the lane names take less of the plot's room */
 @media (max-width: 560px) {
   .tlscroll .tl { --tllab: 104px; }

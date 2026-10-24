@@ -181,3 +181,44 @@ def test_a_lone_request_between_pauses_still_shows() -> None:
 def test_no_requests_no_rate() -> None:
     (run,) = _rate([], [], 0, 30 * MIN, [])
     assert run["rate"] and all(v == 0 for v in run["rate"])
+
+
+def test_a_preset_shows_its_hours_of_active_time_per_screen() -> None:
+    got = _run(
+        "const a = 30 * 60, share = 0.95, room = 900;"
+        "const w = m.zoomWidth(4, a, share, room);"
+        "console.log(JSON.stringify({ w, back: m.zoomHours(w, a, share, room),"
+        " fit: m.zoomWidth('fit', a, share, room), one: m.zoomWidth(1, a, share, room),"
+        " short: m.zoomWidth(12, 120, share, room),"
+        " clamped: [m.zoomClamp(100, room), m.zoomClamp(99999, room), m.zoomClamp(2000, room)] }))"
+    )
+    assert isinstance(got, dict)
+    # 30 h of active time at 4 h per screen: 7.5 screens of active time, plus the pauses
+    assert got["w"] == pytest.approx(900 * 7.5 / 0.95)
+    assert got["back"] == pytest.approx(4)
+    assert got["fit"] == 900
+    assert got["one"] > 16000  # past the cap: the 1 h preset is disabled
+    assert got["short"] < 900  # a 2 h session fits at 12 h a screen
+    assert got["clamped"] == [900, 16000, 2000]
+
+
+def test_zooming_keeps_the_time_under_the_pointer_in_place() -> None:
+    got = _run(
+        "const lab = 160, from = 2000, to = 5000, scroll = 300, offset = 500;"
+        "const s2 = m.zoomScroll(scroll, offset, lab, from, to);"
+        "const before = (scroll + offset - lab) / from, after = (s2 + offset - lab) / to;"
+        "console.log(JSON.stringify([before, after, m.zoomScroll(0, 170, lab, 1000, 500)]))"
+    )
+    assert isinstance(got, list)
+    before, after, at_start = got
+    assert after == pytest.approx(before)  # the same moment stays under the pointer
+    assert at_start == 0  # never scrolled before the start
+
+
+def test_the_zoom_round_trips_through_the_url() -> None:
+    got = _run(
+        "console.log(JSON.stringify([m.zoomParam('fit'), m.zoomParam(4), m.zoomParam(2.4567),"
+        " m.zoomParam(null), m.parseZoom('fit'), m.parseZoom('12h'), m.parseZoom('2.5h'),"
+        " m.parseZoom('0h'), m.parseZoom('wide'), m.parseZoom(null)]))"
+    )
+    assert got == ["fit", "4h", "2.5h", None, "fit", 12, 2.5, None, None, None]

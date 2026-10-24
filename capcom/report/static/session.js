@@ -211,6 +211,44 @@ export function plotFloor(width, room) {
   return width <= room * TL.squeeze ? 0 : width;
 }
 
+// Zoom: how much active time one screen of the plot shows. `hours` is a preset's (or a
+// pinch's) hours per screen, or 'fit' for the whole session; `share` is the part of the
+// plot that is active time (the rest is squeezed pauses), `room` the plot's visible
+// width. The width can come out under `room` (the session fits) or over TL.max (too
+// wide to draw): callers clamp it, and the presets are disabled there.
+export const ZOOMS = [['fit', 'Fit all'], [1, '1 h'], [4, '4 h'], [12, '12 h']];
+
+export function zoomWidth(hours, activeMinutes, share, room) {
+  return hours === 'fit' ? room : room * activeMinutes / (hours * 60) / share;
+}
+
+export function zoomHours(width, activeMinutes, share, room) {
+  return activeMinutes / 60 * room / (width * share);
+}
+
+// The plot's width for a zoom, between `room` and TL.max.
+export function zoomClamp(width, room) {
+  return Math.min(TL.max, Math.max(room, width));
+}
+
+// The scroll position that keeps the time `offset` pixels into the scroller (past
+// the `lab` pixels of lane names) where it is when the plot goes from `from` to `to`
+// pixels wide.
+export function zoomScroll(scrollLeft, offset, lab, from, to) {
+  return Math.max(0, lab + (scrollLeft + offset - lab) * to / from - offset);
+}
+
+// The `zoom` query value: 'fit', or hours per screen ("1h", "2.5h"); null for none.
+export function zoomParam(z) {
+  return z === 'fit' ? 'fit' : typeof z === 'number' && z > 0 ? `${+z.toPrecision(2)}h` : null;
+}
+
+export function parseZoom(v) {
+  if (v === 'fit') return 'fit';
+  const m = /^(\d+(?:\.\d+)?)h$/.exec(v || '');
+  return m && +m[1] > 0 ? +m[1] : null;
+}
+
 // Where the pause pills go on a plot `width` pixels wide, none over another: the
 // longest pause first, each centered on its pause (kept inside the plot), on the first
 // row with its whole length or else a short one, then on a second row the same way,
@@ -385,6 +423,8 @@ function unfolded(d, r) {
   const activeMin = (end - start - cut.reduce((a, g) => a + g.end - g.start, 0)) / 60e3;
   const W = plotWidth(activeMin, cut.length);
   const x = activeAxis(start, end, d.pauses, 30 * 60e3, Math.min(0.012, TL.gap / W));
+  const share = Math.max(1 - Math.min(0.012, TL.gap / W) * x.gaps.length, 0.3); // as activeAxis
+  let zoom = parseZoom(r && r.query ? r.query.get('zoom') : null); // null: the default width
   const pc = (f) => (f * 100).toFixed(3) + '%';
   const X = (tm) => (x(tm) * W).toFixed(1);
   const xs = R.t.map((tm) => x(tm)); // never decreasing: the requests come in time order
@@ -495,7 +535,8 @@ function unfolded(d, r) {
   // lanes: main thread, then one lane per agent type
   const lanes = [];
   const gapMarks = x.gaps.map((g) => h('div.gapmark', { style: `left:${pc(x(g.start))};width:${pc(x(g.end) - x(g.start))};border-left:0;background:var(--card)` }));
-  const span = (a) => `left:${pc(x(a.first))};width:max(3px, ${pc(Math.max(x(a.last) - x(a.first), 0))})`;
+  // a bar at the very end stays inside the plot, so a plot that fits never scrolls
+  const span = (a) => `left:min(${pc(x(a.first))}, calc(100% - 3px));width:max(3px, ${pc(Math.max(x(a.last) - x(a.first), 0))})`;
   if (d.main) {
     lanes.push(h('div.lab', null, h('b', { text: 'Main thread' })),
       h('div.lane', { style: 'background:transparent' }, tipOn(h('span', { style: `${span(d.main)};background:${entityColor('main', 'agent')}` }),
@@ -568,7 +609,90 @@ function unfolded(d, r) {
     lanes,
     h('div.lab'), axis);
   const scroller = h('div.tlscroll', null, grid);
-  card.append(scroller);
+
+  // zoom: presets of active time per screen, ctrl+wheel (a trackpad's pinch) and a
+  // touch pinch around the pointer; the plot's width changes and every lane, label and
+  // pill follows it. The default (no zoom) is TL.perMinute pixels per active minute.
+  const room = () => scroller.clientWidth - ctxLab.offsetWidth;
+  // a plot that fits takes the room exactly (a max-content grid can come out a few
+  // pixels wider and scroll for nothing)
+  let opened = false, shownFloor = W;
+  const applyFloor = (floor) => {
+    shownFloor = floor;
+    grid.style.gridTemplateColumns = columns(floor);
+    grid.style.width = floor ? '' : '100%';
+  };
+  const floorFor = (rm) => {
+    if (zoom === null) return plotFloor(W, rm);
+    const w = zoom === 'fit' ? rm : zoomClamp(zoomWidth(zoom, activeMin, share, rm), rm);
+    return w <= rm ? 0 : Math.round(w);
+  };
+  const zoomButtons = ZOOMS.map(([z, label]) => h('button', { type: 'button', text: label, 'aria-pressed': 'false', onclick: (e) => {
+    if (e.currentTarget.getAttribute('aria-disabled') === 'true') return;
+    setZoom(z, ctxLab.offsetWidth + room() / 2);
+  } }));
+  const zoomBar = h('div.seg.tlzoom', { role: 'group', 'aria-label': 'Zoom: active time per screen' }, zoomButtons);
+  const markZoom = () => {
+    const rm = room();
+    ZOOMS.forEach(([z], k) => {
+      const b = zoomButtons[k];
+      const w = zoomWidth(z, activeMin, share, rm);
+      const why = z === 'fit' ? null
+        : w > TL.max ? `Too close for a session this long: its plot would pass ${TL.max.toLocaleString('en-US')} px`
+          : w <= rm ? 'The whole session already fits at this zoom' : null;
+      b.setAttribute('aria-disabled', String(!!why));
+      b.title = why || (z === 'fit' ? 'The whole session in the card' : `${z} h of active time per screen`);
+      b.setAttribute('aria-pressed', String(zoom === z && !why));
+    });
+  };
+  let urlTimer = 0;
+  const setZoom = (z, offset) => {
+    zoom = z;
+    const from = pauses.clientWidth || W;
+    const floor = floorFor(room());
+    if (floor !== shownFloor) applyFloor(floor);
+    const to = pauses.clientWidth || floor;
+    scroller.scrollLeft = zoomScroll(scroller.scrollLeft, offset, ctxLab.offsetWidth, from, to);
+    markZoom();
+    clearTimeout(urlTimer);
+    urlTimer = setTimeout(() => {
+      if (!scroller.isConnected) return;
+      const q = new URLSearchParams(location.search);
+      const v = zoomParam(zoom);
+      if (v) q.set('zoom', v); else q.delete('zoom');
+      const qs = q.toString();
+      history.replaceState(history.state, '', location.pathname + (qs ? '?' + qs : ''));
+    }, 250);
+  };
+  // zoom by a factor around a point `offset` pixels into the scroller
+  const zoomBy = (factor, offset) => {
+    const rm = room(), cur = pauses.clientWidth || W;
+    const w = zoomClamp(cur * factor, rm);
+    if (Math.abs(w - cur) < 0.5) return;
+    setZoom(w <= rm ? 'fit' : zoomHours(w, activeMin, share, rm), offset);
+  };
+  scroller.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    hideTip();
+    const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+    zoomBy(Math.exp(-Math.max(-60, Math.min(60, dy)) * 0.01), e.clientX - scroller.getBoundingClientRect().left);
+  }, { passive: false });
+  let pinch = null;
+  const spread = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  scroller.addEventListener('touchstart', (e) => {
+    pinch = e.touches.length === 2 ? spread(e.touches) : null;
+  }, { passive: true });
+  scroller.addEventListener('touchmove', (e) => {
+    if (pinch === null || e.touches.length !== 2) return;
+    e.preventDefault();
+    const now = spread(e.touches);
+    const mid = (e.touches[0].clientX + e.touches[1].clientX) / 2 - scroller.getBoundingClientRect().left;
+    zoomBy(now / Math.max(pinch, 1), mid);
+    pinch = now;
+  }, { passive: false });
+  scroller.addEventListener('touchend', () => { pinch = null; });
+  card.append(zoomBar, scroller);
 
   // an x label or a pause pill partly under the sticky lane names is hidden, at every
   // scroll position, so none shows cut in half
@@ -581,20 +705,20 @@ function unfolded(d, r) {
   };
 
   // opens at the end (the latest requests), or centered on the time a link points at
-  let opened = false, shownFloor = W;
   if (typeof ResizeObserver !== 'undefined') {
     const watch = new ResizeObserver(() => {
       if (!scroller.isConnected) { if (opened) watch.disconnect(); return; }
       if (!scroller.clientWidth) return;
-      const floor = plotFloor(W, scroller.clientWidth - ctxLab.offsetWidth);
-      if (floor !== shownFloor) { shownFloor = floor; grid.style.gridTemplateColumns = columns(floor); }
+      const floor = floorFor(room());
+      markZoom();
+      if (floor !== shownFloor) applyFloor(floor);
       if (!pauses.clientWidth) return;
       placeChips(pauses.clientWidth);
       placeAxis(pauses.clientWidth);
       uncut();
       const scrolls = scroller.scrollWidth > scroller.clientWidth + 1;
       scroller.classList.toggle('scrolls', scrolls);
-      card.querySelector('.split .note').textContent = NOTE + (scrolls ? ' Scroll sideways for the rest; hover for values.' : ' Hover for values.');
+      card.querySelector('.split .note').textContent = NOTE + (scrolls ? ' Scroll sideways for the rest; ctrl+scroll or pinch to zoom; hover for values.' : ' Ctrl+scroll or pinch to zoom; hover for values.');
       if (opened) return;
       opened = true;
       const view = scroller.clientWidth - ctxLab.offsetWidth;
