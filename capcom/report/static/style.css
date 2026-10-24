@@ -55,6 +55,7 @@ button { font: inherit; color: inherit; }
 
 /* sidebar */
 .brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px; text-decoration: none; }
+.brand .mascot { flex: none; margin: -2px 0; } /* 26 px of Roger in the 22 px the row had */
 .brand span { font-family: var(--serif); font-size: 23px; font-weight: 500; line-height: 1; }
 .find { display: flex; flex-direction: column; gap: 6px; }
 .find label, .side-head { font-size: 12px; color: var(--muted); padding: 0 8px; }
@@ -198,6 +199,13 @@ table.data.small td { padding: 5px 10px; }
 .days.key .day:first-child .amt { left: 0; transform: none; }
 .days.key .day:last-child .amt { left: auto; right: 0; transform: none; }
 .day .bar div { min-height: 0; }
+/* a typical day behind the bars: a wider gray bar, the colored one narrower in front */
+.day .typ { position: absolute; bottom: 0; left: 50%; transform: translateX(-50%); width: 100%; max-width: 26px; height: calc(var(--t, 0) * var(--scale)); background: var(--gray); border-radius: 4px 4px 0 0; }
+.days.vs .day .bar { width: 58%; max-width: 15px; position: relative; }
+.days.tight .day .bar, .days.tight .day .typ { width: calc(100% - 3px); }
+.days.tight.vs .day .bar { width: 58%; }
+.days.vs .day .amt { bottom: calc(max(var(--f, 0), var(--t, 0)) * var(--scale) + 4px); }
+div.day { cursor: default; }
 a.day { color: inherit; text-decoration: none; }
 a.day:hover .bar, a.day:focus-visible .bar { filter: brightness(1.15); }
 .daylabs { display: flex; gap: 6px; }
@@ -213,7 +221,13 @@ a.day:hover .bar, a.day:focus-visible .bar { filter: brightness(1.15); }
 .scale i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
 .pairs { display: flex; align-items: flex-end; gap: 12px; height: 150px; border-bottom: 1px solid var(--l15); }
 .pairs > div { flex: 1; height: 100%; display: flex; align-items: flex-end; gap: 3px; }
-.pairs > div > div { flex: 1; border-radius: 3px 3px 0 0; }
+.pairs > div > div { flex: 1; border-radius: 3px 3px 0 0; position: relative; min-width: 0; height: calc(var(--f, 0) * var(--scale)); }
+/* each bar's count or dollars 3 px above it, level or upright as fits its width */
+.pairs { --scale: 84%; }
+.pairs.rot { --scale: 70%; }
+.pairs .amt { position: absolute; bottom: calc(100% + 3px); left: 50%; transform: translateX(-50%); font-size: 10px; line-height: 12px; color: var(--muted);
+  white-space: nowrap; font-variant-numeric: tabular-nums; letter-spacing: -0.2px; pointer-events: none; }
+.pairs.rot .amt { writing-mode: vertical-rl; transform: translateX(-50%) rotate(180deg); }
 .pairlabs { display: flex; gap: 12px; }
 .pairlabs span { flex: 1; text-align: center; font-size: 11px; color: var(--muted); }
 .scroll { overflow-x: auto; }
@@ -222,7 +236,9 @@ a.day:hover .bar, a.day:focus-visible .bar { filter: brightness(1.15); }
 table.data { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 13px; }
 table.data th { text-align: left; color: var(--muted); font-size: 12px; font-weight: 500; padding: 8px 10px; border-bottom: 0.5px solid var(--l15); white-space: nowrap; }
 table.data th button { border: 0; background: none; padding: 0; color: inherit; font-size: 12px; cursor: pointer; }
-table.data th button[aria-pressed="true"] { color: var(--text); font-weight: 600; }
+table.data th[aria-sort="ascending"] button, table.data th[aria-sort="descending"] button { color: var(--text); font-weight: 600; }
+table.data th .sortarrow { margin-left: 3px; }
+table.data th .sortarrow:empty { display: none; }
 table.data td { padding: 10px; border-bottom: 0.5px solid var(--l10); vertical-align: middle; }
 table.data th:first-child, table.data td:first-child { padding-left: 0; }
 table.data th:last-child, table.data td:last-child { padding-right: 0; }
@@ -235,14 +251,44 @@ table.data a.title > span:last-child { font-size: 12px; color: var(--muted); }
 
 /* session view */
 .crumb { display: flex; gap: 6px; font-size: 13px; color: var(--muted); }
+/* Spend's trail ("Spend › Oct 24 › 08:00–09:00") and its previous / next steps */
+.trailrow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; }
+h1.trail nav { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 12px; }
+h1.trail a { color: var(--muted); text-decoration: none; }
+h1.trail a:hover, h1.trail a:focus-visible { color: var(--clay); text-decoration: underline; text-underline-offset: 4px; text-decoration-thickness: 1px; }
+h1.trail .sep { color: var(--muted); opacity: 0.6; font-size: 0.8em; }
+.steps { display: flex; gap: 6px; }
+.stepbtn { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border: 0.5px solid var(--l25); border-radius: 9px;
+  background: var(--card); color: var(--text); font-size: 20px; line-height: 1; text-decoration: none; padding-bottom: 2px; }
+a.stepbtn:hover, a.stepbtn:focus-visible { background: var(--subtle); }
+.stepbtn.none { visibility: hidden; }
+/* a small on/off switch */
+button.switch { display: inline-flex; align-items: center; gap: 8px; min-height: 28px; padding: 0 2px; border: 0; background: none; font: inherit; font-size: 13px; color: var(--muted); cursor: pointer; }
+button.switch .knob { position: relative; width: 28px; height: 16px; border-radius: 8px; background: var(--l25); transition: background 0.15s; }
+button.switch .knob::after { content: ''; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: var(--card); box-shadow: 0 0 0 0.5px var(--l25); transition: left 0.15s; }
+button.switch[aria-checked="true"] { color: var(--text); }
+button.switch[aria-checked="true"] .knob { background: var(--clay); }
+button.switch[aria-checked="true"] .knob::after { left: 14px; }
+@media (prefers-reduced-motion: reduce) { button.switch .knob, button.switch .knob::after { transition: none; } }
 .crumb a { color: var(--clay); }
-/* the gap leaves room for the price's serif, whose text box (Iowan Old Style, on
-   macOS) reaches about 7px above its 1-line-high box */
-.costbig { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
-.costbig .v { font-family: var(--serif); font-size: 40px; line-height: 1; }
+/* the session's cost card: the cost adding up on the left, the number on the right
+   past a thin rule; stacked on a phone, the number first. The side's gap leaves room
+   for the price's serif, whose text box (Iowan Old Style, on macOS) reaches about
+   7px above its 1-line-high box */
+.costcard { display: grid; grid-template-columns: minmax(0, 3fr) minmax(240px, 2fr); align-items: center; gap: 16px 28px; }
+.costcard.alone { grid-template-columns: minmax(0, 1fr); }
+.costside { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; min-width: 0; align-self: stretch; justify-content: center; }
+.costcard:not(.alone) .costside { border-left: 0.5px solid var(--l15); padding-left: 28px; }
+.costside .v { font-family: var(--serif); font-size: 40px; line-height: 1; margin-top: 4px; }
+.costplot { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+@media (max-width: 719.98px) {
+  .costcard { grid-template-columns: minmax(0, 1fr); }
+  .costside { order: -1; }
+  .costcard:not(.alone) .costside { border-left: 0; padding-left: 0; }
+}
 /* the session's cost check: a quiet line under the cost, the parts in a fold */
-.calline { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; max-width: 420px; font-size: 12px; line-height: 1.45; color: var(--muted); text-align: right; }
-.calline .linkbtn { color: var(--clay); min-height: 24px; }
+.calline { max-width: 420px; font-size: 12px; line-height: 1.45; color: var(--muted); }
+.calline .linkbtn { color: var(--clay); min-height: 24px; margin: -4px 0; }
 .calline .bad, .calfold .bad, .calfold tr.bad td { color: var(--clay); }
 details.calfold { display: block; }
 details.calfold > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; cursor: pointer; list-style: none; min-height: 24px; }
@@ -432,6 +478,16 @@ details.rollup .tags { display: flex; flex-wrap: wrap; gap: 6px; align-items: ba
 details.rollup .scopes { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 4px; }
 details.rollup .scopes .stackbar { flex: 0 1 180px; min-width: 96px; }
 .tag.over { background: var(--subtle); color: var(--muted); }
+/* Checks: a kind or finding marked as applied. Its chips link to its change; the
+   kind's row and saving go quieter, and the kinds fully applied sit under a head. */
+details.rollup .applied { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
+details.rollup .applied .vchip { white-space: normal; min-height: 24px; padding: 2px 10px; font-size: 12px; border-radius: 12px; }
+details.rollup .applied .vchip svg { flex: none; }
+.tag.part { background: transparent; border: 0.5px solid var(--l35); color: var(--ink); }
+details.rollup.done > summary b { color: var(--muted); font-weight: 600; }
+.save.done { color: var(--muted); font-size: 18px; }
+h3.donehead { margin: 0; padding: 14px 4px 4px; border-top: 1px solid var(--l10); font-size: 12px; font-weight: 600; color: var(--muted); }
+h3.donehead + details.rollup { border-top: 0; }
 .rfind { display: flex; flex-direction: column; gap: 12px; padding: 0 0 14px; }
 .rfind > .card { box-shadow: none; border: 1px solid var(--l10); }
 .footer { margin: 4px 0 0; max-width: 80ch; }
@@ -632,6 +688,9 @@ code, .mono, pre { overflow-wrap: anywhere; }
   .seg { flex-wrap: wrap; }
   .seg button, button.copy, .sortbar .sortdir, table.data th button, .causechip, button.tag, button.cause.pick { min-height: 44px; min-width: 44px; }
   .calline .linkbtn, details.calfold > summary { min-height: 44px; }
+  button.switch, .stepbtn { min-height: 44px; }
+  .stepbtn { width: 44px; height: 44px; }
+  .calline .linkbtn { margin: -13px 0; vertical-align: middle; } /* the target stays 44px, the line keeps its height */
   .calbody { padding-left: 0; }
 }
 

@@ -1,4 +1,4 @@
-"""Ask Claude: the website's chat, answered by the user's own `claude` CLI.
+"""Ask Roger: the website's chat, answered by the user's own `claude` CLI.
 
 `POST /api/ask` (server.py) takes a question about a part of a page, builds a
 prompt from the few fields allowed in (`build_prompt`), and runs `claude -p`
@@ -12,8 +12,17 @@ sign-in, and only when the user asks in the page. What goes in is what the page
 sends: the page's name, a part's label and its numbers and labels in capcom's own
 wording, the text the user selected on the page (without the private pieces it
 crossed, which are only named), where it sits, the chat's earlier turns and the
-question. The page never sends text
-from the logs beyond tool names, file paths and short labels (static/ask.js).
+question. The page never sends text from the logs beyond tool names, file paths
+and short labels (static/ask.js). With a part comes a reference to what it is
+about (a finding, a marked change, a session, a day, the page's range: `Ref`),
+and the server adds what stands behind it from the index, in capcom's own words
+(askfacts.py): totals by project, model, agent type and day, the top session ids,
+and for an agent the files that define it and the projects that spawned it.
+
+For what the page did not anticipate, the CLI may look things up with capcom's own
+read-only tools, and only those (asktools.py, an MCP server it starts for the one
+question): aggregates, labels, ids and file paths again, never a session's title
+or other text from the logs. Each lookup shows in the chat as it starts.
 
 The child runs in an empty temporary folder (no CLAUDE.md or AGENTS.md to pick
 up), reads the prompt on stdin (not in its arguments, which `ps` shows), and is
@@ -39,7 +48,8 @@ from typing import Any
 
 MODEL = "claude-haiku-5-5"
 MAX_BODY = 20 * 1024  # bytes: a question, a part, a selection and the earlier turns
-TIMEOUT = 60.0  # seconds a question may take, from start to the last word
+TIMEOUT = 90.0  # seconds a question may take, from start to the last word, lookups included
+MAX_TURNS_CLI = 6  # the CLI's turns per question: a few lookups, then the answer
 SLOTS = 2  # questions answered at once
 MAX_PAGE = 40
 MAX_LABEL = 160
@@ -72,6 +82,15 @@ SYSTEM = (
     "words, written the way the person would ask them."
 )
 
+# Added when the CLI has capcom's tools (asktools.py).
+SYSTEM_TOOLS = (
+    " A <facts> block, when there is one, says what stands behind the part, from "
+    "capcom's index. When the page and the facts do not answer, look it up with "
+    "capcom's tools (spend, session, findings, where_defined): at most three lookups, "
+    "then answer. Write nothing before a lookup. The tools never give session titles: "
+    "name a session by its project and date, and a file by its full path."
+)
+
 EXPLAIN = "What does this show, and what stands out?"
 EXPLAIN_SELECTION = "Explain the text I selected, very shortly and simply."
 # How to answer an "Explain" mark (EXPLAIN on a part): the card, then its main
@@ -94,6 +113,15 @@ LEFT_OUT = (
     "your notes",
     "pasted config",
 )
+
+
+# A part's reference (`Ref`): what kinds there are, and the fields each takes.
+REF_KINDS = ("finding", "mark", "session", "day", "view")
+_REF_FINDING = re.compile(r"[a-z][a-z0-9_]{0,59}")
+_REF_SESSION = re.compile(r"[0-9A-Za-z_-]{8,64}")
+_REF_DAY = re.compile(r"\d{4}-\d\d-\d\d")
+MAX_SCOPE = 200
+MAX_DAYS = 90
 
 
 class AskError(Exception):
@@ -128,7 +156,9 @@ def _clean(value: Any, limit: int, name: str, *, required: bool = False) -> str:
 def _fence(text: str) -> str:
     """Text inside a <tag>...</tag> block, unable to close the block early."""
     return re.sub(
-        r"</?(part|selection|chat|message)\b", lambda m: m.group(0).replace("<", "\u2039"), text
+        r"</?(part|selection|chat|message|facts)\b",
+        lambda m: m.group(0).replace("<", "\u2039"),
+        text,
     )
 
 
@@ -144,6 +174,38 @@ class Question:
     selection: str = ""  # the text the user selected, its private pieces left out
     where: str = ""  # where it sits: the page, the card's and the section's headings
     left_out: tuple[str, ...] = ()  # what kinds of private pieces it lost (LEFT_OUT)
+    ref: dict[str, Any] | None = None  # what the part is about (`parse_ref`), checked
+
+
+def parse_ref(raw: Any) -> dict[str, Any] | None:
+    """A part's reference, only its known fields, each checked; None for anything
+    that is not one (a page of an older capcom, a part that has none)."""
+    if not isinstance(raw, dict) or raw.get("kind") not in REF_KINDS:
+        return None
+    kind = raw["kind"]
+
+    def days() -> int | None:
+        d = raw.get("days")
+        return d if isinstance(d, int) and not isinstance(d, bool) and 1 <= d <= MAX_DAYS else None
+
+    if kind == "finding":
+        finding, scope = raw.get("finding"), raw.get("scope")
+        if not (isinstance(finding, str) and _REF_FINDING.fullmatch(finding)):
+            return None
+        if not (isinstance(scope, str) and 0 < len(scope) <= MAX_SCOPE) or _CONTROL.search(scope):
+            return None
+        return {"kind": kind, "finding": finding, "scope": scope, "days": days()}
+    if kind == "mark":
+        i = raw.get("id")
+        ok = isinstance(i, int) and not isinstance(i, bool) and 0 < i < 10**9
+        return {"kind": kind, "id": i} if ok else None
+    if kind == "session":
+        i = raw.get("id")
+        return {"kind": kind, "id": i} if isinstance(i, str) and _REF_SESSION.fullmatch(i) else None
+    if kind == "day":
+        d = raw.get("date")
+        return {"kind": kind, "date": d} if isinstance(d, str) and _REF_DAY.fullmatch(d) else None
+    return {"kind": kind, "days": days()}
 
 
 def parse(body: Any) -> Question:
@@ -179,11 +241,13 @@ def parse(body: Any) -> Question:
     picked = bool(selection or left_out)
     default = EXPLAIN_SELECTION if picked else EXPLAIN
     question = _clean(body.get("question"), MAX_QUESTION, "question") or default
-    return Question(page, label, text, tuple(turns), question, selection, where, left_out)
+    ref = parse_ref(part.get("ref")) if isinstance(part, dict) else None
+    return Question(page, label, text, tuple(turns), question, selection, where, left_out, ref)
 
 
-def build_prompt(q: Question) -> str:
-    """The user message the CLI gets: the page, the part, the chat so far, the question."""
+def build_prompt(q: Question, facts: str = "") -> str:
+    """The user message the CLI gets: the page, the part and what stands behind it
+    (`facts`, askfacts.Facts.context), the chat so far, the question."""
     out = [f"The person is looking at capcom's {q.page} page."]
     if q.selection or q.left_out:
         at = f' (at "{_fence(q.where)}")' if q.where else ""
@@ -208,6 +272,11 @@ def build_prompt(q: Question) -> str:
             "What it shows, in capcom's own words and numbers:"
         )
         out.append(f"<part>\n{_fence(q.part)}\n</part>")
+    if facts:
+        out.append(
+            "What stands behind it, from capcom's index, in capcom's own words:\n"
+            f"<facts>\n{_fence(facts)}\n</facts>"
+        )
     if q.history:
         who = {"user": "Person", "assistant": "You"}
         lines = [f"{who[role]}: {_fence(text)}" for role, text in q.history]
@@ -235,11 +304,27 @@ def find_claude() -> str | None:
     return shutil.which("claude")
 
 
-def command(claude: str) -> list[str]:
-    """`claude -p` with nothing to act with: no tools, no MCP servers (with `ENV`,
-    not the claude.ai connectors either), no slash commands or skills, no settings
-    files (so no hooks or plugins from them), no session saved; the answer as
-    stream-json with the partial messages."""
+def command(claude: str, tools: str | None = None) -> list[str]:
+    """`claude -p` with nothing to act with: no built-in tools, no MCP servers (with
+    `ENV`, not the claude.ai connectors either) but capcom's own when `tools` gives
+    its `--mcp-config` (asktools.mcp_config), and then only its tools allowed and
+    anything else denied without asking; no slash commands or skills, no settings
+    files (so no hooks or plugins from them), no session saved, a few turns; the
+    answer as stream-json with the partial messages."""
+    lookups: list[str] = []
+    system = SYSTEM
+    if tools is not None:
+        from capcom.report.asktools import allowed
+
+        lookups = [
+            "--mcp-config",
+            tools,
+            "--allowedTools",
+            allowed(),
+            "--permission-mode",
+            "dontAsk",
+        ]
+        system = SYSTEM + SYSTEM_TOOLS
     return [
         claude,
         "-p",
@@ -248,6 +333,7 @@ def command(claude: str) -> list[str]:
         "--tools",
         "",
         "--strict-mcp-config",
+        *lookups,
         "--setting-sources",
         "",
         "--disallowedTools",
@@ -255,6 +341,8 @@ def command(claude: str) -> list[str]:
         "--disable-slash-commands",
         "--no-session-persistence",
         "--no-chrome",
+        "--max-turns",
+        str(MAX_TURNS_CLI),
         "--effort",
         "low",
         "--output-format",
@@ -262,7 +350,7 @@ def command(claude: str) -> list[str]:
         "--verbose",
         "--include-partial-messages",
         "--system-prompt",
-        SYSTEM,
+        system,
     ]
 
 
@@ -336,6 +424,52 @@ def text_of(event: dict[str, Any]) -> str | None:
     return None
 
 
+# What the chat says while a lookup runs: capcom's own words for each tool
+# (asktools.TOOLS), never the CLI's arguments but the grouping's name.
+LOOKUPS = {
+    "spend": "Looking up the spend",
+    "session": "Looking up a session",
+    "findings": "Looking up the findings",
+    "where_defined": "Looking up where it is defined",
+}
+LOOKUP_ANY = "Looking up something"
+_BY = {
+    "project": "project",
+    "model": "model",
+    "agent_type": "agent type",
+    "day": "day",
+    "session": "session",
+}
+_TOOL_PREFIX = "mcp__capcom__"
+
+
+def lookups_of(event: dict[str, Any]) -> list[dict[str, str]]:
+    """The lookups an assistant message starts, as `{"type": "tool", ...}` lines."""
+    if event.get("type") != "assistant":
+        return []
+    message = event.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    out: list[dict[str, str]] = []
+    for block in content if isinstance(content, list) else []:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        name = block.get("name")
+        short = (
+            name[len(_TOOL_PREFIX) :]
+            if isinstance(name, str) and name.startswith(_TOOL_PREFIX)
+            else ""
+        )
+        label = LOOKUPS.get(short, LOOKUP_ANY)
+        args = block.get("input")
+        by = args.get("group_by") if isinstance(args, dict) else None
+        if short == "spend" and isinstance(by, str) and by in _BY:
+            label += f" by {_BY[by]}"
+        tool = short if short in LOOKUPS else ""
+        done = "Looked up" + label[len("Looking up") :]
+        out.append({"type": "tool", "tool": tool, "label": label + "…", "done": done})
+    return out
+
+
 @dataclass(slots=True)
 class Child:
     """A running `claude -p`: started in its own process group, killed by PID."""
@@ -365,12 +499,13 @@ class Child:
         shutil.rmtree(self.folder, ignore_errors=True)
 
 
-def start(claude: str, prompt: str) -> Child:
-    """Start the CLI on the prompt, in an empty temporary folder."""
+def start(claude: str, prompt: str, tools: str | None = None) -> Child:
+    """Start the CLI on the prompt, in an empty temporary folder; with `tools` (an
+    `--mcp-config`), able to look things up with capcom's tools only."""
     folder = tempfile.mkdtemp(prefix="capcom-ask-")
     try:
         proc = subprocess.Popen(
-            command(claude),
+            command(claude, tools),
             cwd=folder,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -406,6 +541,7 @@ def stream(
     error: str | None = None
     end = clock() + timeout
     eof = False
+    looked = False  # a lookup started since the last piece of text
     while not eof:
         if gone():
             child.kill()
@@ -438,9 +574,19 @@ def stream(
                 continue
             piece = text_of(event)
             if piece:
+                if looked and split.text and not split.text[-1].isspace():
+                    piece = " " + piece  # the answer goes on after a lookup
+                looked = False
                 shown = split.feed(piece)
                 if shown:
                     yield {"type": "text", "text": shown}
+            elif event.get("type") == "assistant":
+                for line in lookups_of(event):
+                    looked = True
+                    yield line
+            elif event.get("type") == "result" and event.get("subtype") == "error_max_turns":
+                if not split.text:
+                    error = "Roger used all his lookups without an answer. Ask a narrower question."
             elif event.get("type") == "result" and event.get("is_error"):
                 said = event.get("result")
                 ok = isinstance(said, str) and bool(said)

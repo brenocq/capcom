@@ -2,7 +2,7 @@
 
 `capcom serve` listens on `127.0.0.1` only (default port 8787). Every endpoint is a
 `GET` (`HEAD` gives the same headers without the body) but two: `POST /api/changes`
-(the marks of "Did it work?", below) and `POST /api/ask` (Ask Claude, at the end);
+(the marks of "Did it work?", below) and `POST /api/ask` (Ask Roger, at the end);
 other methods and paths get 405. There are no CORS headers, and a request whose `Host`
 header is not `127.0.0.1` or `localhost` gets 403 (DNS rebinding). Each request opens
 the index read-only and closes it before answering.
@@ -135,8 +135,14 @@ folder (`~` for home) for a tooltip. A model is named by its price-table id (a s
 dated id is one group.
 
 **Session row**: `session_id, title, project, project_path, project_dir, temporary, git_branch,
-subagents, active_seconds, first, last, peak_context, cache_read_share, usd, requests,
-estimated_output`. `temporary` is true for a folder under a temporary root (/tmp; on macOS also /private/tmp and $TMPDIR under /var/folders). Active time sums the gaps under 5 minutes between consecutive
+subagents, active_seconds, first, last, peak_context, cache_read_share, usd,
+usd_per_active_hour, prompts, requests, estimated_output`. `usd_per_active_hour` is
+`usd` over the active time, null for a session active under 5 minutes. `prompts`
+counts the messages the user sent in the window on the main thread (typed, queued or
+headless prompts and slash commands; not tool results, subagent prompts or task
+notifications), null where an endpoint does not count them or where the count is
+unknown: the session's main log was gone before capcom recorded prompts (an index
+from before schema 9), or it has none (OpenClaw's own database). `temporary` is true for a folder under a temporary root (/tmp; on macOS also /private/tmp and $TMPDIR under /var/folders). Active time sums the gaps under 5 minutes between consecutive
 requests of the session.
 
 **Cumulative**: `{step_s, times: [ms], members: [{key, label, final}], values:
@@ -257,16 +263,28 @@ days. The week holds 6 full days and today so far; its daily average divides by
 main threads, else the agent type; projects as in "Projects" above.
 
 ### `GET /api/spend?days=14&group=category`
+### `GET /api/spend?day=<YYYY-MM-DD>` and `GET /api/spend?hour=<YYYY-MM-DDTHH>`
 
-`days` is one of 7, 14, 30, 90; `group` one of `category`, `project`, `model`, `agent`
-(also accepted as `agent_type`), `session`.
+`days` is one of 1 (today), 7, 14, 30, 90; `group` one of `category`, `project`,
+`model`, `agent` (also accepted as `agent_type`), `session`. `day` narrows the reply to
+one local day and `hour` to one local clock hour (`days` is then ignored; both together
+are a 400). An hour is written as its local wall time, `2026-10-24T08` (`:00` and
+`:00:00` also accepted); in the hour clocks fall back, the second of the two takes its
+UTC offset (`2026-10-25T02+01:00`, a `+` read as a space too) and the bare wall time
+reads as the first. 400 for a malformed day or hour or one not on the hour, 404 for a
+day or hour not yet begun.
 
 ```
-{window: {days, since, until, group}, totals, sessions_count, temporary_sessions,
- cumulative: Cumulative | null,       # steps: 30 min (7 d), 1 h (14 d), 2 h (30 d), 6 h (90 d)
+{window: {scale: "range" | "day" | "hour", days, since, until, end, day, hour,
+          current, prev, next, group},
+ totals, sessions_count, temporary_sessions,
+ cumulative: Cumulative | null,       # steps: 30 min (7 d), 1 h (14 d), 2 h (30 d), 6 h (90 d),
+                                      # 5 min (a day, or today), 1 min (an hour)
  spikes: Spikes | null,
- regime: Regime | null,               # a change dated inside the window
- daily: {members: [{key, label}], days: [{date, values, total}]} | null,
+ regime: Regime | null,               # a change dated inside the window; ranges only
+ daily: {members: [{key, label}], days: [{date, values, total}]} | null,   # ranges only
+ hourly: {members, hours: [{start, values, total}]} | null,   # a day or today: each local hour
+ minutes: {members, hours: [{start, values, total}]} | null,  # an hour: each 5 minutes
  heatmap: {weekdays: [Mon..Sun], cells: [7][24] USD, max,
            hours: [{start, usd, project}],   # each local hour with spend, in time order
            top_projects: [7][24] label | null} | null,
@@ -288,9 +306,30 @@ out the past days by date from it and finds the dates behind a weekday-and-hour 
 its `usd` add up to the cells. `top_projects` is the costliest project of each cell
 over the window, null for a cell without spend.
 
+For a day or an hour, `since` and `end` are its bounds, `until` the earlier of `end`
+and now, `current` whether it holds now (always true for a range), and `prev` and
+`next` the neighboring day or hour in the same form as the query (`next` null when it
+has not begun). `day` is the local date (of the hour, for an hour), `hour` the hour's
+key. `hourly.hours` lists every local hour of the day (23 or 25 on a daylight-saving
+change), `minutes.hours` the twelve 5-minute slots of the hour; slots still to come
+have zero spend. `heatmap` is null for a day or an hour, and `sessions` lists the
+costliest sessions with spend inside it.
+
 `sessions_count` leaves out the sessions in temporary folders (/tmp), counted apart in
 `temporary_sessions`; together they are `/api/sessions`' `total` for the same `days`
 (whose `temporary` counts the same temporary sessions).
+
+### `GET /api/typical-hours?day=<YYYY-MM-DD>`
+
+The typical spend of each local clock hour, drawn behind Spend's per-hour bars of a
+day: the mean over the 28 days before `day` (that day left out), counting only the days
+since capcom's first request, so a short history is not pulled toward zero. 400 for a
+malformed day, 404 for a day not yet come.
+
+```
+{day, of_days: 28, days,              # days: how many days the mean is over
+ hours: [{start, usd}]}               # each local hour of `day`, as /api/spend's hourly
+```
 
 ### `GET /api/day/<YYYY-MM-DD>?group=category|project|model|agent`
 
@@ -348,12 +387,13 @@ before. `causes` sums their named causes (never the unexplained rest) by cause, 
 first; `title` is the headline of the largest. `spikes` is null without
 `capcom.timeline`, `causes` without `capcom.explain` (both listed in `unavailable`).
 
-### `GET /api/sessions?days=14&q=&sort=usd&limit=200`
+### `GET /api/sessions?days=14&q=&sort=usd&dir=desc&limit=200`
 
 `days` 0 means all time. `q` matches the title, the project label or folder, or an
 agent type of the session (case-insensitive). `sort`: `usd`, `last`, `peak_context`,
-`active_seconds`, `subagents`, `requests` (descending, ties by cost; zeros sort as
-numbers, missing values last).
+`active_seconds`, `subagents`, `requests`, `prompts`, `usd_per_active_hour`; `dir`: `desc` (the default) or `asc`.
+Ties go by cost in the same direction; zeros sort as numbers, and missing values
+come last in both directions (costliest first among them).
 `{window: {days, since, until}, total, temporary, sessions: [Session row]}`: `total`
 counts every matching session, temporary folders included (`temporary` of them).
 
@@ -377,6 +417,8 @@ counts every matching session, temporary folders included (`temporary` of them).
            peak_context, finished}],   # time order; description null when not logged
  agent_types: [{agent_type, spawns, tool_calls, median_tool_calls, average_peak_context,
                 usd, share}],   # main: spawns and median_tool_calls null (one thread)
+ cost_series: {t: [ms], cache_read: [usd], cache_write: [usd], output: [usd], input: [usd]},
+                        # the cost so far after request t[i], per category (web in output)
  pauses: [{start, end, minutes, next_usd, next_cache_write}],    # gaps of 5 minutes or more
  compactions: [{t, agent_id, trigger, pre_tokens, post_tokens}],
  spikes: {count, excess_usd, explained, items: [Spike item]} | null}
@@ -399,7 +441,10 @@ dropped requests of its thread since that thread's previous kept one (a thread w
 none kept goes to the next kept request), so the spend rate drawn from it sums to the
 session's cost. The
 session's first and last request stay. Totals, `main`, `agents` and
-`pauses` count every request. `reason_labels` are the `reasons` in words (the ids
+`pauses` count every request, and so does `cost_series`, the cost adding up for
+the session's cost card: about 300 requests evenly spread, the first and last, and
+the two requests around every pause of 30 minutes or more (the charts squeeze those),
+so its last point is `totals`. `reason_labels` are the `reasons` in words (the ids
 come from `capcom.cost.calibrate`). Claude Code's cost-state counts the processes
 that wrote one, step by step (a resumed process carries the totals on, and the growth
 of `totalDuration` dates its step): `part` is the stretch of the session they compare,
@@ -479,7 +524,9 @@ The subscription's 5-hour and weekly windows from `capcom.limits`: the samples
 `capcom record-limits` appends to `limits.jsonl` in the state folder
 (`$XDG_STATE_HOME/capcom`, else `~/.local/state/capcom`: no scan rebuilds them, so they
 stay out of the cache), and the seed from the index's rate-limit errors. `days` is one
-of 7, 14, 30, 90 and bounds `segments`. `group` (default `category`; also accepted as
+of 1, 7, 14, 30, 90, in calendar days as `/api/spend` counts them (1 is today), and
+bounds `segments` to the windows that end after `since` (local midnight `days` - 1
+days back); the weekly window keeps at least its newest segment. `group` (default `category`; also accepted as
 `agent_type` for `agent`) is one of `category`, `project`, `model`, `agent` and splits
 each segment's spend (`by`); a split by session is a 400, as is an unknown group.
 The reply's cache key also holds the size and modification time of `limits.jsonl`
@@ -487,7 +534,7 @@ The reply's cache key also holds the size and modification time of `limits.jsonl
 without a scan.
 
 ```
-Limits = {available, recording, message, install, samples, last_sample, recording_since, days, group,
+Limits = {available, recording, message, install, samples, last_sample, recording_since, days, since, group,
           windows: {five_hour: Window | null, seven_day: Window | null},  # the current account's
           accounts: [Account],          # the current one first; absent without samples
           combined: Combined | null}    # null with fewer than two accounts
@@ -622,12 +669,14 @@ time, `base` plus the members' percents is `fitted.percent`.
 {days, since, until, overlapping,
  total: {usd_per_week, findings, of, all, text,
          judgement_calls: {usd_per_week, findings, items: [{kind, scope, usd_per_week}]}?} | null,
+ applied: {findings, usd_per_week} | null,
  rollups: [{kind, title, headline, saving_usd_per_week, scope_noun,
             scopes: [{scope, scope_label, saving_usd_per_week, share}],
-            findings: [n], overlaps: [kind], judgement_call, counted}],
+            findings: [n], overlaps: [kind], judgement_call, counted, applied,
+            open_saving_usd_per_week}],
  findings: [{n, kind, title, scope, scope_label, scope_path, summary, saving_usd_per_week, advice, change,
              evidence: [Evidence], metrics, overlaps: [kind], counted, overlapped_by: [n],
-             visual}],
+             visual, finding_id, mark, measure, applied}],
  small: {findings, usd_per_week, below_usd_per_week},
  footer}
 ```
@@ -642,6 +691,14 @@ Findings under $0.10/week are not in `findings` nor in the total: `small` counts
 them. `judgement_calls` (only when there are any) are findings whose saving trades
 quality (a cheaper model for an agent): never in the total. `footer` says in words
 what the total covers.
+
+A finding with an open mark (`mark`, from Did it work?) is `applied`: its change is
+made, so it leaves `total`, `counted` and `overlapped_by` (all three are worked out over
+the findings not applied, so a smaller finding an applied one kept out counts again),
+and `applied` sums those findings (their own total, overlaps counted once; null when
+none). A roll-up's `applied` counts its applied findings and
+`open_saving_usd_per_week` is its saving over the others (0 when all are); the kinds
+fully applied come after the open ones, which are ordered by that saving.
 
 Findings come ranked by weekly saving; `scope_label` names a project scope as in
 "Projects" (other scopes, an agent type or `all`, as they are). Some savings count the same dollars
@@ -785,7 +842,7 @@ before the first day the index holds; `id` must be an open mark (404). The reply
 `{mark: Mark}`, or `{unmarked: id}`. `capcom serve --read-only` answers 405 and the
 pages leave out every button that writes.
 
-### Ask Claude
+### Ask Roger
 
 #### `POST /api/ask`
 
@@ -795,18 +852,33 @@ in the panel; the choice stays in that browser. Each question starts the user's 
 `claude` CLI headless:
 
 ```
-claude -p --model claude-haiku-5-5 --tools "" --strict-mcp-config --setting-sources ""
+claude -p --model claude-haiku-5-5 --tools "" --strict-mcp-config
+  --mcp-config <capcom's own server> --allowedTools mcp__capcom__spend,...
+  --permission-mode dontAsk --setting-sources ""
   --disallowedTools Bash,Write,Edit,... --disable-slash-commands --no-session-persistence
-  --no-chrome --effort low --output-format stream-json --verbose --include-partial-messages
-  --system-prompt <capcom's>
+  --no-chrome --max-turns 6 --effort low --output-format stream-json --verbose
+  --include-partial-messages --system-prompt <capcom's>
 ```
 
 with `ENABLE_CLAUDEAI_MCP_SERVERS=false`, in an empty temporary folder, the prompt on
 stdin. capcom makes no network request itself; the CLI does, signed in as the user.
 
+The one MCP server is capcom's (`asktools.py`, `python -I -m capcom.report.asktools
+--index <path> --now <iso> [--tz <zone>]`), which the CLI starts for the question and
+which ends with it. Its four read-only tools answer from the index (`askfacts.py`),
+in aggregates, labels, ids and file paths only, never a session's title or other
+text from the logs, at most 4 calls per question:
+
+| Tool | Arguments | Answers |
+| --- | --- | --- |
+| `spend` | `group_by` (project, model, agent_type, day, session), `days` (1 to 90, default 14) or `since`/`until` (local dates), filters `project`, `model` (a part of the id, such as "opus"), `agent_type` ("main": the main threads), `session_id` | the total and up to 15 rows (every day for `day`): dollars, share, requests, sessions; a project's folder; a session's id, project, folder, first and last request |
+| `session` | `session_id` (or its first 8 characters) | its project, folders, entrypoint, version, first and last request, total, spend by model, agent type and day, subagents spawned by type |
+| `findings` | `days` | the Checks findings: kind, scope, title, summary, saving per week, numeric metrics (no evidence) |
+| `where_defined` | `name`, `kind` (agent, skill, command) | the files that define it (a project's `.claude/`, `~/.claude/`, a plugin's folder), and for an agent the projects that spawned it |
+
 Guarded like `POST /api/changes`: this launch's token in `X-Capcom-Token`, an Origin
 (or Referer) of this server, `application/json`, a Content-Length of at most 20 KB.
-Two answers at a time (a third gets 429), each stopped after 60 s; when the page
+Two answers at a time (a third gets 429), each stopped after 90 s, lookups included; when the page
 closes the connection the child is killed by its PID (and its process group).
 `--no-ask` turns it off (405); `--read-only` does not, as it writes nothing.
 
@@ -814,9 +886,13 @@ Body, every other field ignored:
 
 ```
 {page: "Checks",                         # the page's name
- part: {label, text} | null,             # the part a mark was clicked on (at most 160
+ part: {label, text, ref} | null,        # the part a mark was clicked on (at most 160
                                          #   and 3000 characters): its numbers and labels
                                          #   in capcom's words, never text from the logs
+                                         # ref: what it is about, each field checked, else
+                                         #   dropped: {kind: "finding", finding, scope, days},
+                                         #   {kind: "mark", id}, {kind: "session", id},
+                                         #   {kind: "day", date}, {kind: "view", days}
  selection: "..." | null,                # the text the user selected (at most 1000
                                          #   characters), each private piece it crossed
                                          #   replaced by "[left out]"
@@ -835,10 +911,18 @@ sessions, a session page's heading, a spike's session), a subagent's spawn
 description, evidence rows, tables, the user's notes and anything typed in a field,
 and pasted config (`PRIVATE` in `static/ask.js`).
 
+With a `ref`, the server adds to the prompt what stands behind the part, from the
+index, in at most about 600 tokens (`askfacts.Facts.context`): the total over the
+part's range and its split by project (with folders), model, agent type and day, the
+top 3 session ids, and for an agent type the files that define it and the projects
+that spawned it; for a marked change, from 4 weeks before its date.
+
 Reply: `200 application/x-ndjson`, one JSON object per line as the answer is written,
 until the connection closes:
 
 ```
+{type: "tool", tool, label, done}        # a lookup starts: "Looking up the spend by
+                                         #   project…", and "Looked up ..." once it is done
 {type: "text", text}                     # the next piece of the answer
 {type: "done", suggestions: [str]}       # last: 2 or 3 suggested replies
 {type: "error", error: "timeout"|"claude_failed", message}   # last, instead of done

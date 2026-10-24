@@ -118,8 +118,8 @@ def _log(project: str, session: str, agent: str | None = None) -> LogFile:
     return LogFile(Path(f"/logs/{project}/{session}.jsonl"), LogKind.SESSION, project, session)
 
 
-def _put(ix: SqliteIndex, log: LogFile, records: Sequence[Record]) -> None:
-    ix.apply(log, Batch(list(records), 100), FileState(log.path, 1, 100, 1, 100))
+def _put(ix: SqliteIndex, log: LogFile, records: Sequence[Record], pos: int = 100) -> None:
+    ix.apply(log, Batch(list(records), pos), FileState(log.path, 1, 100, 1, pos))
 
 
 def model_usage(reqs: Sequence[Request]) -> dict[str, ModelUsage]:
@@ -153,14 +153,20 @@ def build_index(path: Path) -> Path:
         "s1", 99, total_cost_usd=round(usd(S1_MAIN + S1_AGENT), 6),
         models=model_usage(S1_MAIN + S1_AGENT),
     )  # fmt: skip
-    _put(ix, _log(ALPHA, "s1"), [s1, *S1_MAIN, *SYNTH, compaction, cost_state])
+    prompts = [  # two messages the user sent (the counts of the Sessions table)
+        Event(EventKind.PROMPT, "s1", None, ago(hours=5, minutes=50), "p1:prompt", {}),
+        Event(EventKind.PROMPT, "s1", None, ago(hours=5, minutes=45), "p2:prompt", {}),
+    ]
+    _put(ix, _log(ALPHA, "s1"), [s1, *S1_MAIN, *SYNTH, compaction, cost_state, *prompts])
     scout = AgentInfo("a1", "s1", agent_type="scout", description="Map the parser", finished=True)
     _put(ix, _log(ALPHA, "s1", "a1"), [scout, *S1_AGENT])
     s2 = SessionInfo("s2", TMP, cwd="/tmp/scratch/1", first_seen=S2[0].timestamp)
     _put(ix, _log(TMP, "s2"), [s2, *S2])
     s3 = SessionInfo("s3", BETA, cwd="/home/user/beta", title="Beta fixes")
     _put(ix, _log(BETA, "s3"), [s3, *S3])
-    _put(ix, _log(BETA, "s4"), [SessionInfo("s4", BETA, cwd="/home/user/beta"), *S4])
+    # s4's log was queued for a reread (pos 0) and never read again: gone from disk,
+    # so its prompts are unknown
+    _put(ix, _log(BETA, "s4"), [SessionInfo("s4", BETA, cwd="/home/user/beta"), *S4], pos=0)
     ix.close()
     return path
 

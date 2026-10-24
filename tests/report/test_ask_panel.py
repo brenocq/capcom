@@ -1,4 +1,4 @@
-"""The Ask Claude panel (static/ask.js) in headless Chrome, on the synthetic site with
+"""The Ask Roger panel (static/ask.js) in headless Chrome, on the synthetic site with
 a fake `claude` on PATH: the button and the marks, the one-time opt-in notice
 (nothing is sent before it), a mark's question with its part attached, the
 streamed answer with suggested replies that ask the next question with the chat
@@ -27,8 +27,13 @@ pytestmark = pytest.mark.skipif(
 )
 
 NOTICE = (
-    "Ask Claude sends the numbers and labels on this part of the page, or the text you "
-    "select, to Claude through your own claude CLI. No text from your logs is sent."
+    "Ask Roger sends the numbers and labels on this part of the page, or the text you "
+    "select, to Claude through your own claude CLI, with capcom"
+    "\N{RIGHT SINGLE QUOTATION MARK}s totals behind them: "
+    "spend by project, model, agent type and day, session ids and the paths of the files "
+    "that define your agents. Roger may look up more of these totals and capcom"
+    "\N{RIGHT SINGLE QUOTATION MARK}s Checks findings, with their titles and summaries. "
+    "No text from your logs is sent, not even session titles."
 )
 
 
@@ -247,7 +252,7 @@ def test_explain_sends_a_tables_numbers_never_its_session_titles(
         # its own heading as the label, and the table's rows as numbers after their headers
         assert 'this part of the page ("Costliest sessions")' in sent
         assert "A table of " in sent and "a session: Subagents " in sent
-        assert ", Cost $" in sent and "Peak context " in sent
+        assert ", Cost $" in sent and "Prompts " in sent
         assert EXPLAIN in sent and EXPLAIN_HOW in sent
 
         # a limit window's page: its cards are labeled by their own headings

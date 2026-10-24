@@ -202,16 +202,23 @@ def test_day_tabs_follow_the_recorded_history() -> None:
 globalThis.location = { search: '' };
 const m = await import('./limits.js');
 const now = 1_792_000_000_000, day = 864e5;
-const short = m.dayTabs(14, now - 2 * day, now);
-const tabs = m.dayTabs(14, now - 10 * day, now);
-const buttons = tabs.children.map((b) => ({ text: b.children[0].data, off: b.attrs['aria-disabled'] || null, title: b.attrs.title || null }));
-console.log(JSON.stringify({ short, buttons }));
+const read = (tabs) => tabs.children.map((b) => ({ text: b.children[0].data, off: b.attrs['aria-disabled'] || null, title: b.attrs.title || null, on: b.attrs['aria-pressed'] }));
+console.log(JSON.stringify({ short: read(m.dayTabs(1, now - 2 * day, now)), buttons: read(m.dayTabs(14, now - 10 * day, now)) }));
 """
     )
-    assert got["short"] is None  # a shorter history than the shortest range: no tabs
+    # Spend's picker, shown even on a short history: today and 7 days always differ
+    assert [b["text"] for b in got["short"]] == ["Today", "7 days", "14 days", "30 days", "90 days"]
+    assert [b["on"] for b in got["short"]] == ["true", "false", "false", "false", "false"]
+    assert {b["text"]: b["off"] for b in got["short"]}["7 days"] is None
     offs = {b["text"]: b["off"] for b in got["buttons"]}
-    assert offs == {"7 days": None, "14 days": None, "30 days": "true", "90 days": "true"}
-    assert "Recording began 10 days ago" in got["buttons"][2]["title"]
+    assert offs == {
+        "Today": None,
+        "7 days": None,
+        "14 days": None,
+        "30 days": "true",
+        "90 days": "true",
+    }
+    assert "Recording began 10 days ago" in got["buttons"][3]["title"]
 
 
 @needs_node

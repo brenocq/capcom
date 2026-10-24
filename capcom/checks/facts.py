@@ -17,11 +17,13 @@ write premium a rewrite finding counts on the same request. A rewrite after a
 pause past the cache lifetime has one of three causes (expiry_kind): the thread's
 last tool call ran past the lifetime (`tool_waits`, any thread), a subagent was
 resumed late by its parent (`resumes`), or the main thread waited on the user
-(`idle`). Main threads also keep a histogram of their contexts (10k-token buckets
-with the read price summed per bucket), so the session checks can price the
-rereads above any line without holding the requests. Nothing here holds a whole
-log or every request in memory: only the threads, their open items and per-item
-totals.
+(`idle`); the thread's cache lived as long as its last write's lifetime said. The
+same stream feeds capcom.checks.lifetimes, which prices the window's cache reads and
+writes under three ways to run the cache (`cache_plans`). Main threads also keep a
+histogram of their contexts (10k-token buckets with the read price summed per
+bucket), so the session checks can price the rereads above any line without
+holding the requests. Nothing here holds a whole log or every request in memory:
+only the threads, their open items and per-item totals.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from datetime import datetime, timedelta
 from itertools import pairwise
 from statistics import median
 
+from capcom.checks.lifetimes import Planner, Plans
 from capcom.cost.model import price, price_usage
 from capcom.cost.prices import is_placeholder, normalize
 from capcom.explain.rules import RESUME_REACH, RESUME_SKEW, RESUME_TOOLS, USER_TOOLS
@@ -137,6 +140,7 @@ class Thread:
     last_calls: int = 0  # tool calls of the last request
     last_stop: str | None = None
     write_1h: bool = False  # the thread's last cache write used the 1-hour lifetime
+    wrote: bool = False  # the thread has written to the cache (write_1h is known)
     away_at: datetime | None = None  # the last away_summary
     # main threads: context bucket -> [requests, sum of read rates, sum of ctx x rate]
     hist: dict[int, list[float]] = field(default_factory=dict)
@@ -243,6 +247,8 @@ class Facts:
     model_mix: dict[tuple[str, str], ModelMix] = field(default_factory=dict)
     session_span: dict[str, timedelta] = field(default_factory=dict)  # first to last seen
     session_first: dict[str, datetime] = field(default_factory=dict)  # first seen
+    # the window's cache cost per thread kind under each way to run the cache
+    cache_plans: dict[str, Plans] = field(default_factory=dict)
 
     @property
     def weeks(self) -> float:
@@ -347,6 +353,7 @@ _INTERESTING = frozenset(
         EventKind.COMPACTION,
         EventKind.SPAWN,
         EventKind.AWAY,
+        EventKind.API_REQUEST,  # a request's start and lifetime (capcom.checks.lifetimes)
     }
 )
 
@@ -386,6 +393,7 @@ class _Pass:
         self.resume_calls: dict[str, deque[tuple[datetime, str | None]]] = {}
         self._reads: dict[tuple[str, str | None, str | None, object], float] = {}
         self._writes: dict[tuple[str, str | None, str | None, object, bool], float] = {}
+        self.planner = Planner(table, since)
 
     def read_rate(self, r: Request) -> float:
         key = (r.model, r.speed, r.inference_geo, r.timestamp.date())
@@ -555,8 +563,10 @@ class _Pass:
         rewrote = ctx >= MIN_REWRITE_TOKENS and u.cache_write >= REWRITE_SHARE * ctx
         if t.last is not None and not placeholder and rewrote:
             gap = r.timestamp - t.last
-            # the lifetime the write used; a pause under 5 minutes is never an expiry
-            ttl = CACHE_TTL_1H if u.cache_write_1h > 0 else CACHE_TTL_5M
+            # the lifetime the thread's cache lived: what its last write used (the
+            # rewriting request's own, for a thread that never wrote before)
+            one_hour = t.write_1h if t.wrote else u.cache_write_1h > 0
+            ttl = CACHE_TTL_1H if one_hour else CACHE_TTL_5M
             who = (
                 "main thread"
                 if r.agent_id is None
@@ -568,10 +578,8 @@ class _Pass:
             elif gap > ttl:
                 self.expiry(t, r, project, who, gap, ttl)
 
-        if u.cache_write_1h > 0:
-            t.write_1h = True
-        elif u.cache_write_5m > 0:
-            t.write_1h = False
+        if u.cache_write > 0:
+            t.write_1h, t.wrote = u.cache_write_1h > 0, True
         reread = 0.0 if placeholder else self.read_rate(r)
         if r.agent_id is None and reread > 0:
             self.main_thread(t, r, ctx, reread)
@@ -889,9 +897,12 @@ class _Pass:
             self.flush(when)
             if isinstance(rec, Request):
                 self.request(rec)
+                self.planner.request(rec)
             else:
                 self.event(rec)
+                self.planner.event(rec)
         self.flush(None)
+        f.cache_plans = self.planner.plans
         for t in f.threads.values():
             for key in list(t.items):
                 self.close(t, key)

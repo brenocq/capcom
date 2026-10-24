@@ -1,10 +1,10 @@
-"""Ask Claude on a selection (static/ask.js) in headless Chrome, on the synthetic site
+"""Ask Roger on a selection (static/ask.js) in headless Chrome, on the synthetic site
 with a fake `claude` on PATH: the button beside the selected text (shown once the
 selection settles, by mouse, keyboard or touch, never over the selection, following
 it as the page scrolls, gone when it is cleared or on Escape, never for the chat's
 own text or a field), the question it asks after the opt-in, what a selection that
 crosses session titles, evidence rows or pasted config sends (none of them), and the
-sidebar's network line with Ask Claude on, off and under `--no-ask`."""
+sidebar's network line with Ask Roger on, off and under `--no-ask`."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 NET_OFF = "Local and read-only. No network."
-NET_ON = "Local and read-only. Only Ask Claude uses the network, through your claude CLI."
+NET_ON = "Local and read-only. Only Ask Roger uses the network, through your claude CLI."
 
 SCROLLER = (
     "(() => { const m = document.getElementById('main');"

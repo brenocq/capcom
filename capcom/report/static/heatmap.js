@@ -3,7 +3,7 @@
 // days"). Each cell is a button: hover or focus shows its dollars and costliest
 // project, a click (or Enter) opens a panel under the grid that says why the hour
 // cost what it did (/api/hour). A typical-week cell first lists the dates behind
-// it. The view and the open hour live in the URL (`heat=week`, `hour=<ISO>`).
+// it. The view and the open hour live in the URL (`heat=week`, `cell=<ISO>`).
 
 import {
   h, api, usd, pct, two, monthDay, barList, sessionHref, sessionDot, spikeHref, spikeText, projectChip,
@@ -105,7 +105,7 @@ const isoOf = (ms) => {
 
 function readUrl() {
   const q = new URLSearchParams(location.search);
-  const hour = q.get('hour');
+  const hour = q.get('cell');
   return { view: q.get('heat') === 'week' ? 'week' : 'typical', hour: hour ? Date.parse(hour) : null };
 }
 
@@ -144,7 +144,7 @@ export function heatCard(heat, now, sentence) {
         type: 'button', text, 'aria-pressed': String(v === state.view),
         // a new view starts with nothing picked: the other view's open hour (its panel and
         // its cell's outline) would otherwise carry over
-        onclick: () => { state.view = v; state.hour = null; writeUrl({ heat: v === 'week' ? 'week' : null, hour: null }); draw(); },
+        onclick: () => { state.view = v; state.hour = null; writeUrl({ heat: v === 'week' ? 'week' : null, cell: null }); draw(); },
       }))) : null;
     const panel = h('div.hm-panel', { 'aria-live': 'polite' });
     const open = (cell, row) => {
@@ -153,14 +153,14 @@ export function heatCard(heat, now, sentence) {
     };
     const openHour = (start, fromUrl = false) => {
       state.hour = start;
-      writeUrl({ hour: isoOf(start) });
+      writeUrl({ cell: isoOf(start) });
       mark();
-      hourPanel(panel, start, () => { state.hour = null; writeUrl({ hour: null }); mark(); panel.replaceChildren(); })
+      hourPanel(panel, start, () => { state.hour = null; writeUrl({ cell: null }); mark(); panel.replaceChildren(); })
         .then(() => { if (!fromUrl) panel.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); });
     };
     const openDates = (cell, row) => {
       state.hour = null;
-      writeUrl({ hour: null });
+      writeUrl({ cell: null });
       datesPanel(panel, cell, row, hours, openHour, () => panel.replaceChildren());
     };
     const { el, cells } = gridEl(grid, week, open);

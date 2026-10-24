@@ -53,7 +53,7 @@ class LogFile:
 
     path: Path
     kind: LogKind
-    project_dir: str  # folder name under projects/, e.g. "-home-breno-Github-kittex"
+    project_dir: str  # folder name under projects/, e.g. "-home-user-Github-proj"
     session_id: str
     agent_id: str | None = None  # set for subagent logs
     meta_path: Path | None = None  # subagents/agent-<agent_id>.meta.json, when present
@@ -170,6 +170,10 @@ class EventKind(StrEnum):
     - API_REQUEST: request_id, query_source, shape_hash, model, cache_ttl (str)
     - API_ERROR: status (int), error (str)
     - TURN: duration_ms (int)
+    - PROMPT: source (str: the record's promptSource when logged, e.g. "typed"): a
+      message the user sent on the main thread (a typed or queued prompt, a slash
+      command, a headless `claude -p` prompt); never tool results, subagent prompts,
+      task notifications or other text Claude Code added
     """
 
     COMPACTION = "compaction"
@@ -183,6 +187,7 @@ class EventKind(StrEnum):
     API_REQUEST = "api_request"
     API_ERROR = "api_error"
     TURN = "turn"
+    PROMPT = "prompt"
 
 
 AttrValue = str | int | float | bool | None | tuple[str, ...]
@@ -241,6 +246,10 @@ class SessionInfo:
     # The `agent-color` record: the color the user gave it (`/color`), a lowercase
     # name such as "purple"; "" when reset. The latest one wins.
     color: str | None = None
+    # Read back from the store: whether the session's prompts (EventKind.PROMPT) are
+    # counted, i.e. its Claude Code main log was read by a capcom that records them.
+    # False when that log was gone by then (the count is unknown), None from a source.
+    prompts_counted: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)

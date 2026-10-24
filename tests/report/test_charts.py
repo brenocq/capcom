@@ -188,6 +188,40 @@ console.log(JSON.stringify({ free, hit, inside, stuck }));
     assert set(got["stuck"]) == {"dx", "dy"}
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_band_chart_on_a_squeezed_axis_with_kept_ticks_and_no_end_label() -> None:
+    # the session's cost card: a 6-hour pause takes a twentieth of the width, the
+    # start and end labels are kept, and the total's amount is left to the page
+    got = _node("""
+const m = await import('./charts.js');
+const H = 3600e3;
+const axis = m.activeAxis(0, 10 * H, [{ start: 2 * H, end: 8 * H }], 30 * 60e3, 0.05);
+const el = m.bandChart({
+  times: [H, 2 * H, 8 * H, 10 * H], start: 0, end: 10 * H, axis, endLabel: false,
+  ticks: [
+    { t: 0, label: 'a', keep: true }, { t: 8 * H, label: 'b' },
+    { t: 10 * H, label: 'c', keep: true },
+  ],
+  members: [{ label: 'x', values: [1, 2, 2, 3], color: 'red' }], total: [1, 2, 2, 3],
+});
+const nodes = walk(el, []);
+const cls = (n) => n.className || n.attrs.class || '';
+const xaxis = nodes.find((n) => cls(n).includes('xaxis'));
+console.log(JSON.stringify({
+  endlab: nodes.some((n) => cls(n).includes('endlab')),
+  enddot: nodes.some((n) => cls(n).includes('enddot')),
+  labels: xaxis.children.map((s) =>
+    [s.textContent, s.attrs.class === 'keep', s.attrs.style.split(';')[0]]),
+}));
+""")
+    assert not got["endlab"] and got["enddot"]
+    assert got["labels"] == [
+        ["a", True, "left:0.00%"],
+        ["b", False, "left:52.50%"],  # 2 of 4 active hours at 95% of the width, plus the pause
+        ["c", True, "left:100.00%"],
+    ]
+
+
 COLORS = {
     "general": 2,
     "palette": [["#111111", "#eeeeee"], ["#222222", "#dddddd"], ["#C8601A", "#F0904A"]],
@@ -366,3 +400,106 @@ console.log(JSON.stringify({
     assert got["labels"][0] == ["00", None] and got["labels"][3] == ["03", None]
     assert got["labels"][9] == ["09", "today"]
     assert got["labels"][12] == ["12", None] and got["labels"][10] == ["", None]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_hour_bars_open_each_hour_and_draw_a_typical_day_behind() -> None:
+    got = _node("""
+const m = await import('./charts.js');
+const hours = Array.from({ length: 24 }, (_, i) => ({
+  start: new Date(2026, 9, 20, i).toISOString(),
+  values: [i === 9 ? 2 : 0],
+  total: i === 9 ? 2 : 0 }));
+const typical = hours.map((_, i) => (i === 15 ? 4 : i === 9 ? 1 : 0));
+const el = m.hourBars(hours, [{ label: 'a', color: 'red' }], Infinity, {
+  href: (x) => `/spend?hour=${new Date(x.t).getHours()}`, typical, typicalLabel: 'Typical day' });
+const [bars, labs] = el.children;
+const style = (c) => c.attrs.style;
+console.log(JSON.stringify({
+  cls: bars.className,
+  links: bars.children.map((c) => [c.tag, c.attrs.href]),
+  typ: bars.children.map((c) => c.children.filter((x) => x && x.className === "typ").length),
+  styles: [style(bars.children[9]), style(bars.children[15])],
+  aria: bars.children[9].attrs['aria-label'],
+  current: labs.children.filter((c) => c.attrs.class === 'today').length,
+}));
+""")
+    assert "vs" in got["cls"].split()
+    assert got["links"][0] == ["a", "/spend?hour=0"] and got["links"][23] == ["a", "/spend?hour=23"]
+    assert got["typ"] == [1] * 24
+    # the y-scale fits the typical day: its 15:00 ($4) reaches the top, 09:00's $2 half
+    assert got["styles"] == ["--f:0.5000;--t:0.2500", "--f:0.0000;--t:1.0000"]
+    assert "typically $1.00" in got["aria"] and "open the hour" in got["aria"]
+    assert got["current"] == 0  # a past day has no hour still running
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_five_minute_bars_label_the_quarter_hours_and_open_nothing() -> None:
+    got = _node("""
+const m = await import('./charts.js');
+const t0 = new Date(2026, 9, 21, 9).getTime();
+const bars5 = Array.from({ length: 12 }, (_, i) => ({
+  start: new Date(t0 + i * 300e3).toISOString(), values: [1], total: 1 }));
+const el = m.hourBars(bars5, [{ label: 'a', color: 'red' }], t0 + 32 * 60e3, { slot: 300e3 });
+const [bars, labs] = el.children;
+console.log(JSON.stringify({
+  tags: [...new Set(bars.children.map((c) => c.tag))],
+  typ: bars.children.some((c) => c.children.some((x) => x && x.className === "typ")),
+  labels: labs.children.map((c) => [c.textContent || '', c.attrs.class || null]),
+  aria: bars.children[6].attrs['aria-label'],
+}));
+""")
+    assert got["tags"] == ["div"] and got["typ"] is False
+    assert got["labels"][0] == ["09:00", None] and got["labels"][3] == ["09:15", None]
+    assert got["labels"][6] == ["09:30", "today"] and got["labels"][9] == ["09:45", None]
+    assert got["aria"] == "09:30 to 09:35: $1.00 so far"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_day_bars_open_spend_for_the_day() -> None:
+    got = _node("""
+const m = await import('./charts.js');
+const days = [20, 21].map((d) => ({
+  date: new Date(2026, 9, d), iso: `2026-10-${d}`, values: [1], total: 1 }));
+const el = m.dayBars(days, [{ label: 'a', color: 'red' }], '2026-10-21',
+  (x) => `/spend?day=${x.iso}`);
+console.log(JSON.stringify(el.children[0].children.map((c) => c.attrs.href)));
+""")
+    assert got == ["/spend?day=2026-10-20", "/spend?day=2026-10-21"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_spend_links_keep_the_split_and_the_range_they_came_from() -> None:
+    got = _node("""
+const l = await import('./lib.js');
+const q = (s) => new URLSearchParams(s);
+console.log(JSON.stringify({
+  day: l.spendHref({ day: '2026-10-23' }, 'project', 30),
+  dayDefault: l.spendHref({ day: '2026-10-23' }, 'category', 14),
+  hour: l.spendHref({ hour: '2026-10-24T08' }, 'model', 1),
+  fallBack: l.spendHref({ hour: '2026-10-25T02+01:00' }, 'category'),
+  up: l.spendHref({ days: 30 }, 'agent'),
+  paths: [l.spendPath(q('days=30&group=project')),
+    l.spendPath(q('day=2026-10-23&days=30&group=model')),
+    l.spendPath(q('hour=2026-10-24T08&group=agent'))],
+  scopes: [l.spendScope(q('hour=2026-10-24T08&days=30')), l.spendScope(q('day=2026-10-23')),
+    l.spendScope(q('days=7'))],
+  key: l.hourKey(new Date(2026, 9, 24, 8).getTime()),
+}));
+""")
+    assert got["day"] == "/spend?day=2026-10-23&days=30&group=project"
+    assert got["dayDefault"] == "/spend?day=2026-10-23"
+    assert got["hour"] == "/spend?hour=2026-10-24T08&days=1&group=model"
+    assert got["fallBack"] == "/spend?hour=2026-10-25T02%2B01:00"
+    assert got["up"] == "/spend?days=30&group=agent"
+    assert got["paths"] == [
+        "spend?days=30&group=project",
+        "spend?day=2026-10-23&group=model",
+        "spend?hour=2026-10-24T08&group=agent",
+    ]
+    assert got["scopes"] == [
+        {"scale": "hour", "hour": "2026-10-24T08", "day": "2026-10-24", "days": 30},
+        {"scale": "day", "day": "2026-10-23", "days": 14},
+        {"scale": "range", "days": 7},
+    ]
+    assert got["key"] == "2026-10-24T08"

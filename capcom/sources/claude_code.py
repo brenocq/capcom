@@ -119,6 +119,20 @@ _PATH_TOOLS = {
     "NotebookEdit": "notebook_path",
 }
 _ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# A user record's promptSource for a prompt the user sent (typed, queued, a suggestion
+# taken, a headless `claude -p` prompt); others ("system") are text Claude Code added.
+_PROMPT_SOURCES = frozenset({"typed", "queued", "suggestion_accepted", "sdk"})
+# Text Claude Code writes as a user record that the user did not send, by its start
+# (for records older than promptSource).
+_NOT_PROMPTS = (
+    "<local-command-",
+    "<bash-stdout>",
+    "<bash-stderr>",
+    "<task-notification>",
+    "<system-reminder>",
+    "<user-prompt-submit-hook>",
+    "[Request interrupted",
+)
 # The name of a slash command in the user record Claude Code writes for it.
 _COMMAND_NAME = re.compile(r"<command-name>/?([A-Za-z0-9_][A-Za-z0-9_:.-]{0,99})</command-name>")
 
@@ -315,6 +329,32 @@ def _cache_ttl(cache_control: object) -> tuple[str | None, tuple[str, ...]]:
     if not ttls:
         return None, ()
     return ("1h" if "1h" in ttls else ttls[0]), tuple(ttls)
+
+
+def _is_prompt(rec: Mapping[str, Any], content: object) -> bool:
+    """Whether a user record is a message the user sent: by its promptSource when the
+    record has one, else by its shape (text or an image, not a tool result, a meta
+    record, a compaction summary or text Claude Code writes, such as a command's
+    output). Reads only the start of the text."""
+    if rec.get("isSidechain") is True or rec.get("toolUseResult") is not None:
+        return False
+    if any(rec.get(k) is True for k in ("isMeta", "isCompactSummary", "isVisibleInTranscriptOnly")):
+        return False
+    source = rec.get("promptSource")
+    if isinstance(source, str):
+        return source in _PROMPT_SOURCES
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        blocks = [_dict(b) for b in content]
+        kinds = {b.get("type") for b in blocks}
+        if "tool_result" in kinds or not kinds & {"text", "image"}:
+            return False
+        text = next((_str(b.get("text")) or "" for b in blocks if b.get("type") == "text"), "")
+    else:
+        return False
+    head = text[:200].lstrip()
+    return bool(head or isinstance(content, list)) and not head.startswith(_NOT_PROMPTS)
 
 
 def _result_size(content: object) -> tuple[int, int]:
@@ -738,6 +778,15 @@ class _Parser:
 
     def _user(self, rec: dict[str, Any], offset: int) -> None:
         content = _dict(rec.get("message")).get("content")
+        if _is_prompt(rec, content) and self._agent_id(rec) is None:
+            source = rec.get("promptSource")
+            self._event(
+                EventKind.PROMPT,
+                rec,
+                offset,
+                {"source": source if isinstance(source, str) and len(source) <= 40 else None},
+                suffix="prompt",
+            )
         if isinstance(content, str):
             self._slash_command(rec, offset, content)
             return
