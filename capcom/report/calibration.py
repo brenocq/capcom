@@ -158,6 +158,16 @@ def _mostly(parts: Mapping[str, Mapping[str, float]]) -> str:
     return f"mostly {CATEGORY_WORDS.get(cat, cat)} on {model_label(model)}"
 
 
+def unlogged_mostly(c: Calibration) -> str | None:
+    """'mostly cache reads on Opus 5.5': where the calls the log lacks went."""
+    return _mostly(c.unlogged) if c.unlogged_usd >= SAME_USD else None
+
+
+def logged_more_mostly(c: Calibration) -> str | None:
+    """The same for what the log counts more of than Claude Code."""
+    return _mostly(c.logged_more) if c.logged_more_usd >= SAME_USD else None
+
+
 def unlogged_text(c: Calibration) -> str | None:
     """'by token counts, Claude Code saw about $N in calls the log doesn't record
     (mostly cache reads on Opus 5.5)'."""
@@ -241,8 +251,10 @@ def calibration_json(
         "output_range": output_range(c),
         "unlogged_usd": round(c.unlogged_usd, 6),
         "unlogged_text": unlogged_text(c),
+        "unlogged_mostly": unlogged_mostly(c),
         "logged_more_usd": round(c.logged_more_usd, 6),
         "logged_more_text": logged_more_text(c),
+        "logged_more_mostly": logged_more_mostly(c),
         "rest_usd": round(c.rest_usd, 6),
         "note": difference_note(c, p, tz),
     }

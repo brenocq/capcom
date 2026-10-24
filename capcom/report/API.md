@@ -361,12 +361,14 @@ counts every matching session, temporary folders included (`temporary` of them).
 
 ```
 {session: {session_id, title, project, project_path, project_dir, cwd, git_branch, version,
-           entrypoint, first_seen, last_seen, running, models, efforts},
+           entrypoint, first_seen, last_seen, running, models, efforts,
+           effort_counts},   # effort_counts: {effort: requests}, most used first
  totals, active_seconds,
  calibration: {claude_code_usd, capcom_usd, spread, comparable, reasons, reason_labels,
                part: {since, until, first, last, process, processes, whole_session, text},
                session_usd, outside_usd, output_above_usd, output_range, unlogged_usd,
-               unlogged_text, logged_more_usd, logged_more_text, rest_usd, note} | null,
+               unlogged_text, unlogged_mostly, logged_more_usd, logged_more_text,
+               logged_more_mostly, rest_usd, note} | null,
  requests: {t, agent, context, usd, output, cache_write, estimated},   # columns, time order
  thinned: {requests, kept, spikes} | null,
  main: {first, last, requests, usd, tool_calls, peak_context} | null,

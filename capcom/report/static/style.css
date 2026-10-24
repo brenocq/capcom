@@ -240,12 +240,21 @@ table.data a.title > span:last-child { font-size: 12px; color: var(--muted); }
    macOS) reaches about 7px above its 1-line-high box */
 .costbig { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
 .costbig .v { font-family: var(--serif); font-size: 40px; line-height: 1; }
-.banner { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 12px 24px; padding: 14px 20px; }
-.banner .msg { flex: 1 1 300px; color: var(--ink); line-height: 1.45; }
-.banner .msg strong { color: var(--text); }
-.banner .vals { display: flex; gap: 20px; font-size: 12px; color: var(--muted); }
-.banner .vals span { display: flex; flex-direction: column; }
-.banner .vals b { font-family: var(--mono); font-size: 13px; font-weight: 400; color: var(--text); }
+/* the session's cost check: a quiet line under the cost, the parts in a fold */
+.calline { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; max-width: 420px; font-size: 12px; line-height: 1.45; color: var(--muted); text-align: right; }
+.calline .linkbtn { color: var(--clay); min-height: 24px; }
+.calline .bad, .calfold .bad, .calfold tr.bad td { color: var(--clay); }
+details.calfold { display: block; }
+details.calfold > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; cursor: pointer; list-style: none; min-height: 24px; }
+details.calfold > summary::-webkit-details-marker { display: none; }
+details.calfold > summary::before { content: '▸'; color: var(--muted); width: 12px; flex: 0 0 12px; }
+details.calfold[open] > summary::before { content: '▾'; }
+details.calfold > summary h2 { font-size: 18px; }
+.calbody { display: flex; flex-direction: column; gap: 12px; max-width: 680px; margin-top: 14px; padding-left: 26px; line-height: 1.5; }
+.calbody > p { margin: 0; }
+.calbody ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+table.calparts td { padding: 7px 10px; vertical-align: top; }
+table.calparts tr.sum td { border-top: 1px solid var(--l25); border-bottom: 0; font-weight: 600; }
 .tl { min-width: 760px; display: grid; grid-template-columns: 160px minmax(0, 1fr); row-gap: 10px; }
 .tl .lab { display: flex; flex-direction: column; justify-content: center; padding-right: 12px; font-size: 12px; color: var(--muted); }
 .tl .lab b { color: var(--text); font-weight: 500; }
@@ -580,6 +589,8 @@ code, .mono, pre { overflow-wrap: anywhere; }
   details.astable > summary { line-height: 44px; min-height: 44px; }
   .seg { flex-wrap: wrap; }
   .seg button, button.copy, .sortbar .sortdir, table.data th button, .causechip, button.tag, button.cause.pick { min-height: 44px; min-width: 44px; }
+  .calline .linkbtn, details.calfold > summary { min-height: 44px; }
+  .calbody { padding-left: 0; }
 }
 
 @media (max-width: 599.98px) {

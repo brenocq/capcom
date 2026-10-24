@@ -940,7 +940,7 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
     cols["cache_write"] = []
     cols["estimated"] = []
     models: dict[str, int] = {}
-    efforts: set[str] = set()
+    efforts: dict[str, int] = {}
     main = _Span()
     spans: dict[str, _Span] = {}
     counted: list[Request] = []
@@ -971,7 +971,7 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
         model = canonical(ctx.table, req.model)
         models[model] = models.get(model, 0) + 1
         if req.effort:
-            efforts.add(req.effort)
+            efforts[req.effort] = efforts.get(req.effort, 0) + 1
 
     total = w.total.usd
     agents_json: list[dict[str, Any]] = []
@@ -1062,6 +1062,8 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
             "running": last_seen is not None and last_seen >= ctx.now - LIVE_WINDOW,
             "models": sorted(models, key=lambda m: -models[m]),
             "efforts": sorted(efforts),
+            # requests per effort level, the most used first
+            "effort_counts": dict(sorted(efforts.items(), key=lambda e: (-e[1], e[0]))),
         },
         "totals": w.total.to_json(),
         "active_seconds": round(row.active_seconds) if row else 0,  # None: placeholders only
