@@ -184,7 +184,7 @@ export function windowBounds(segments, x0, x1, weekly, gap) {
 // Usage windows over time: each window's readings as a rising line that drops to
 // 0 at its reset, a dashed line at 100%, and the current window's forecast as a
 // fan (the 80% range, filled, with hairline edges, and the median dashed).
-// Readings are drawn as the line alone (Breno found the dots crowded); only a reading
+// Readings are drawn as the line alone (dense dots read as noise); only a reading
 // that hit the limit gets a mark. The stretch from a window's reset (0 %) to its first
 // reading is dashed and labeled, since nothing was read there.
 // opts: {segments: [{points, resets_at, reset, hit_limit, start_known}], fan, now, x0, x1,
