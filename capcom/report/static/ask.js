@@ -223,7 +223,7 @@ const PARTS = [
       .map((t, i) => (i ? t[0].toLowerCase() + t.slice(1) : t)).join(' and ') },
   { route: 'spend', sel: 'section.card.grow2b', anchor: 'h2', label: (el) => headingText(el.querySelector('h2')) },
   { route: 'spend', sel: 'section.card', has: 'table.data', anchor: ':scope > .split > h2', label: (el) => headingText(el.querySelector(':scope > .split > h2')) },
-  { route: 'session', sel: 'section.card.banner', anchor: '.msg > strong', label: () => 'Cost check of this session' },
+  { route: 'session', sel: 'details.calfold', anchor: 'summary > h2', label: () => 'Cost check of this session' },
   { route: 'changes', arg: true, sel: 'header.head.top', anchor: '.chips', label: (el) => `Did it work: ${headingText(el.querySelector('h1'))}`,
     extra: (el) => [el.parentElement && el.parentElement.querySelector('.tiles3')] },
 ];
