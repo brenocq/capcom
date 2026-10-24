@@ -124,3 +124,8 @@ def test_judgement_calls_come_last_in_the_rollup_and_say_so() -> None:
     lines = [line for line in text.splitlines() if line.startswith("  ") and "up to" in line]
     assert lines[0].startswith("  Long-running agents")
     assert lines[-1].endswith("(judgement call, not in the total)")
+
+
+def test_a_kind_scoped_to_all_reads_across_all_projects() -> None:
+    (r,) = rollup([_f("subagent_cache_expiry", "all", 7.0)])
+    assert r.headline == "Cache lifetime and long waits: up to $7.00/week across all projects"

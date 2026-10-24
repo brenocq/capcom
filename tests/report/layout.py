@@ -658,7 +658,9 @@ def discover(chrome: Chrome, base: str) -> list[tuple[str, str]]:
     pages: list[tuple[str, str]] = [(name, href) for name, href in nav]
     for name, list_page, selector in (
         ("session", "/sessions", "#main a[href^='/session/']"),
-        ("day", "/spend", "#main a[href^='/day/']"),
+        ("day", "/spend?days=1", "#main a[href^='/day/']"),
+        ("spend day", "/spend", "#main a[href^='/spend?day=']"),
+        ("spend hour", "/spend?days=1", "#main a[href^='/spend?hour=']"),
         ("limit window", "/limits", "#main a[href^='/limits/window/']"),
     ):
         load(chrome, base + list_page)

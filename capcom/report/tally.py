@@ -16,7 +16,15 @@ from typing import Any
 from capcom.cost.model import price
 from capcom.cost.prices import canonical, is_placeholder
 from capcom.timeline.groups import MAIN_THREAD, ProjectNames, is_temporary
-from capcom.types import AgentInfo, CostBreakdown, Finding, PriceTable, Request, SessionInfo
+from capcom.types import (
+    AgentInfo,
+    CostBreakdown,
+    Event,
+    Finding,
+    PriceTable,
+    Request,
+    SessionInfo,
+)
 
 # A gap between two requests of a session at least this long is a pause; shorter
 # gaps count as active time.
@@ -175,6 +183,14 @@ class Window:
         self.subagents = Group("subagents", "subagents")
         self.agent_calls: dict[str, int] = {}  # tool calls per subagent
         self.context = [[0, 0.0] for _ in CONTEXT_BUCKETS]
+        self.prompts: dict[str, int] | None = None  # per session, once counted
+
+    def count_prompts(self, events: Iterable[Event]) -> None:
+        """Count the prompt events of the window per session (the `prompts` of each
+        session row; without this call the rows have prompts null)."""
+        self.prompts = {}
+        for e in events:
+            self.prompts[e.session_id] = self.prompts.get(e.session_id, 0) + 1
 
     def add(self, req: Request) -> CostBreakdown | None:
         if is_placeholder(req.model):
@@ -245,7 +261,20 @@ class Window:
 
     def session_rows(self, tz: tzinfo | None) -> list[dict[str, Any]]:
         rows = sorted(self.sessions.values(), key=lambda r: (-r.tally.usd, r.session_id))
-        return [session_json(r, self.infos.get(r.session_id), self.names, tz) for r in rows]
+        out = [session_json(r, self.infos.get(r.session_id), self.names, tz) for r in rows]
+        if self.prompts is not None:
+            for row in out:
+                info = self.infos.get(row["session_id"])
+                # null, not 0, when the session's main log was gone before capcom
+                # counted prompts: its count is unknown
+                gone = info is not None and info.prompts_counted is False
+                row["prompts"] = None if gone else self.prompts.get(row["session_id"], 0)
+        return out
+
+
+# A session active for less than this has no cost per active hour: a rate drawn from
+# a minute or two of work is noise (one request would read as dollars an hour).
+MIN_RATE_SECONDS = 5 * 60
 
 
 def session_json(
@@ -272,6 +301,12 @@ def session_json(
         "peak_context": row.peak_context,
         "cache_read_share": round(t.cache_read / tokens, 4) if tokens else 0.0,
         "usd": round(t.usd, 6),
+        "usd_per_active_hour": (
+            round(t.usd * 3600 / row.active_seconds, 4)
+            if row.active_seconds >= MIN_RATE_SECONDS
+            else None
+        ),
+        "prompts": None,
         "requests": t.requests,
         "estimated_output": t.estimated_requests > 0,
     }

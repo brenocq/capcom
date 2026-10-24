@@ -1,12 +1,12 @@
-"""The README banner: capcom's mark, wordmark and Roger beside a spend chart drawing itself.
+"""The README banner: Roger and capcom's wordmark beside a spend chart drawing itself.
 
     python .github/scripts/banner/build.py <data.json> <out-dir>
 
 <data.json> is demo/data.py's output (capcom run on the synthetic logs). Writes
-<out-dir>/banner.svg, 880 x 200: the radio-signal mark pulsing like a
-transmission, "capcom" as outlines (wordmark.py, no web font), Roger (the
-website's mascot, read from its own code by roger.py) standing on the
-wordmark's baseline, the subtitle in the system font, and the two weeks'
+<out-dir>/banner.svg, 880 x 200: Roger (the website's mascot and capcom's
+mark, read from its own code by roger.py) standing on the wordmark's baseline
+left of it, as he stands left of the name in the website's sidebar, "capcom"
+as outlines (wordmark.py, no web font), the subtitle in the system font, and the two weeks'
 cumulative spend by project in the website's band style, drawing in from the
 left while the three largest spikes' numbered markers pop onto the total line
 as it reaches them, each on the steep step it explains; the total is labeled
@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import roger
-from svg import bands, eased_at, keyframes, mark, r, series_colors, spike_pins, svg, usd
+from svg import bands, eased_at, keyframes, r, series_colors, spike_pins, svg, usd
 from wordmark import GLYPHS, UPM
 
 W, H = 880, 200
@@ -34,7 +34,8 @@ LOOP = 10.0
 DRAW = (0.5, 4.8)  # the chart draws in over these seconds
 FADE = (9.2, 9.7)  # and fades out before the loop restarts
 SUBTITLE = "Mission control for your Claude Code spend"
-ROGER = (409, 80)  # left edge and width of Roger, standing on the wordmark's baseline
+ROGER = (10, 80)  # left edge and width of Roger, on the wordmark's baseline left of it
+WORD = 118  # where the wordmark starts, the subtitle 2 px right of it
 BLINK = 2.6  # Roger blinks while the chart draws,
 WAVE = 5.1  # then waves once it is drawn,
 SAY = 5.5  # and his bubble pops up, gone with the chart's fade.
@@ -52,16 +53,6 @@ def wordmark(x: float, baseline: float, size: float, tracking: float = -0.01) ->
         )
         pen += (adv + tracking * UPM) * s
     return f'<g class="fg">{"".join(out)}</g>', pen - x
-
-
-def pulse(peaks: list[float], lag: float) -> list[tuple[float, str]]:
-    """Opacity frames: dim, flaring at each peak (+lag), back to full at the end."""
-    lo, frames = "opacity:.28", [(0, "opacity:.28")]
-    for p in peaks:
-        p += lag
-        frames += [(p - 0.05, lo), (p + 0.12, "opacity:1"), (p + 0.9, lo)]
-    frames += [(LOOP - 0.4, lo), (LOOP, "opacity:1")]
-    return frames
 
 
 def bubble(x: float, y: float, text: str) -> tuple[float, str]:
@@ -199,14 +190,11 @@ def chart_svg(data: dict, width: int, height: int, box: tuple[float, float, floa
 def build(data: dict, out: Path) -> Path:
     defs, css, chart_body = chart(data, BOX, "b")
     css += [
-        ".m .a1{animation:a1 10s infinite}.m .a2{animation:a2 10s infinite}",
-        keyframes("a1", LOOP, pulse([0.4, 3.0, 5.6, 8.2], 0)),
-        keyframes("a2", LOOP, pulse([0.4, 3.0, 5.6, 8.2], 0.22)),
         ".sub{fill:var(--muted);font-size:19px}",
     ]
-    word, _ = wordmark(104, 108, 88)
+    word, _ = wordmark(WORD, 108, 88)
 
-    # Roger on the baseline, right of the wordmark, his raised hand toward the chart.
+    # Roger on the baseline, left of the wordmark, his raised hand toward it.
     rx, rw = ROGER
     vx, vy, vw, _ = roger.VIEWBOX
     k = rw / vw
@@ -238,16 +226,15 @@ def build(data: dict, out: Path) -> Path:
         ),
     ]
     body = [
-        mark(52, 84, 68, "m"),
-        word,
         roger.group(rx, top, rw),
+        word,
         say,
-        f'<text class="sub" x="106" y="152">{SUBTITLE}</text>',
+        f'<text class="sub" x="{WORD + 2}" y="152">{SUBTITLE}</text>',
         *chart_body,
     ]
     label = (
-        "capcom: a radio-signal mark, the word capcom and Roger, a terracotta capsule in "
-        "mission-control headphones, beside a two-week spend chart drawing itself with "
+        "capcom: Roger, a terracotta capsule in mission-control headphones, and the word "
+        "capcom, beside a two-week spend chart drawing itself with "
         f"numbered spike markers; Roger waves and says: {SAID} Mission control for your "
         "Claude Code spend."
     )

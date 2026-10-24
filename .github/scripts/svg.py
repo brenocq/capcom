@@ -60,7 +60,6 @@ SITE = {
         "ok": "#7FB069",
     },
 }
-ACCENT = "#D97757"
 FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif'
 MONO = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace'
 
@@ -212,26 +211,6 @@ def bands(
 def series_colors(labels: Sequence[str]) -> list[str]:
     """The website's colors for chart members: SERIES in order, gray for (other)."""
     return ["var(--gray)" if lb == "(other)" else f"var(--s{i + 1})" for i, lb in enumerate(labels)]
-
-
-def mark(cx: float, cy: float, size: float, cls: str = "") -> str:
-    """capcom's radio-signal mark (app.js mark(), a 24-unit icon) centered on (cx, cy):
-    a dot with two pairs of arcs, in the accent. Arcs carry classes a1 (inner) and a2
-    (outer) for animation."""
-    s = size / 24
-    arcs = [
-        ("a1", "M8 8a5.7 5.7 0 0 0 0 8"),
-        ("a1", "M16 8a5.7 5.7 0 0 1 0 8"),
-        ("a2", "M5 5a9.9 9.9 0 0 0 0 14"),
-        ("a2", "M19 5a9.9 9.9 0 0 1 0 14"),
-    ]
-    paths = "".join(f'<path class="{c}" d="{d}"/>' for c, d in arcs)
-    return (
-        f'<g class="{cls}" transform="translate({r(cx - 12 * s, 2)} {r(cy - 12 * s, 2)}) '
-        f'scale({r(s, 4)})" fill="none" stroke="{ACCENT}" stroke-width="2" '
-        f'stroke-linecap="round"><circle class="dot" cx="12" cy="12" r="2.4" fill="{ACCENT}" '
-        f'stroke="none"/>{paths}</g>'
-    )
 
 
 def ms(v: float | str) -> float:

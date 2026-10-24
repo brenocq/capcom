@@ -38,6 +38,8 @@ function status(text, said) {
 }
 
 function what(r) {
+  if (r.name === 'spend' && r.query.get('hour')) return 'the hour';
+  if (r.name === 'spend' && r.query.get('day')) return 'the day';
   if (r.query.has('days') && ['spend', 'sessions', 'spikes', 'checks', 'limits'].includes(r.name)) {
     const d = Number(r.query.get('days'));
     return d === 1 ? 'today' : d === 0 ? 'all sessions' : `${d} days`;

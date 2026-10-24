@@ -17,7 +17,7 @@ import { renderLimits } from './limits.js';
 import { renderLimitWindow } from './limitwindow.js';
 import { renderChanges, renderChange } from './changes.js';
 import { freshToken } from './marks.js';
-import { networkNote } from './ask.js';
+import { networkNote, mascot } from './ask.js';
 
 const ICON = {
   overview: 'M3 12h4l3-8 4 16 3-8h4',
@@ -38,15 +38,16 @@ const NAV = [
   ['limits', '/limits', 'Limits'],
 ];
 
-function icon(d, size = 16) {
-  return s('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.8, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' }, s('path', { d }));
+// The sidebar's links from Limits carry its range (`days`) to the pages that take the
+// same value: Spend has every range Limits has, Sessions all but 90 days.
+const SAME_DAYS = { spend: [1, 7, 14, 30, 90], sessions: [1, 7, 14, 30] };
+function navHref(id, href, r) {
+  const days = Number(r.query.get('days'));
+  return r.name === 'limits' && (SAME_DAYS[id] || []).includes(days) ? `${href}?days=${days}` : href;
 }
 
-function mark() {
-  const st = { stroke: '#D97757' };
-  return s('svg', { width: 22, height: 22, viewBox: '0 0 24 24', fill: 'none', 'stroke-width': 2, 'stroke-linecap': 'round', 'aria-hidden': 'true', style: 'stroke:#D97757' },
-    s('circle', { cx: 12, cy: 12, r: 2.4, fill: '#D97757', stroke: 'none' }),
-    ...['M8 8a5.7 5.7 0 0 0 0 8', 'M16 8a5.7 5.7 0 0 1 0 8', 'M5 5a9.9 9.9 0 0 0 0 14', 'M19 5a9.9 9.9 0 0 1 0 14'].map((d) => s('path', { d, ...st })));
+function icon(d, size = 16) {
+  return s('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.8, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' }, s('path', { d }));
 }
 
 function route() {
@@ -90,9 +91,9 @@ function drawSidebar() {
     h('label', { for: 'capcom-find', text: 'Find a session' }), input);
   // drawn anew and swapped in, so the live rates tween and new sessions fade in
   const fresh = h('nav', { id: 'sidebar', class: 'sidebar', 'aria-label': 'capcom' },
-    h('a.brand', { href: '/' }, mark(), h('span', { text: 'capcom' })),
+    h('a.brand', { href: '/' }, mascot(26, true), h('span', { text: 'capcom' })),
     form,
-    h('div.nav', null, NAV.map(([id, href, label, soon]) => h('a', { href, 'aria-current': id === active ? 'page' : null },
+    h('div.nav', null, NAV.map(([id, href, label, soon]) => h('a', { href: navHref(id, href, r), 'aria-current': id === active ? 'page' : null },
       icon(ICON[id]), h('span', { text: label }), soon ? h('span.soon', { text: soon, title: `Coming in milestone ${soon.slice(1)}` }) : null,
       id === 'changes' && statusData && statusData.changes ? h('span.soon', { text: String(statusData.changes), title: `${statusData.changes} change${statusData.changes === 1 ? '' : 's'} marked as applied` }) : null))),
     liveList(),
@@ -171,7 +172,7 @@ function topbar() {
   let bar = document.getElementById('topbar');
   if (bar) return bar;
   const menu = h('button.menu', { type: 'button', 'aria-controls': 'sidebar', 'aria-expanded': 'false', 'aria-label': 'Menu', onclick: () => setMenu(!menuOpen) }, icon(BURGER, 20));
-  bar = h('header.topbar', { id: 'topbar' }, h('a.brand', { href: '/' }, mark(), h('span', { text: 'capcom' })), h('span.where'), menu);
+  bar = h('header.topbar', { id: 'topbar' }, h('a.brand', { href: '/' }, mascot(26, true), h('span', { text: 'capcom' })), h('span.where'), menu);
   document.querySelector('.frame').before(bar);
   document.body.append(h('div.scrim', { 'aria-hidden': 'true', onclick: () => setMenu(false) }));
   // following a link in the sheet closes it (on the document: the sidebar node is
@@ -319,7 +320,19 @@ async function watchData() {
   }
 }
 
-function tickLive() { if (!document.hidden) { refreshLive(); watchData(); } }
+// A page left open past midnight: every kept reply counted its days up to the old
+// date ("Today", the ranges' first day; the server keys its cache by the date too),
+// so drop them and fetch the page again for the new day.
+const localDay = () => new Date().toDateString();
+let day = localDay();
+function watchDay() {
+  if (localDay() === day) return;
+  day = localDay();
+  forget();
+  refreshView();
+}
+
+function tickLive() { if (!document.hidden) { watchDay(); refreshLive(); watchData(); } }
 
 refreshStatus();
 refreshColors();

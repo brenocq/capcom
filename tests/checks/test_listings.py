@@ -672,8 +672,13 @@ def test_overlaps_follow_the_claim_types() -> None:
     for a in _REREADS:  # (a) x (a) overlap, (a) x (b) never
         assert set(_REREADS) - {a} <= set(overlaps(a))
         assert not set(_REWRITES) & set(overlaps(a))
-    for b in _REWRITES:  # each request is in one rewrite at most
-        assert not set(_REWRITES) & set(overlaps(b))
+    # each request is in one rewrite at most; the cache-lifetime comparison reprices
+    # every wait, so it shares the idle and late-resume rewrites' dollars
+    waits = {"idle_cache_rewrites", "subagent_resumed_late"}
+    for b in _REWRITES:
+        lifetime = "subagent_cache_expiry"
+        shared = waits if b == lifetime else {lifetime} if b in waits else set()
+        assert set(_REWRITES) & set(overlaps(b)) == shared
         assert set(_PREFIX) | set(_TAIL) <= set(overlaps(b))
     for t in _TAIL:
         assert set(_REREADS) | set(_REWRITES) <= set(overlaps(t))

@@ -13,8 +13,10 @@ server, a JSON body of at most 4 KB, and a body that passes `didit.write`'s sche
 `--read-only` turns it off (405). `POST /api/ask` (`ask.py`) streams an answer from
 the user's own `claude` CLI about a part of a page, behind the same checks with a
 body of at most 20 KB, two at a time, with a timeout, its child killed by PID when
-the page goes away; `--no-ask` turns it off (405). It writes nothing, so it stays on
-under `--read-only`.
+the page goes away; `--no-ask` turns it off (405). The prompt carries what stands
+behind the part (`askfacts.py`), and the CLI may look up more through capcom's own
+read-only MCP server (`asktools.py`). It writes nothing, so it stays on under
+`--read-only`.
 
 API replies are cached per index generation (`ApiCache`): the key holds the index
 files' sizes and modification times and the index's `PRAGMA data_version` on a held
@@ -67,7 +69,7 @@ from capcom.cost.prices import load_prices
 from capcom.limits.cli import adopt_samples
 from capcom.limits.model import samples_path
 from capcom.limits.record import ACCOUNTS_FILE, SESSIONS_FILE
-from capcom.report import api, ask, didit
+from capcom.report import api, ask, askfacts, asktools, didit
 from capcom.report.analysis import Analysis, Unavailable, default_analysis
 from capcom.report.jobs import Job, Jobs, Result, computing_body
 from capcom.report.limit_window import limit_window
@@ -352,8 +354,9 @@ SAMPLED = frozenset({"limits", "overview", "limit-window"})
 # the query parameters each endpoint reads: the cache key holds only these
 PARAMS: dict[str, tuple[str, ...]] = {
     "overview": ("group",),
-    "spend": ("days", "group"),
-    "sessions": ("days", "limit", "sort", "q"),
+    "spend": ("days", "group", "day", "hour"),
+    "typical-hours": ("day",),
+    "sessions": ("days", "limit", "sort", "dir", "q"),
     "session": (),
     "agent": ("agent",),
     "day": ("group",),
@@ -393,11 +396,12 @@ class Site:
     day_cache: Path | None = None  # capcom.changes' finished days; None: not kept
     agent_dirs: Sequence[Path] | None = None  # where noticed() reads; None: its own
     request_timeout: float = 30.0  # seconds a client may take to send its request
-    ask_on: bool = True  # False (--no-ask): no POST /api/ask, no Ask Claude in the pages
+    ask_on: bool = True  # False (--no-ask): no POST /api/ask, no Ask Roger in the pages
     ask_slots: threading.BoundedSemaphore = field(
         default_factory=lambda: threading.BoundedSemaphore(ask.SLOTS)
     )
     ask_timeout: float = ask.TIMEOUT  # seconds one answer may take
+    ask_tools: bool = True  # False: no facts and no lookups, only what the page sends
 
 
 class Scanner:
@@ -845,7 +849,7 @@ class Handler(BaseHTTPRequestHandler):
         if body is _REFUSED:
             return
         try:
-            prompt = ask.build_prompt(ask.parse(body))
+            question = ask.parse(body)
         except ask.AskError as err:
             self._error(err.status, err.code, err.message)
             return
@@ -862,13 +866,19 @@ class Handler(BaseHTTPRequestHandler):
             self._error(
                 HTTPStatus.TOO_MANY_REQUESTS,
                 "busy",
-                f"Claude is answering {ask.SLOTS} questions already: wait for one to finish.",
+                f"Roger is answering {ask.SLOTS} questions already: wait for one to finish.",
             )
             return
         child = None
         try:
+            now = site.clock()
+            prompt = ask.build_prompt(question, self._ask_facts(question, now))
+            tools = None
+            if site.ask_tools:
+                args = asktools.arguments(site.index_path, now, site.tz, site.changes_path)
+                tools = asktools.mcp_config(args)
             try:
-                child = ask.start(claude, prompt)
+                child = ask.start(claude, prompt, tools)
             except OSError:
                 self._error(
                     HTTPStatus.SERVICE_UNAVAILABLE, "no_claude", "The claude command did not start."
@@ -890,6 +900,23 @@ class Handler(BaseHTTPRequestHandler):
             if child is not None:
                 child.close()  # killed by its PID if it still runs: the page went away
             site.ask_slots.release()
+
+    def _ask_facts(self, question: ask.Question, now: datetime) -> str:
+        """What stands behind the asked-about part, from the index (askfacts), or
+        "" when the part has no reference or the index cannot say."""
+        ref = question.ref
+        if ref is None or not self.site.ask_tools:
+            return ""
+        try:
+            index = _open(self.site)
+        except IndexMissing:
+            return ""
+        try:
+            return askfacts.Facts(self._context(index, now)).context(ref)
+        except Exception:  # the facts are a help, never a reason not to answer
+            return ""
+        finally:
+            index.close()
 
     def _known(self, now: datetime) -> Callable[[int], list[didit.Known] | None]:
         """The findings of a Checks window from its cached reply, if there is one."""
@@ -1280,6 +1307,7 @@ ENDPOINTS: dict[str, Endpoint] = {
     "agent": lambda c, sid, q: api.agent(c, sid, q),
     "day": lambda c, d, q: api.day(c, d, q),
     "hour": lambda c, _, q: api.hour(c, q),
+    "typical-hours": lambda c, _, q: api.typical_hours(c, q),
     "live": lambda c, _, q: api.live(c),
     "spikes": lambda c, _, q: api.spikes(c, q),
     "checks": lambda c, _, q: api.checks(c, q),
@@ -1337,7 +1365,7 @@ def run_serve(
     url = f"http://{HOST}:{server.server_address[1]}/"
     fresh = f"rescanning every {SCAN_INTERVAL:g} s" if scanner else "no background scan"
     fresh += ", read-only" if read_only else ""
-    fresh += "" if ask_claude else ", no Ask Claude"
+    fresh += "" if ask_claude else ", no Ask Roger"
     print(f"capcom: serving {url} (local only, {fresh}; Ctrl+C to stop)", flush=True)
     if scanner is not None:
         scanner.start()

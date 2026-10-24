@@ -13,6 +13,8 @@
 //   clipped            text cut by a box that hides overflow, without an ellipsis
 //   truncated-no-title text cut with an ellipsis, but no title to read it in full
 //   escapes            text running out of its card or panel
+//   label-past-plot    a chart's value label (.amt) reaching past the side of its
+//                      plot (.pairs, .days), even where the plot scrolls
 //   see-through-sticky a sticky or fixed box over the content without a solid background
 //   sticky-too-tall    a sticky or fixed box over the content taller than 30 % of the screen
 //
@@ -261,6 +263,14 @@
     if (!card || !root.contains(card)) continue;
     const c = card.getBoundingClientRect();
     if (t.r.right > c.right + 2 || t.r.left < c.left - 2) add('escapes', t.el, 'out of ' + describe(card).split(' "')[0]);
+  }
+
+  // ------------------------------------------------------------ a value label past its plot
+  for (const t of texts) {
+    const plot = t.el.closest('.amt') && t.el.closest('.pairs, .days');
+    if (!plot) continue;
+    const p = plot.getBoundingClientRect();
+    if (t.raw.right > p.right + 1 || t.raw.left < p.left - 1) add('label-past-plot', t.el, `${Math.round(Math.max(t.raw.right - p.right, p.left - t.raw.left))} px`);
   }
   return out;
 })
