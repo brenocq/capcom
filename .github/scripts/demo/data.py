@@ -72,10 +72,12 @@ def free_port() -> int:
 
 @contextlib.contextmanager
 def serve(work: Path) -> Iterator[str]:
-    """A `capcom serve --no-scan` on the sandbox; yields its base URL."""
+    """A `capcom serve` on the sandbox; yields its base URL. It scans (only the
+    sandbox's synthetic logs), so the sidebar's Live now shows the running session
+    rather than saying the server is paused."""
     port = free_port()
     proc = subprocess.Popen(
-        [sys.executable, "-m", "capcom.cli", "serve", "--port", str(port), "--no-scan"],
+        [sys.executable, "-m", "capcom.cli", "serve", "--port", str(port)],
         env=sandbox_env(work),
         cwd=work,
         stdout=subprocess.DEVNULL,
