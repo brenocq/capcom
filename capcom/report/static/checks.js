@@ -1,7 +1,7 @@
 // Checks: setup warnings drawn from real usage, ranked by the weekly saving, each
 // with its evidence, a small chart from its numbers and the change to paste.
 
-import { h, api, usd, pct, monthDay, hm, tokens, seg, empty, setQuery, sessionHref, maxOf, copyButton, daysText, entityColors, segBar, tableToggle, tipOn } from './lib.js';
+import { h, api, usd, pct, monthDay, hm, tokens, seg, empty, setQuery, sessionHref, maxOf, copyButton, daysText, entityColor, OTHER_COLOR, segBar, tableToggle, tipOn } from './lib.js';
 import { pendingBlock } from './sessions.js';
 import { READ_ONLY, markForm, markedChip, noticedBanners, summaryCard } from './marks.js';
 
@@ -53,9 +53,16 @@ export async function renderChecks(main, r) {
   const counted = (d.rollups || []).filter((r) => !r.judgement_call);
   const judged = (d.rollups || []).filter((r) => r.judgement_call);
   // one color per place on every row: the six with the most saving in all, the rest gray
-  const bySaving = new Map();
-  for (const r of d.rollups || []) for (const x of r.scopes) bySaving.set(x.scope_label, (bySaving.get(x.scope_label) || 0) + x.saving_usd_per_week);
-  scopeColors = entityColors([...bySaving].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k]) => k));
+  // (each in its entity's color, as on every page)
+  const bySaving = new Map(), kindOf = new Map();
+  for (const r of d.rollups || []) {
+    for (const x of r.scopes) {
+      bySaving.set(x.scope_label, (bySaving.get(x.scope_label) || 0) + x.saving_usd_per_week);
+      kindOf.set(x.scope_label, r.scope_noun === 'agent type' ? 'agent' : 'project');
+    }
+  }
+  scopeColors = new Map([...bySaving].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k]) => [k, entityColor(k, kindOf.get(k))]));
+  scopeColors.set('(other)', OTHER_COLOR);
   if (counted.length) {
     main.append(h('section.card.rollups', null, h('h2', { text: 'By kind' }),
       h('p.note', { style: 'margin:0 0 8px', text: 'Each kind across the places it was found, with the share of each (hover a bar for its numbers). Open a row for its findings.' }),

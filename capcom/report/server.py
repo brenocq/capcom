@@ -1267,6 +1267,7 @@ def _base(
 Endpoint = Callable[[api.Context, str, dict[str, str]], Any]
 ENDPOINTS: dict[str, Endpoint] = {
     "status": lambda c, _, q: api.status(c),
+    "colors": lambda c, _, q: api.colors(c),
     "overview": lambda c, _, q: api.overview(c, q),
     "spend": lambda c, _, q: api.spend(c, q),
     "sessions": lambda c, _, q: api.sessions(c, q),

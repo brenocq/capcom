@@ -715,6 +715,18 @@ class SqliteIndex:
                 continue
             yield AgentInfo(aid, v[0], v[1], v[2], v[3], v[4], _bool_opt(v[5]), _bool_opt(v[6]))
 
+    def activity_days(self) -> Iterator[tuple[str, str | None, str, int, datetime]]:
+        """(project_dir, agent_id, model, day, first) for each day each combination
+        made a request: the day as whole days since the Unix epoch (UTC), `first` its
+        first request that day. The website's colors read it to order projects, agent
+        types and models by when each was first seen and active (one pass over the
+        requests, some 30 ms for 100k)."""
+        for project, agent, model, day, first in self._con.execute(
+            "SELECT project_dir, agent_id, model, ts / 86400000000 AS day, MIN(ts) "
+            "FROM requests GROUP BY project_dir, agent_id, model, day"
+        ):
+            yield project, agent, model, int(day), _dt(first)
+
     def last_cost_states(self) -> Iterator[CostState]:
         """The last cost-state of each session: the highest offset in the session's
         main log, or in its other files when the main log has none."""

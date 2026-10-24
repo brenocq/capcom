@@ -114,22 +114,61 @@ export const CATEGORY_LABELS = {
 export const CATEGORY_ORDER = ['cache_read', 'cache_write', 'output', 'input'];
 export const categoryColor = (key) => SERIES[Math.max(0, CATEGORY_ORDER.indexOf(key))];
 
-// Colors that follow the entity (a project, a model, an agent type), never its rank:
-// each key hashes to a preferred palette slot; keys that collide take the next free
-// slot, in key order, so the same set of keys always gets the same colors. Past the
-// palette's size the rest share the gray. "(other)" is always gray.
-export function entityColors(keys) {
-  const out = new Map(), used = new Set();
-  const named = [...new Set(keys)].filter((k) => k !== '(other)').sort();
-  for (const k of named) {
-    let hsh = 0;
-    for (let i = 0; i < k.length; i++) hsh = (hsh * 31 + k.charCodeAt(i)) >>> 0;
-    let slot = hsh % SERIES.length, tries = 0;
-    while (used.has(slot) && tries < SERIES.length) { slot = (slot + 1) % SERIES.length; tries++; }
-    if (used.has(slot)) { out.set(k, OTHER_COLOR); continue; }
-    used.add(slot);
-    out.set(k, SERIES[slot]);
+// Colors that follow the entity (a project, an agent type, a model), never its rank:
+// the server assigns one per entity over every entity in the index (/api/colors,
+// capcom/report/colors.py: the user's Claude Code color first), so the same project
+// has the same color in every chart, list and page. The assignment is kept in
+// localStorage, so a reload paints with it at once; app.js asks for a fresh one
+// and redraws the page when it changed. A key the server does not know (new since)
+// takes a stable slot by its name. "(other)" is always the gray.
+const COLOR_KINDS = ['project', 'agent', 'model'];
+const COLORS_KEPT = 'capcom-colors';
+let assigned = null; // the /api/colors reply in use
+
+function nameHash(k) {
+  let hsh = 0;
+  for (let i = 0; i < k.length; i++) hsh = (hsh * 31 + k.charCodeAt(i)) >>> 0;
+  return hsh;
+}
+
+// Use an /api/colors reply: its palette as CSS variables (--ec0, --ec1, ...: a light
+// and a dark value each, so a theme switch restyles every mark) and its maps.
+// Returns whether anything changed.
+export function useColors(data, keep = true) {
+  if (!data || !Array.isArray(data.palette)) return false;
+  const text = JSON.stringify(data);
+  if (assigned && assigned.text === text) return false;
+  assigned = { ...data, text };
+  if (typeof document !== 'undefined' && document.head) {
+    let el = document.getElementById('entity-colors');
+    if (!el) { el = document.createElement('style'); el.id = 'entity-colors'; document.head.append(el); }
+    const vars = (j) => data.palette.map((c, i) => `--ec${i}:${c[j]}`).join(';');
+    el.textContent = `:root,[data-theme="light"]{${vars(0)}}\n[data-theme="dark"]{${vars(1)}}`;
   }
+  if (keep) { try { localStorage.setItem(COLORS_KEPT, text); } catch (e) { /* storage off */ } }
+  return true;
+}
+try { useColors(JSON.parse(localStorage.getItem(COLORS_KEPT)), false); } catch (e) { /* none kept, or storage off */ }
+
+// The color of one entity, as a CSS value. `kind` ('project', 'agent', 'model': the
+// "Split by" group) narrows the lookup; without it every kind is tried in turn.
+export function entityColor(key, kind) {
+  if (key == null || key === '(other)') return OTHER_COLOR;
+  const k = String(key);
+  if (assigned) {
+    for (const c of COLOR_KINDS.includes(kind) ? [kind] : COLOR_KINDS) {
+      const i = assigned[c] && assigned[c][k];
+      if (i != null) return `var(--ec${i})`;
+    }
+    return `var(--ec${nameHash(k) % (assigned.general || 1)})`;
+  }
+  return SERIES[nameHash(k) % SERIES.length];
+}
+
+// The colors of `keys` (a Map), each its entity's (entityColor).
+export function entityColors(keys, kind) {
+  const out = new Map();
+  for (const k of keys) out.set(k, entityColor(k, kind));
   out.set('(other)', OTHER_COLOR);
   return out;
 }
@@ -519,13 +558,13 @@ export function legend(items, total) {
 
 // Bars, one per row: the label and the amount stay in sight; the row's note
 // (its count, its typical day), its share and its folder are on hover and focus.
-export function barList(rows, valueOf, noteOf) {
+// `kind` names what the rows are ('project', 'agent', 'model'), for their colors.
+export function barList(rows, valueOf, noteOf, kind) {
   if (!rows.length) return empty(null, 'Nothing in this window.');
   const max = Math.max(...rows.map(valueOf), 1e-9);
   const sum = rows.reduce((a, r) => a + valueOf(r), 0);
-  const colors = entityColors(rows.map((r) => r.key ?? r.label));
   return h('div.blist.hl', null, rows.map((r) => {
-    const color = r.rest ? OTHER_COLOR : colors.get(r.key ?? r.label);
+    const color = r.rest ? OTHER_COLOR : entityColor(r.key ?? r.label, kind);
     const v = valueOf(r);
     const note = noteOf ? noteOf(r) : '';
     const tipRows = [

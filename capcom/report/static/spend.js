@@ -3,8 +3,8 @@
 
 import {
   h, api, usd, tokens, pct, seg, legend, empty, errorBox, setQuery, monthDay, localDate, dayName, hm,
-  outputUsd, estimateNote, lowerMark, SERIES, OTHER_COLOR, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor,
-  spikeText, spikeHref, projectChip, storyLine, segBar, tableToggle, tipOn, entityColors, GROUPS, pickedGroup, rememberGroup, spendPath, groupQuery, sessionDot,
+  outputUsd, estimateNote, lowerMark, OTHER_COLOR, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor,
+  spikeText, spikeHref, projectChip, storyLine, segBar, tableToggle, tipOn, entityColor, GROUPS, pickedGroup, rememberGroup, spendPath, groupQuery, sessionDot,
 } from './lib.js';
 import { bandChart, dayBars } from './charts.js';
 import { heatCard } from './heatmap.js';
@@ -13,18 +13,16 @@ import { sessionsTable } from './sessions.js';
 const RANGES = [[7, '7 days'], [14, '14 days'], [30, '30 days'], [90, '90 days']];
 const TITLES = { 7: 'One week, adding up', 14: 'Two weeks, adding up', 30: 'Thirty days, adding up', 90: 'Ninety days, adding up' };
 
-export function memberColor(m, i, group, colors) {
+export function memberColor(m, group) {
   if (m.key === '(other)') return OTHER_COLOR;
   if (group === 'category' && CATEGORY_ORDER.includes(m.key)) return categoryColor(m.key);
-  if (colors && colors.has(m.key)) return colors.get(m.key);
-  return SERIES[i] || OTHER_COLOR;
+  return entityColor(m.key, group);
 }
 
 // The members of a chart with their labels and colors: a color follows its entity
-// (entityColors), so a project keeps its color across charts and windows.
+// (entityColor, one per project, agent type and model across capcom), never its rank.
 export function withColors(members, group) {
-  const colors = entityColors(members.map((m) => m.key));
-  return members.map((m, i) => ({ ...m, label: memberLabel(m, group), color: memberColor(m, i, group, colors) }));
+  return members.map((m) => ({ ...m, label: memberLabel(m, group), color: memberColor(m, group) }));
 }
 
 export function memberLabel(m, group) {

@@ -337,9 +337,9 @@ async function hourPanel(panel, start, onClose) {
 
   // where it went
   out.push(h('div.hm-cols', null,
-    h('div', null, h('h4.label', { text: 'By project' }), barList(d.by_project.slice(0, 5), (p) => p.usd)),
+    h('div', null, h('h4.label', { text: 'By project' }), barList(d.by_project.slice(0, 5), (p) => p.usd, null, 'project')),
     h('div', null, h('h4.label', { text: 'By agent type' }),
-      barList(d.by_agent.slice(0, 5).map((a) => ({ ...a, label: a.key === 'main' ? 'main thread' : a.label })), (a) => a.usd))));
+      barList(d.by_agent.slice(0, 5).map((a) => ({ ...a, label: a.key === 'main' ? 'main thread' : a.label })), (a) => a.usd, null, 'agent'))));
 
   // spikes and sessions
   if (d.spikes && d.spikes.length) {

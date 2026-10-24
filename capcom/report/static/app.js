@@ -1,7 +1,7 @@
 // The frame: sidebar (navigation, session search, live sessions, index status,
 // theme toggle) and a router from the URL path to a page.
 
-import { h, s, api, stamp, sessionHref, sessionColor, forget } from './lib.js';
+import { h, s, api, stamp, sessionHref, sessionColor, forget, useColors } from './lib.js';
 import { startRouter, render, go, afterPointer, refreshView } from './router.js';
 import { swapIn } from './morph.js';
 import { liveRows, line, inPhase } from './skeleton.js';
@@ -278,6 +278,16 @@ async function refreshStatus() {
   }
 }
 
+// ------------------------------------------------------------------ colors
+
+// One color per project, agent type and model (/api/colors): asked for at start and
+// whenever the index changed; the page is drawn again when the assignment did.
+async function refreshColors() {
+  let data;
+  try { data = await api('colors', true); } catch (e) { return; } // keep the last one
+  if (useColors(data)) renderPage();
+}
+
 // ------------------------------------------------------------------ live pages
 
 // Every 10 s while the tab is visible (and at once when it shows again): the live
@@ -300,6 +310,7 @@ async function watchData() {
     statusData.index.updated = v.updated;
     drawSidebar();
   }
+  if (before.index !== v.index) refreshColors();
   const parts = READS[route().name] || ['index'];
   if (parts.some((k) => before[k] !== v[k])) {
     if (before.marks !== v.marks) forget(); // a mark shows on several pages' replies
@@ -310,6 +321,7 @@ async function watchData() {
 function tickLive() { if (!document.hidden) { refreshLive(); watchData(); } }
 
 refreshStatus();
+refreshColors();
 refreshLive();
 watchData();
 setInterval(tickLive, 10e3);

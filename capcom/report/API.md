@@ -211,6 +211,21 @@ marks for Checks and Did it work?); a new `launch` is a restarted server, so the
 reads its new write token from a fresh `/`. It opens no index and is never a job: a few
 `stat` calls and one `PRAGMA data_version`.
 
+### `GET /api/colors`
+
+`{palette, general, project, agent, model}`: one color per project, agent type and
+model, the same on every page (`colors.py`). `palette` is every color in use as
+`[light, dark]` hex; its first `general` entries are the palette for entities without
+a Claude Code color, which the pages also use, by a hash of the name, for a key the
+reply does not hold. `project`, `agent` and `model` map every key and label the other
+replies name an entity by (a project's folder key and its display label, OpenClaw's
+and the temporary folders' merged series, `main` and the unknown agent type, a
+model's price-table id) to its index in `palette`. A project takes the Claude Code
+`/color` most of its last ten colored sessions use, an agent type its definition's
+`color:`; another entity of the same kind with the same color takes a shade of it,
+and the rest the first free general color, the earliest seen first. Cached per index
+generation like the other replies.
+
 ### `GET /api/overview?group=category|project|model|agent`
 
 `group` (default `category`, the same names as `/api/spend`) splits today's
