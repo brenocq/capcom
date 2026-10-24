@@ -257,16 +257,28 @@ days. The week holds 6 full days and today so far; its daily average divides by
 main threads, else the agent type; projects as in "Projects" above.
 
 ### `GET /api/spend?days=14&group=category`
+### `GET /api/spend?day=<YYYY-MM-DD>` and `GET /api/spend?hour=<YYYY-MM-DDTHH>`
 
-`days` is one of 7, 14, 30, 90; `group` one of `category`, `project`, `model`, `agent`
-(also accepted as `agent_type`), `session`.
+`days` is one of 1 (today), 7, 14, 30, 90; `group` one of `category`, `project`,
+`model`, `agent` (also accepted as `agent_type`), `session`. `day` narrows the reply to
+one local day and `hour` to one local clock hour (`days` is then ignored; both together
+are a 400). An hour is written as its local wall time, `2026-10-24T08` (`:00` and
+`:00:00` also accepted); in the hour clocks fall back, the second of the two takes its
+UTC offset (`2026-10-25T02+01:00`, a `+` read as a space too) and the bare wall time
+reads as the first. 400 for a malformed day or hour or one not on the hour, 404 for a
+day or hour not yet begun.
 
 ```
-{window: {days, since, until, group}, totals, sessions_count, temporary_sessions,
- cumulative: Cumulative | null,       # steps: 30 min (7 d), 1 h (14 d), 2 h (30 d), 6 h (90 d)
+{window: {scale: "range" | "day" | "hour", days, since, until, end, day, hour,
+          current, prev, next, group},
+ totals, sessions_count, temporary_sessions,
+ cumulative: Cumulative | null,       # steps: 30 min (7 d), 1 h (14 d), 2 h (30 d), 6 h (90 d),
+                                      # 5 min (a day, or today), 1 min (an hour)
  spikes: Spikes | null,
- regime: Regime | null,               # a change dated inside the window
- daily: {members: [{key, label}], days: [{date, values, total}]} | null,
+ regime: Regime | null,               # a change dated inside the window; ranges only
+ daily: {members: [{key, label}], days: [{date, values, total}]} | null,   # ranges only
+ hourly: {members, hours: [{start, values, total}]} | null,   # a day or today: each local hour
+ minutes: {members, hours: [{start, values, total}]} | null,  # an hour: each 5 minutes
  heatmap: {weekdays: [Mon..Sun], cells: [7][24] USD, max,
            hours: [{start, usd, project}],   # each local hour with spend, in time order
            top_projects: [7][24] label | null} | null,
@@ -288,9 +300,30 @@ out the past days by date from it and finds the dates behind a weekday-and-hour 
 its `usd` add up to the cells. `top_projects` is the costliest project of each cell
 over the window, null for a cell without spend.
 
+For a day or an hour, `since` and `end` are its bounds, `until` the earlier of `end`
+and now, `current` whether it holds now (always true for a range), and `prev` and
+`next` the neighboring day or hour in the same form as the query (`next` null when it
+has not begun). `day` is the local date (of the hour, for an hour), `hour` the hour's
+key. `hourly.hours` lists every local hour of the day (23 or 25 on a daylight-saving
+change), `minutes.hours` the twelve 5-minute slots of the hour; slots still to come
+have zero spend. `heatmap` is null for a day or an hour, and `sessions` lists the
+costliest sessions with spend inside it.
+
 `sessions_count` leaves out the sessions in temporary folders (/tmp), counted apart in
 `temporary_sessions`; together they are `/api/sessions`' `total` for the same `days`
 (whose `temporary` counts the same temporary sessions).
+
+### `GET /api/typical-hours?day=<YYYY-MM-DD>`
+
+The typical spend of each local clock hour, drawn behind Spend's per-hour bars of a
+day: the mean over the 28 days before `day` (that day left out), counting only the days
+since capcom's first request, so a short history is not pulled toward zero. 400 for a
+malformed day, 404 for a day not yet come.
+
+```
+{day, of_days: 28, days,              # days: how many days the mean is over
+ hours: [{start, usd}]}               # each local hour of `day`, as /api/spend's hourly
+```
 
 ### `GET /api/day/<YYYY-MM-DD>?group=category|project|model|agent`
 
