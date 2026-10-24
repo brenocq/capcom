@@ -231,10 +231,14 @@ let arrivals = 0;
 // frame while it draws a page, takes the page's api() calls (router.js).
 export const apiHooks = { onPartial: null, pass: null };
 
-// Drop the kept results, so the next draw fetches fresh data.
+// Drop the kept results, so the next draw fetches fresh data. A load still in
+// flight is not dropped for its waiters: it starts again in place (the data it was
+// fetching may predate what changed), so a page awaiting it never sees an abort.
 export function forget() {
-  for (const e of store.values()) if (!e.done) e.ctrl.abort();
-  store.clear();
+  for (const [path, e] of [...store]) {
+    if (e.done) store.delete(path);
+    else if (!e.error) { e.ctrl.abort(); e.restart(); }
+  }
   partials.clear();
 }
 
@@ -247,33 +251,46 @@ export class ApiError extends Error {
 }
 
 function load(path, low = false) {
-  const ctrl = new AbortController();
   // a partial kept from a stopped poll is from before: its source says so ('kept')
   const kept = partials.get(path) || null;
-  const e = { path, ctrl, low, done: false, error: null, data: null, partial: kept, progress: 0, source: kept ? 'kept' : null, seq: 0, waiters: new Set() };
+  const e = { path, ctrl: null, low, done: false, error: null, data: null, partial: kept, progress: 0, source: kept ? 'kept' : null, seq: 0, waiters: new Set(), run: 0 };
   const wake = () => { for (const w of e.waiters) w(); };
-  e.promise = getProgressive(path, {
-    signal: ctrl.signal,
-    headers: low ? { 'X-Capcom-Priority': 'low' } : null,
-    onPartial: (partial, progress, source) => {
-      e.progress = Math.max(e.progress, progress || 0);
-      if (partial) { e.partial = partial; e.source = source; partials.set(path, partial); }
-      wake();
-      if (apiHooks.onPartial) apiHooks.onPartial(path, partial, progress, source);
-    },
-  }).then((data) => {
-    Object.assign(e, { done: true, data, progress: 1, seq: ++arrivals });
-    partials.delete(path);
-    wake();
-    return data;
-  }, (err) => {
-    // kept until the next navigation (stopLoads), so the redraws of this view
-    // show it instead of asking again and again
-    e.error = err.status ? new ApiError(err.status, err.body) : err;
-    wake();
-    throw e.error;
-  });
+  let settle;
+  e.promise = new Promise((resolve, reject) => { settle = { resolve, reject }; });
   e.promise.catch(() => {}); // the pages see the error; no unhandled rejection
+  // One fetch of the entry; `forget()` starts another in its place, and the result
+  // of the one it aborted is ignored (`run` says which is current).
+  const start = () => {
+    const ctrl = new AbortController();
+    const run = ++e.run;
+    e.ctrl = ctrl;
+    getProgressive(path, {
+      signal: ctrl.signal,
+      headers: low ? { 'X-Capcom-Priority': 'low' } : null,
+      onPartial: (partial, progress, source) => {
+        if (run !== e.run) return;
+        e.progress = Math.max(e.progress, progress || 0);
+        if (partial) { e.partial = partial; e.source = source; partials.set(path, partial); }
+        wake();
+        if (apiHooks.onPartial) apiHooks.onPartial(path, partial, progress, source);
+      },
+    }).then((data) => {
+      if (run !== e.run) return;
+      Object.assign(e, { done: true, data, progress: 1, seq: ++arrivals });
+      partials.delete(path);
+      wake();
+      settle.resolve(data);
+    }, (err) => {
+      if (run !== e.run) return;
+      // kept until the next navigation (stopLoads), so the redraws of this view
+      // show it instead of asking again and again
+      e.error = err.status ? new ApiError(err.status, err.body) : err;
+      wake();
+      settle.reject(e.error);
+    });
+  };
+  e.restart = () => { e.partial = null; e.source = null; e.progress = 0; start(); };
+  start();
   store.set(path, e);
   return e;
 }
