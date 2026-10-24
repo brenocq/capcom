@@ -4,13 +4,13 @@
 
 import {
   h, s, api, usd, tokens, seg, empty, setQuery, hm, monthDay, dayName, showTip, hideTip, entityColors, segBar, tableToggle,
-  GROUPS, pickedGroup, rememberGroup, limitsPath, labelSpan,
+  GROUPS, pickedGroup, rememberGroup, limitsPath, labelSpan, RANGES, rangeTabs, LIMIT_DAYS,
 } from './lib.js';
 import { memberBands, timeTicks, xAxis } from './charts.js';
+import { TWEEN_MS } from './loading.js';
 import { withColors } from './spend.js';
 
 let uid = 0;
-const DAY_OPTIONS = [[7, '7 days'], [14, '14 days'], [30, '30 days'], [90, '90 days']];
 
 const pctText = (x, digits = 0) => `${(+x).toFixed(digits)}%`;
 const when = (iso, weekly) => {
@@ -150,33 +150,98 @@ function fitNote(w) {
 
 // ------------------------------------------------------------------ chart
 
-// Where a chart spanning several windows draws each window's boundary: every reset
-// (and the start of a window that began after an idle gap, not at the reset before
-// it) strictly inside the plot, as {t, f (0 to 1 across the plot), kind: 'reset' or
-// 'start', label (the time), title, labeled}. A boundary is `labeled` when the last
-// labeled one is at least `gap` of the plot away (a label is about that wide).
-// segments: oldest first, as limitChart takes them; weekly: the labels name the day.
-export function windowBounds(segments, x0, x1, weekly, gap) {
-  const room = gap ?? (weekly ? 0.13 : 0.075);
-  const at = (t) => (weekly ? `${dayName(new Date(t)).slice(0, 3)} ${hm(new Date(t))}` : hm(new Date(t)));
+// Where a chart draws each window's boundary: every window's start and reset in
+// [x0, x1], each once, as {t, f (0 to 1 across the plot), kind, exact, label (the
+// time), title, prio}. kind: 'reset' (a reset, which also starts the next window
+// when one began then), 'start' (a window that began after an idle gap, not at the
+// reset before it) or 'next' (the open window's coming reset). `exact`: from a
+// recorded reset time (Claude Code's `resets_at`: a reset, and a start as the reset
+// minus the window's length); a start capcom only saw as the first reading of a
+// window (no reset time known, or a drop) is not exact, and its label says "~".
+// `prio` orders the labels when they don't all fit: the coming reset, then the open
+// window's start, then the rest newest first. segments: oldest first, as limitChart
+// takes them; weekly: the labels name the day; now (ms): what is still to come.
+const SAME = 120e3; // a start this close to a reset is the same boundary
+export function windowBounds(segments, x0, x1, weekly, now = Date.now()) {
+  const at = (t) => (weekly ? `${monthDay(new Date(t))} ${hm(new Date(t))}` : hm(new Date(t)));
   const out = [];
-  const near = (t) => out.some((b) => Math.abs(b.t - t) <= (x1 - x0) * 0.004);
-  const add = (t, kind) => {
-    if (!(t > x0 && t < x1) || near(t)) return;
-    out.push({ t, f: (t - x0) / (x1 - x0), kind, label: at(t), title: `${kind === 'reset' ? 'Window reset' : 'Window started'} ${at(t)}` });
+  const add = (t, kind, exact, open) => {
+    if (!(t >= x0 && t <= x1)) return;
+    const same = out.find((b) => Math.abs(b.t - t) <= SAME);
+    if (same) {
+      // a reset that starts the next window: one line, one label
+      if (kind === 'start' && same.kind !== 'start') { same.starts = true; same.open = same.open || open; }
+      return;
+    }
+    out.push({ t, kind, exact, open });
   };
-  for (const sg of segments) {
-    if (sg.resets_at && sg.reset !== false) add(new Date(sg.resets_at).getTime(), 'reset');
-  }
-  for (const sg of segments) {
-    const start = sg.start ? new Date(sg.start).getTime() : sg.start_known && sg.points.length ? sg.points[0][0] : null;
-    if (start !== null) add(start, 'start');
-  }
-  out.sort((a, b) => a.t - b.t);
-  let last = -Infinity;
+  segments.forEach((sg) => {
+    if (!sg.resets_at) return;
+    const t = new Date(sg.resets_at).getTime();
+    add(t, t > now ? 'next' : 'reset', true, false);
+  });
+  segments.forEach((sg, i) => {
+    const open = i === segments.length - 1 && !!sg.resets_at && new Date(sg.resets_at).getTime() > now;
+    const start = sg.start ? new Date(sg.start).getTime() : sg.start_known && sg.points && sg.points.length ? sg.points[0][0] : null;
+    if (start !== null) add(start, 'start', !!sg.start_known, open);
+  });
+  out.sort((p, q) => p.t - q.t);
+  const span = x1 - x0 || 1;
   for (const b of out) {
-    b.labeled = b.f - last >= room && b.f <= 1 - room / 2;
-    if (b.labeled) last = b.f;
+    const time = at(b.t);
+    b.f = (b.t - x0) / span;
+    b.label = (b.exact ? '' : '~') + time;
+    b.name = b.kind === 'next' ? 'Resets' : b.kind === 'reset' ? 'Window reset' : b.exact ? 'Window started' : 'Window started by';
+    b.title = `${b.name} ${time}${b.kind === 'reset' && b.starts ? '; the next window started then' : ''}${b.exact ? '' : ' (its first reading; the reset time was not recorded)'}`;
+    b.prio = b.kind === 'next' ? 2 : b.open ? 1 : 0;
+  }
+  // newest first within a priority
+  const order = [...out].sort((p, q) => q.prio - p.prio || q.t - p.t);
+  order.forEach((b, i) => { b.rank = i; });
+  return out;
+}
+
+// Which row each boundary label takes above the plot, once its width is known:
+// labels in rank order (`rank`, lowest first) take the lowest row where they touch
+// no label already there (nor `avoid`: [a, b] px spans on row 0, the "now" label),
+// and where no line crosses them: a label's line reaches up to its row, through the
+// rows under it, so a label never sits on another one's line nor its own line on a
+// label below. In a row a label tries three places: centered on its line, then
+// beside it as a flag (right, then left; its line then runs up along it), kept inside
+// the plot's width; first those that cover the fewest other boundaries' lines (each
+// counted by its `weight`, 1 unless given, so a label steps aside from the line of the
+// coming reset). items: [{x (px), w (px), rank, weight}]; returns [{row (-1: no room),
+// left (px), flag}] in items' order. Pure.
+export const LABEL_ROWS = 3;
+export function placeLabels(items, width, avoid = [], rows = LABEL_ROWS, pad = 6) {
+  const taken = Array.from({ length: rows }, (_, r) => (r === 0 ? avoid.map(([a, b]) => [a, b]) : []));
+  const lines = []; // [x, row of its label]
+  const out = items.map(() => ({ row: -1, left: 0, flag: false }));
+  const order = items.map((it, i) => i).sort((i, j) => items[i].rank - items[j].rank);
+  const near = 3;
+  for (const i of order) {
+    const it = items[i];
+    const clamp = (l) => Math.max(0, Math.min(width - it.w, l));
+    const all = [[clamp(it.x - it.w / 2), false], [clamp(it.x + near), true], [clamp(it.x - near - it.w), true]];
+    // first the places that leave the most other boundaries' lines free to reach up
+    const covers = ([a]) => items.reduce((n, o) => n + (o !== it && o.x > a - near && o.x < a + it.w + near ? (o.weight ?? 1) : 0), 0);
+    const spots = all.map((x) => [x, covers(x)]).sort((p, q) => p[1] - q[1]).map((x) => x[0]);
+    out[i].left = spots[0][0];
+    rowLoop: for (let r = 0; r < rows; r++) {
+      // its own line passes the rows under r: no label there may cover it
+      let crosses = false;
+      for (let q = 0; q < r && !crosses; q++) crosses = taken[q].some(([p, e]) => it.x > p - near && it.x < e + near);
+      if (crosses) break; // nor in any row higher up
+      for (const [a, flag] of spots) {
+        const b = a + it.w;
+        if (taken[r].some(([p, q]) => a < q + pad && p < b + pad)) continue;
+        if (lines.some(([x, row]) => row > r && x > a - near && x < b + near)) continue;
+        taken[r].push([a, b]);
+        lines.push([it.x, r]);
+        out[i] = { row: r, left: a, flag };
+        break rowLoop;
+      }
+    }
   }
   return out;
 }
@@ -265,9 +330,12 @@ export function limitChart(opts) {
   if (fitted.length > 1) {
     svg.append(s('path', { d: fitted.map((p, i) => (i ? 'L' : 'M') + X(p[0]) + ' ' + Y(p[1])).join(''), ...stroke, 'stroke-dasharray': '5 4', style: 'stroke:var(--accent)' }));
   }
-  const bounds = windowBounds(opts.segments, x0, x1, opts.weekly && opts.kind !== 'five_hour');
-  const labeled = bounds.some((b) => b.labeled);
-  const plot = h('div.chart', { style: `height:${H}px;margin:${labeled ? 20 : 12}px 0 0 ${left}px` });
+  const bounds = opts.bounds === false ? []
+    : windowBounds(opts.segments, x0, x1, opts.weekly && opts.kind !== 'five_hour', opts.now || Date.now());
+  // before layout, the label rows from a guessed plot width and label widths
+  const guess = placeLabels(bounds.map((b) => ({ x: b.f * PLOT_GUESS, w: b.label.length * 6.4 + 2, rank: b.rank })), PLOT_GUESS);
+  const rows = Math.max(0, ...guess.map((g) => g.row + 1));
+  const plot = h('div.chart', { style: `height:${H}px;margin:${ROW_TOP[rows]}px 0 0 ${left}px` });
   for (const v of [0, 50, 100]) {
     const t = ((1 - v / ymax) * 100).toFixed(2) + '%';
     plot.append(h('div.gridline', { style: `top:${t}` + (v === 100 ? ';border-top:1px dashed var(--accent)' : '') }),
@@ -287,29 +355,40 @@ export function limitChart(opts) {
     plot.append(h('span.gaplab', { style: `left:${xp(mid)};top:${yp(v)}`, text: g.label }));
   }
   const nowF = opts.now && opts.now < x1 && opts.now > x0 ? (opts.now - x0) / (x1 - x0) : null;
-  for (const b of bounds) {
-    const left = (b.f * 100).toFixed(2) + '%';
-    plot.append(h('div.winbound', { style: `position:absolute;top:0;bottom:0;left:${left};border-left:1.5px solid var(--muted);opacity:0.55;pointer-events:none`, title: b.title }));
-    // a label clear of the "now" label, above the plot
-    if (b.labeled && (nowF === null || Math.abs(nowF - b.f) > 0.06)) {
-      plot.append(h('span.winlab', { style: `position:absolute;top:-18px;left:${left};transform:translateX(-50%);font-size:11px;line-height:14px;color:var(--muted);white-space:nowrap;pointer-events:none`, text: b.label, title: b.title }));
-    }
-  }
+  // each boundary: a thin line (solid when its time was recorded, dashed when only
+  // seen as a window's first reading) and its time above the plot, in the row
+  // placeLabels gives it; the coming reset and the open window's start first
+  bounds.forEach((b, i) => {
+    const at = (b.f * 100).toFixed(2) + '%';
+    const row = guess[i].row;
+    const shift = b.f < 0.03 ? '0' : b.f > 0.97 ? '-100%' : '-50%';
+    plot.append(h('div.winbound', {
+      'data-i': i, title: b.title,
+      style: `position:absolute;top:${row < 0 ? 0 : guess[i].flag ? LAB_TOP[row] + 2 : LINE_TOP[row]}px;bottom:0;left:${at};border-left:1.5px ${b.exact ? 'solid' : 'dashed'} var(--muted);opacity:0.55;pointer-events:none`,
+    }));
+    plot.append(h('span.winlab', {
+      'data-i': i, 'data-f': b.f, title: b.title, text: b.label,
+      style: `position:absolute;top:${LAB_TOP[Math.max(row, 0)]}px;left:${at};transform:translateX(${shift});font-size:11px;line-height:14px;color:var(--muted);white-space:nowrap;pointer-events:none${row < 0 ? ';visibility:hidden' : ''}`,
+    }));
+  });
   if (nowF !== null) {
     const f = (nowF * 100).toFixed(2) + '%';
-    plot.append(h('div.nowline', { style: `left:${f}` }), h('span.nowlab', { style: `left:${f}`, text: 'now' }));
+    plot.append(h('div.nowline', { style: `left:${f}` }), h('span.nowlab', { 'data-f': nowF, style: `left:${f};top:${LAB_TOP[0]}px;line-height:14px`, text: 'now' }));
   }
-  if (labeled) fitLabels(plot);
+  const unlabeled = h('p.note.boundnote', { style: 'margin:2px 0 0', hidden: true });
+  if (bounds.length) fitLabels(plot, bounds, unlabeled);
   if (runout) {
     const y100 = yp(100), fx = (f) => (f * 100).toFixed(2) + '%';
     // the plot's width is not known until it is laid out: a narrow one (the
     // label spans more of it) is the cautious guess, as the forecast rises
-    const lab = runoutLabel(runout.f, fan, { x0, x1, w: PLOT_GUESS, h: H, ymax }, LABEL_BOX,
-      hover.map((p) => [p.t, p.v]));
+    const reads = hover.map((p) => [p.t, p.v]);
+    const place = (w, box) => runoutLabel(runout.f, fan, { x0, x1, w, h: H, ymax }, box, reads);
+    const lab = place(PLOT_GUESS, LABEL_BOX);
+    const runlab = h(`div.runlab.${lab.side}${lab.clear ? '' : '.backed'}`, { style: `left:${fx(runout.f)};top:${lab.top.toFixed(1)}px` },
+      h('span.v', { text: runout.title }), runout.sub ? h('span.r', { text: runout.sub }) : null);
     plot.append(h('div.runguide', { style: `left:${fx(runout.f)};top:${y100}` }),
-      h('span.rundot', { style: `left:${fx(runout.f)};top:${y100}`, title: runout.title }),
-      h(`div.runlab.${lab.side}${lab.clear ? '' : '.backed'}`, { style: `left:${fx(runout.f)};top:${lab.top.toFixed(1)}px` },
-        h('span.v', { text: runout.title }), runout.sub ? h('span.r', { text: runout.sub }) : null));
+      h('span.rundot', { style: `left:${fx(runout.f)};top:${y100}`, title: runout.title }), runlab);
+    fitRunout(plot, runlab, runout.f, place);
   }
   const label = (t) => `${opts.weekly ? monthDay(new Date(t)) + ' ' : ''}${hm(new Date(t))}`;
   plot.addEventListener('mousemove', (e) => {
@@ -319,6 +398,9 @@ export function limitChart(opts) {
     let best = null;
     for (const p of hover) if (!best || Math.abs(p.t - t) < Math.abs(best.t - t)) best = p;
     if (best && Math.abs(best.t - t) < (x1 - x0) / 40) rows.push({ label: `Reading at ${label(best.t)}`, value: pctText(best.v), color: 'var(--text)' });
+    let edge = null;
+    for (const b of bounds) if (!edge || Math.abs(b.t - t) < Math.abs(edge.t - t)) edge = b;
+    if (edge && Math.abs(edge.t - t) < (x1 - x0) / 60) rows.push({ label: edge.name, value: edge.label.replace(/^~/, ''), color: 'var(--muted)' });
     if (fitted.length > 1 && t >= fitted[0][0]) {
       let j = 0;
       fitted.forEach((p, i) => { if (p[0] <= t) j = i; });
@@ -333,28 +415,94 @@ export function limitChart(opts) {
     if (rows.length) showTip(e, label(t), rows); else hideTip();
   });
   plot.addEventListener('mouseleave', hideTip);
-  return h('div', null, plot, xAxis(timeTicks(x0, x1, 6), x0, x1, left));
+  return h('div', null, plot, xAxis(timeTicks(x0, x1, 6), x0, x1, left), unlabeled);
 }
 
-// Once laid out (and on every resize), hide the boundary labels that would touch
-// the one before them or the "now" label: how much room a label has depends on the
-// plot's width, known only in the browser.
-function fitLabels(plot) {
-  if (typeof requestAnimationFrame !== 'function') return;
+// The label rows, px from the plot's top: a label's top, its line's top (the line
+// reaches up to its label) and the plot's top margin for that many rows.
+const LAB_TOP = [-18, -32, -46], LINE_TOP = [-4, -18, -32], ROW_TOP = [12, 20, 34, 48];
+
+// Once laid out (and on every resize), place the boundary labels by their measured
+// widths (placeLabels): each in the lowest row with room. The "now" label goes
+// first, stepping aside from the coming reset's line so that one still finds room a
+// row up. A boundary label
+// with no room left is hidden, and `note` says how many and where to find them (on
+// hover), so none goes missing silently.
+function fitLabels(plot, bounds, note) {
   const fit = () => {
+    const W = plot.getBoundingClientRect().width;
+    if (!W) return;
     const labs = [...plot.querySelectorAll('span.winlab')];
-    const now = plot.querySelector('span.nowlab');
-    let last = null;
-    for (const el of labs) {
-      el.style.visibility = '';
-      const r = el.getBoundingClientRect();
-      const hits = (o) => o && r.left < o.right + 6 && o.left < r.right + 6;
-      const hide = hits(last) || (now && hits(now.getBoundingClientRect())) || r.left < plot.getBoundingClientRect().left - 8;
-      if (hide) el.style.visibility = 'hidden'; else last = r;
+    const lines = [...plot.querySelectorAll('div.winbound')];
+    const nowLab = plot.querySelector('span.nowlab'), nowLine = plot.querySelector('div.nowline');
+    const items = labs.map((el, i) => ({ x: bounds[i].f * W, w: el.getBoundingClientRect().width, rank: bounds[i].rank, weight: bounds[i].kind === 'next' ? 5 : 1 }));
+    if (nowLab) {
+      items.push({ x: Number(nowLab.dataset.f) * W, w: nowLab.getBoundingClientRect().width, rank: -1 });
+      labs.push(nowLab);
+      lines.push(nowLine);
     }
+    const placed = placeLabels(items, W);
+    let used = 0, hidden = 0;
+    placed.forEach((pl, i) => {
+      const el = labs[i];
+      el.style.left = `${pl.left.toFixed(1)}px`;
+      el.style.transform = 'none';
+      el.style.visibility = pl.row < 0 ? 'hidden' : '';
+      el.style.top = `${LAB_TOP[Math.max(pl.row, 0)]}px`;
+      if (lines[i]) lines[i].style.top = `${pl.row < 0 ? 0 : pl.flag ? LAB_TOP[pl.row] + 2 : LINE_TOP[pl.row]}px`;
+      used = Math.max(used, pl.row + 1);
+      if (pl.row < 0 && i < bounds.length) hidden++;
+    });
+    plot.style.marginTop = `${ROW_TOP[used]}px`;
+    note.hidden = !hidden;
+    note.textContent = hidden ? `${hidden} of ${bounds.length} window start and reset times have no room for a label at this width; hover the chart at a line for its time.` : '';
   };
+  afterLayout(plot, fit);
+}
+
+// Run `fit` once the plot is laid out, again on every resize, and again once a page
+// swapped in over an older one has tweened its inline styles to the drawn ones
+// (morph.js), over the placement made here.
+function afterLayout(plot, fit) {
+  if (typeof requestAnimationFrame !== 'function') return;
   requestAnimationFrame(fit);
+  setTimeout(fit, TWEEN_MS + 80);
   if (typeof ResizeObserver === 'function') new ResizeObserver(fit).observe(plot);
+}
+
+// Where the run-out label goes across a plot `width` px wide, once its width `w` is
+// measured: beside the guide at `x` on its `side` if it fits, else on the other side,
+// else pushed inside the plot's edge (`moved`: it then may cover the forecast, so it
+// gets a backing). Pure; returns {left (px), side, moved}.
+export function runoutLeft(x, w, width, side, gap = LABEL_GAP) {
+  const at = { right: x + gap, left: x - gap - w };
+  const fits = (sd) => at[sd] >= 0 && at[sd] + w <= width;
+  if (fits(side)) return { left: at[side], side, moved: false };
+  const other = side === 'right' ? 'left' : 'right';
+  if (fits(other)) return { left: at[other], side: other, moved: false };
+  return { left: Math.max(0, Math.min(width - w, at[side])), side, moved: true };
+}
+
+// Place the run-out label again at the plot's laid-out width and the label's measured
+// size (`place(width, box)`: runoutLabel there), kept inside the plot (runoutLeft); a
+// label wider than the plot wraps.
+function fitRunout(plot, el, f, place) {
+  const fit = () => {
+    const W = plot.getBoundingClientRect().width;
+    if (!W) return;
+    el.style.maxWidth = `${W}px`;
+    el.style.whiteSpace = el.scrollWidth > W ? 'normal' : '';
+    const box = { w: el.offsetWidth, h: el.offsetHeight };
+    const lab = place(W, box);
+    const pl = runoutLeft(f * W, box.w, W, lab.side);
+    el.style.left = `${pl.left.toFixed(1)}px`;
+    el.style.top = `${lab.top.toFixed(1)}px`;
+    el.style.transform = 'none';
+    el.classList.toggle('left', pl.side === 'left');
+    el.classList.toggle('right', pl.side === 'right');
+    el.classList.toggle('backed', !lab.clear || pl.moved || pl.side !== lab.side);
+  };
+  afterLayout(plot, fit);
 }
 
 // ------------------------------------------------------------------ overview cards
@@ -380,7 +528,7 @@ export function limitCard(label, w, lim, account) {
   if (w.current && w.history.length && resets) {
     const x0 = new Date(w.start).getTime(), x1 = new Date(resets).getTime();
     const since = lim.recording_since ? new Date(lim.recording_since).getTime() : null;
-    card.append(limitChart({ segments: [{ points: w.history, reset: false, start_known: w.start_known }], fan: fc ? fc.fan : [], now: fc ? fc.fan[0][0] : null, x0, x1, height: 110, weekly, since, runout: runoutMark(fc, x0, x1, weekly) }));
+    card.append(limitChart({ segments: [{ points: w.history, reset: false, start_known: w.start_known }], fan: fc ? fc.fan : [], now: fc ? fc.fan[0][0] : null, x0, x1, height: 110, weekly, since, runout: runoutMark(fc, x0, x1, weekly), bounds: false }));
   }
   const fit = fitNote(w);
   if (fit) card.append(h('span.note', { text: fit }));
@@ -487,19 +635,38 @@ export function limitCards(lim) {
 // ------------------------------------------------------------------ page
 
 // Where the page's chart starts: at the start of the oldest window still in the
-// range (`days` back from now), not at an arbitrary time before it.
-export function chartStart(segs, now, days) {
-  const lo = now - days * 864e5;
+// range (that ends after `lo`, ms: the range's start), not at an arbitrary time
+// before it. `keep`: with no window in the range, the newest one (the weekly chart
+// on a short range shows at least its current week).
+export function chartStart(segs, now, lo, keep = false) {
   let x0 = Infinity;
+  const startOf = (sg) => {
+    const pts = sg.points;
+    const start = sg.start ? new Date(sg.start).getTime() : pts[0][0];
+    return Number.isFinite(start) ? start : pts[0][0];
+  };
   for (const sg of segs) {
     const pts = sg.points;
     if (!pts.length) continue;
     const end = sg.resets_at ? new Date(sg.resets_at).getTime() : pts[pts.length - 1][0];
     if (end < lo) continue;
-    const start = sg.start ? new Date(sg.start).getTime() : pts[0][0];
-    x0 = Math.min(x0, Number.isFinite(start) ? start : pts[0][0]);
+    x0 = Math.min(x0, startOf(sg));
   }
-  return Number.isFinite(x0) && x0 < now ? x0 : now - days * 864e5;
+  if (!Number.isFinite(x0) && keep) {
+    const last = [...segs].reverse().find((sg) => sg.points.length);
+    if (last) x0 = startOf(last);
+  }
+  return Number.isFinite(x0) && x0 < now ? x0 : lo;
+}
+
+// Where the page's chart ends: now, or later at the open window's coming reset
+// (and the forecast's), so the forecast reads against the reset.
+export function chartEnd(segs, fc, now) {
+  let x1 = now;
+  const open = segs.length ? segs[segs.length - 1] : null;
+  if (open && open.resets_at) x1 = Math.max(x1, new Date(open.resets_at).getTime());
+  if (fc && fc.resets_at) x1 = Math.max(x1, new Date(fc.resets_at).getTime());
+  return x1;
 }
 
 // "What 1% costs": how many tokens of each kind make 1% of the window and their
@@ -561,7 +728,7 @@ export function costsBlock(w) {
   return out;
 }
 
-function windowSection(w, now, days, since, group) {
+function windowSection(w, now, lo, since, group) {
   const weekly = isWeekly(w);
   const card = h('section.card', null, h('div.split', null, h('h2', { text: w.label[0].toUpperCase() + w.label.slice(1) }),
     h('span.note', { text: `${w.samples} sample${w.samples === 1 ? '' : 's'}` })));
@@ -569,13 +736,14 @@ function windowSection(w, now, days, since, group) {
   card.append(h('p.note', { text: summary(w).join(' ') }));
   const segs = [...w.segments].reverse(); // oldest first
   const fc = w.forecast;
-  const x0 = chartStart(segs, now, days);
-  const end = fc ? new Date(fc.resets_at).getTime() : now;
-  const x1 = Math.max(end, now);
+  const x0 = chartStart(segs, now, lo, weekly);
+  const x1 = chartEnd(segs, fc, now);
   card.append(limitChart({
     segments: segs,
     fan: fc ? fc.fan : [], now, x0, x1, height: 180, weekly: true, kind: w.window, since, runout: runoutMark(fc, x0, x1, weekly),
   }));
+  const inferred = windowBounds(segs, x0, x1, weekly, now).some((b) => !b.exact);
+  card.append(h('p.note', { text: `The thin lines mark each window's start and reset, at the times Claude Code recorded${inferred ? '; a dashed one, marked ~, is only where a window\'s first reading was, since its reset time was not recorded' : ''}.` }));
   const fit = fitNote(w);
   if (fit) card.append(h('p.note', { text: fit }));
   const costs = costsBlock(w);
@@ -617,20 +785,20 @@ function windowSection(w, now, days, since, group) {
   return card;
 }
 
-// The range tabs, with the ranges that would show nothing more than a shorter one
-// disabled; none at all while the history fits in the shortest range.
+// The range picker (Spend's), with the ranges that would show nothing more than a
+// shorter one disabled.
 export function dayTabs(days, since, now) {
-  const span = since ? (now - since) / 864e5 : 0;
-  if (span <= DAY_OPTIONS[0][0]) return null;
-  const opts = DAY_OPTIONS.map(([v, text], i) => {
-    const prev = i ? DAY_OPTIONS[i - 1][0] : 0;
-    return [v, text, prev >= span ? `Recording began ${Math.ceil(span)} days ago: ${text} would show nothing more` : null];
+  const span = since ? (now - since) / 864e5 : Infinity;
+  const list = RANGES.map((r) => r[0]);
+  return rangeTabs(days, (v) => {
+    const i = list.indexOf(v);
+    const prev = i > 0 ? list[i - 1] : 0;
+    return prev > 1 && prev >= span ? `Recording began ${Math.ceil(span)} days ago: ${RANGES[i][1]} would show nothing more` : null;
   });
-  return seg('Window', opts, days, (v) => setQuery({ days: v === 14 ? null : v }));
 }
 
 export async function renderLimits(main, r) {
-  const days = DAY_OPTIONS.map((o) => o[0]).includes(+r.query.get('days')) ? +r.query.get('days') : 14;
+  const days = LIMIT_DAYS.includes(+r.query.get('days')) ? +r.query.get('days') : 14;
   const group = pickedGroup(r.query);
   const d = await api(limitsPath(r.query));
   const now = Date.now();
@@ -639,7 +807,7 @@ export async function renderLimits(main, r) {
     h('div.titles', null, h('h1', { text: 'Limits' }),
       h('p.sub', { text: 'The 5-hour and weekly windows of your plan: how full, when they reset, and what filled them.' }),
       since ? h('p.sub', { text: `Recording since ${monthDay(since)}, ${hm(since)}` }) : null),
-    dayTabs(days, since ? since.getTime() : null, now)));
+    h('div.controls', null, dayTabs(days, since ? since.getTime() : null, now))));
   if (!d.available) {
     main.append(h('section.card', null, notRecording(d)));
     return;
@@ -648,7 +816,9 @@ export async function renderLimits(main, r) {
   const chosen = chosenAccount(d);
   const tabs = accountTabs(d, chosen);
   if (tabs) main.append(h('div.split', null, h('span.label', { text: 'Account' }), tabs));
-  const sections = (wins) => ['five_hour', 'seven_day'].filter((k) => wins[k]).map((k) => windowSection(wins[k], now, days, since ? since.getTime() : null, group));
+  // the range's start: local midnight `days` - 1 days back, as Spend's
+  const lo = d.since ? new Date(d.since).getTime() : now - days * 864e5;
+  const sections = (wins) => ['five_hour', 'seven_day'].filter((k) => wins[k]).map((k) => windowSection(wins[k], now, lo, since ? since.getTime() : null, group));
   if (chosen === 'all') {
     const comb = combinedCard(d);
     if (comb) main.append(h('div.grid', null, comb));

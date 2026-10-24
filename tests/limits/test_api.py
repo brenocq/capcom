@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import shutil
 from collections.abc import Iterator
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -193,3 +193,32 @@ def test_bad_days(client: Client) -> None:
 def test_limits_page_is_served(client: Client) -> None:
     status, body, _ = client.get("/limits")
     assert status == 200 and b"app.js" in body
+
+
+def test_today_counts_from_local_midnight(state: Path, client: Client) -> None:
+    # a 5-hour window that ended last night, one that ended this morning, the open one
+    five = [
+        LimitSample(ago(hours=20), H5, 30.0, ago(hours=17), "s1"),  # 19:00 to 22:00
+        LimitSample(ago(hours=12), H5, 40.0, ago(hours=9), "s1"),  # 03:00 to 06:00
+        LimitSample(ago(hours=1), H5, 10.0, NOW + timedelta(hours=2), "s1"),
+    ]
+    write(state, five)
+    status, data, _ = client.get("/api/limits?days=1&group=project")
+    assert status == 200 and data["days"] == 1
+    assert data["since"] == datetime(2026, 10, 21, tzinfo=UTC).isoformat()
+    segs = data["windows"]["five_hour"]["segments"]
+    assert [s["peak"] for s in segs] == [10.0, 40.0]  # newest first; last night's is out
+    week = client.get("/api/limits?days=7&group=project")[1]["windows"]["five_hour"]
+    assert [s["peak"] for s in week["segments"]] == [10.0, 40.0, 30.0]
+
+
+def test_a_short_range_keeps_the_newest_week(state: Path, client: Client) -> None:
+    # the only weekly window reset 8 days ago: no week inside a 7-day range, but the
+    # chart keeps it rather than draw nothing
+    old = [
+        LimitSample(ago(days=10), D7, 20.0, ago(days=8), "s1"),
+        LimitSample(ago(days=9), D7, 50.0, ago(days=8), "s1"),
+    ]
+    write(state, old)
+    segs = client.get("/api/limits?days=1&group=project")[1]["windows"]["seven_day"]["segments"]
+    assert len(segs) == 1 and segs[0]["peak"] == 50.0

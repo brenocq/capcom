@@ -248,7 +248,15 @@ export function spendHref(to, group, back = 14) {
   if (group && group !== 'category') q.set('group', group);
   return '/spend?' + q.toString().replace(/%3A/g, ':');
 }
-export const LIMIT_DAYS = [7, 14, 30, 90];
+// The range picker Spend and Limits share: the same ranges, the same `days` in the
+// URL (1 is today, from local midnight), so a link carries the range between them.
+// `off(days)`: why a range is off (shown disabled with it as tooltip), or null;
+// `also`: other query keys set with it (Spend leaves its drilled day and hour).
+export const RANGES = [[1, 'Today'], [7, '7 days'], [14, '14 days'], [30, '30 days'], [90, '90 days']];
+export function rangeTabs(days, off = () => null, also = {}) {
+  return seg('Range', RANGES.map(([v, text]) => [v, text, off(v)]), days, (v) => setQuery({ ...also, days: v }));
+}
+export const LIMIT_DAYS = RANGES.map((r) => r[0]);
 export function limitsPath(query) {
   const days = LIMIT_DAYS.includes(Number(query.get('days'))) ? Number(query.get('days')) : 14;
   return `limits?days=${days}&group=${pickedGroup(query)}`;

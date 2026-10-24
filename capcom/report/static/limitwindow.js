@@ -94,7 +94,7 @@ export async function renderLimitWindow(main, r) {
     d.fit ? item('var(--accent)', 'Fitted from the spend', d.fitted_percent === null ? null : '≈' + pctText(d.fitted_percent, 1)) : null,
     bands.map((b) => item(b.color, b.label, '≈' + pctText(b.values[b.values.length - 1], 1)))));
   card.append(limitChart({
-    segments: [{ points: d.points, reset: false, start_known: d.start_known }],
+    segments: [{ points: d.points, reset: false, start_known: d.start_known, start: d.start, resets_at: d.resets_at }],
     fitted: d.fit ? fitted : [], bands,
     now: d.current ? now : null, x0, x1: Math.max(x1, x0 + 1), height: 220, weekly, kind: d.window,
   }));

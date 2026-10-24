@@ -85,7 +85,7 @@ MAX_SESSION_SPIKES = 8  # spikes listed on a session's page: the largest by exce
 _STEPS = {1: timedelta(minutes=5), 7: timedelta(minutes=30), 14: timedelta(hours=1)}
 _STEPS |= {30: timedelta(hours=2), 90: timedelta(hours=6)}
 
-LIMITS_DAYS = (7, 14, 30, 90)
+LIMITS_DAYS = (1, 7, 14, 30, 90)
 
 # /api/spend?group=: other names accepted for a grouping (as `capcom top --by agent`
 # and the session rows' `agent_type` say it)
@@ -1875,9 +1875,16 @@ MAX_SQUARES = 120  # past this many tools or skills, a bar instead of squares
 MAX_DOTS = 200
 
 
-def _limits(ctx: Context, days: int | None, full: bool, split: Split = "project") -> dict[str, Any]:
+def _limits(
+    ctx: Context,
+    days: int | None,
+    full: bool,
+    split: Split = "project",
+    since: datetime | None = None,
+) -> dict[str, Any]:
     """The usage windows from capcom.limits: the samples in the state folder, projects
-    named as everywhere else, each window's spend split by `split`."""
+    named as everywhere else, each window's spend split by `split`, the windows that
+    end after `since` (else `days` back from now)."""
     from capcom.limits.view import limits_json
 
     names = ctx.names()
@@ -1891,6 +1898,7 @@ def _limits(ctx: Context, days: int | None, full: bool, split: Split = "project"
         full=full,
         label=lambda d: project_display(d, names),
         split=split,
+        since=since,
     )
 
 
@@ -1919,7 +1927,11 @@ def limits(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     if days not in LIMITS_DAYS:
         raise ApiError(400, "bad_query", f"days must be one of {', '.join(map(str, LIMITS_DAYS))}")
     split = limit_split(query)
-    return {"days": days, "group": split} | _limits(ctx, days, full=True, split=split)
+    # calendar days, as Spend counts them: today is from local midnight
+    since = ctx.midnight(days - 1)
+    return {"days": days, "group": split, "since": since.isoformat()} | _limits(
+        ctx, days, full=True, split=split, since=since
+    )
 
 
 def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:

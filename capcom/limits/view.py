@@ -219,9 +219,12 @@ def window_json(
     }
     if full:
         by_seg = {id(sv.segment): sv for sv in v.shown}
-        segs = []
+        segs: list[dict[str, Any]] = []
         for seg in reversed(v.segments):
-            if since is not None and seg.end < since:
+            # the weekly chart keeps at least its newest week, so a short range never
+            # leaves it empty
+            keep = not segs and v.window is LimitWindow.SEVEN_DAY
+            if since is not None and seg.end < since and not keep:
                 break
             sv = by_seg.get(id(seg))
             segs.append(
@@ -261,7 +264,10 @@ def limits_json(
     full: bool = True,
     label: Callable[[str], str] = project_label,
     split: Split = "project",
+    since: datetime | None = None,
 ) -> dict[str, Any]:
+    """`since` bounds the windows listed (those that end after it); without it, `days`
+    back from `now`."""
     samples = load_samples(samples_path(state_dir)) if state_dir is not None else []
     recording = any(s.source == "statusline" for s in samples)
     base: dict[str, Any] = {
@@ -276,7 +282,8 @@ def limits_json(
     if not samples:
         base["windows"] = {w.value: None for w in LimitWindow}
         return base
-    since = now - timedelta(days=days) if days else None
+    if since is None and days:
+        since = now - timedelta(days=days)
     accounts, comb = analyze_accounts(index, table, samples, load_known(state_dir), now, label)
     out = [
         {
