@@ -227,6 +227,19 @@ def test_a_squeezed_pause_keeps_its_pixels_at_every_zoom() -> None:
         assert bands == pytest.approx([got["gap"], got["gap"]])
 
 
+def test_many_pauses_take_at_most_their_share_of_the_plot() -> None:
+    # 62 pauses at 14 px would fill 868 of 900 px; they narrow to leave the activity room
+    got = _run(
+        "const room = 900, n = 62, w = m.zoomWidth('fit', 3000, n, room);"
+        "console.log(JSON.stringify({ share: m.TL.gapShare, used: n * m.gapPx(w, n) / w,"
+        " wide: m.zoomWidth(12, 3000, n, room) }))"
+    )
+    assert isinstance(got, dict)
+    assert got["used"] == pytest.approx(got["share"])
+    assert got["share"] <= 0.3
+    assert got["wide"] > 900  # zoomed in, the pauses get back their full width
+
+
 def test_active_time_has_one_scale_across_the_runs_at_every_width() -> None:
     # the same pixels per minute in each run, so a run's spend-rate area stays in step
     # with its cost however far the plot is zoomed

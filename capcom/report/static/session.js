@@ -244,7 +244,7 @@ function calFold(c, t) {
 // up to half again as wide as the room it has is squeezed into it instead (a short
 // session fits a phone too), and any plot stretches to fill a wider room. Each squeezed
 // pause takes a few pixels.
-export const TL = { perMinute: 1.2, gap: 14, min: 240, max: 16000, squeeze: 1.5 };
+export const TL = { perMinute: 1.2, gap: 14, gapShare: 0.3, min: 240, max: 16000, squeeze: 1.5 };
 
 export function plotWidth(activeMinutes, gaps) {
   const w = activeMinutes * TL.perMinute + gaps * TL.gap;
@@ -258,11 +258,11 @@ export function plotFloor(width, room) {
 
 // The time axis: active time at one scale across the plot, and each squeezed pause
 // (over `minGap`) TL.gap pixels wide at every zoom, since it marks time left out rather
-// than time (narrower only when that many would take over 70% of the plot). `axis(t,
+// than time (narrower only when that many would take over TL.gapShare of the plot). `axis(t,
 // width)` is the time's x in pixels on a plot `width` wide, `axis.time(px, width)` the
 // time back; `axis.gaps` are the squeezed pauses, `axis.activeMinutes` the rest.
 export function gapPx(width, gaps) {
-  return gaps ? Math.min(TL.gap, 0.7 * width / gaps) : 0;
+  return gaps ? Math.min(TL.gap, TL.gapShare * width / gaps) : 0;
 }
 
 export function timeAxis(start, end, pauses, minGap = 30 * 60e3) {
@@ -310,7 +310,7 @@ export const ZOOMS = [['fit', 'Fit all'], [1, '1 h'], [4, '4 h'], [12, '12 h']];
 export function zoomWidth(hours, activeMinutes, gaps, room) {
   if (hours === 'fit') return room;
   const a = room * activeMinutes / (hours * 60), g = gaps * TL.gap;
-  return g <= 0.7 * (a + g) ? a + g : a / 0.3;
+  return g <= TL.gapShare * (a + g) ? a + g : a / (1 - TL.gapShare);
 }
 
 export function zoomHours(width, activeMinutes, gaps, room) {
