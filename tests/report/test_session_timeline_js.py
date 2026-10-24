@@ -185,16 +185,16 @@ def test_no_requests_no_rate() -> None:
 
 def test_a_preset_shows_its_hours_of_active_time_per_screen() -> None:
     got = _run(
-        "const a = 30 * 60, share = 0.95, room = 900;"
-        "const w = m.zoomWidth(4, a, share, room);"
-        "console.log(JSON.stringify({ w, back: m.zoomHours(w, a, share, room),"
-        " fit: m.zoomWidth('fit', a, share, room), one: m.zoomWidth(1, a, share, room),"
-        " short: m.zoomWidth(12, 120, share, room),"
+        "const a = 30 * 60, gaps = 3, room = 900;"
+        "const w = m.zoomWidth(4, a, gaps, room);"
+        "console.log(JSON.stringify({ w, gap: m.TL.gap, back: m.zoomHours(w, a, gaps, room),"
+        " fit: m.zoomWidth('fit', a, gaps, room), one: m.zoomWidth(1, a, gaps, room),"
+        " short: m.zoomWidth(12, 120, gaps, room),"
         " clamped: [m.zoomClamp(100, room), m.zoomClamp(99999, room), m.zoomClamp(2000, room)] }))"
     )
     assert isinstance(got, dict)
     # 30 h of active time at 4 h per screen: 7.5 screens of active time, plus the pauses
-    assert got["w"] == pytest.approx(900 * 7.5 / 0.95)
+    assert got["w"] == pytest.approx(900 * 7.5 + 3 * got["gap"])
     assert got["back"] == pytest.approx(4)
     assert got["fit"] == 900
     assert got["one"] > 16000  # past the cap: the 1 h preset is disabled
@@ -202,16 +202,58 @@ def test_a_preset_shows_its_hours_of_active_time_per_screen() -> None:
     assert got["clamped"] == [900, 16000, 2000]
 
 
-def test_zooming_keeps_the_time_under_the_pointer_in_place() -> None:
+# a 40 h span with 30 h of active time: runs of 10 h, 5 h and 15 h between two pauses
+_AXIS = (
+    "const H = 3600e3, gaps = [{ start: 10 * H, end: 14 * H }, { start: 19 * H, end: 25 * H }];"
+    "const ax = m.timeAxis(0, 40 * H, gaps);"
+)
+
+
+def test_a_squeezed_pause_keeps_its_pixels_at_every_zoom() -> None:
     got = _run(
-        "const lab = 160, from = 2000, to = 5000, scroll = 300, offset = 500;"
-        "const s2 = m.zoomScroll(scroll, offset, lab, from, to);"
-        "const before = (scroll + offset - lab) / from, after = (s2 + offset - lab) / to;"
-        "console.log(JSON.stringify([before, after, m.zoomScroll(0, 170, lab, 1000, 500)]))"
+        _AXIS + "const room = 900, n = ax.gaps.length;"
+        "const widths = [m.zoomWidth('fit', ax.activeMinutes, n, room),"
+        " m.zoomWidth(12, ax.activeMinutes, n, room)];"
+        "console.log(JSON.stringify({ gap: m.TL.gap, widths, bands: widths.map((w) =>"
+        " gaps.map((g) => ax(g.end, w) - ax(g.start, w))) }))"
+    )
+    assert isinstance(got, dict)
+    fit, twelve = got["widths"]
+    assert twelve > fit  # 12 h a screen is zoomed in from Fit all
+    for bands in got["bands"]:
+        assert bands == pytest.approx([got["gap"], got["gap"]])
+
+
+def test_active_time_has_one_scale_across_the_runs_at_every_width() -> None:
+    # the same pixels per minute in each run, so a run's spend-rate area stays in step
+    # with its cost however far the plot is zoomed
+    got = _run(
+        _AXIS + "console.log(JSON.stringify([900, 2500, 16000].map((w) => ["
+        " [0, 10], [14, 19], [25, 40]].map(([a, b]) => (ax(b * H, w) - ax(a * H, w)) / (b - a))"
+        ".concat([ax(40 * H, w)]))))"
     )
     assert isinstance(got, list)
-    before, after, at_start = got
+    for w, row in zip([900, 2500, 16000], got, strict=True):
+        *per_hour, right = row
+        assert per_hour == pytest.approx([per_hour[0]] * 3)
+        assert per_hour[0] * 30 == pytest.approx(w - 2 * 14)
+        assert right == pytest.approx(w)
+
+
+def test_zooming_keeps_the_time_under_the_pointer_in_place() -> None:
+    got = _run(
+        _AXIS + "const lab = 160, from = 2000, to = 5000, scroll = 300, offset = 500;"
+        "const s2 = m.zoomScroll(scroll, offset, lab, ax, from, to);"
+        "const before = ax.time(scroll + offset - lab, from);"
+        "const after = ax.time(s2 + offset - lab, to);"
+        "const o = lab + ax(12 * H, from), s3 = m.zoomScroll(0, o, lab, ax, from, to);"
+        "console.log(JSON.stringify([before, after, ax.time(s3 + o - lab, to) / H,"
+        " m.zoomScroll(0, 170, lab, ax, 1000, 500)]))"
+    )
+    assert isinstance(got, list)
+    before, after, in_gap, at_start = got
     assert after == pytest.approx(before)  # the same moment stays under the pointer
+    assert in_gap == pytest.approx(12)  # inside a squeezed pause too
     assert at_start == 0  # never scrolled before the start
 
 

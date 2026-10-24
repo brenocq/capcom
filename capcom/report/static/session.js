@@ -7,7 +7,7 @@ import {
   outputUsd, lowerMark, LOWER_TITLE, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor, entityColor, maxOf,
   spikeText, spikeHref, sessionDot,
 } from './lib.js';
-import { niceTicks, activeAxis, thinned } from './charts.js';
+import { niceTicks, thinned } from './charts.js';
 import { timelineMissing } from './spend.js';
 
 // agent types whose lanes are open, kept across redraws (a theme switch, another session)
@@ -211,19 +211,65 @@ export function plotFloor(width, room) {
   return width <= room * TL.squeeze ? 0 : width;
 }
 
-// Zoom: how much active time one screen of the plot shows. `hours` is a preset's (or a
-// pinch's) hours per screen, or 'fit' for the whole session; `share` is the part of the
-// plot that is active time (the rest is squeezed pauses), `room` the plot's visible
-// width. The width can come out under `room` (the session fits) or over TL.max (too
-// wide to draw): callers clamp it, and the presets are disabled there.
-export const ZOOMS = [['fit', 'Fit all'], [1, '1 h'], [4, '4 h'], [12, '12 h']];
-
-export function zoomWidth(hours, activeMinutes, share, room) {
-  return hours === 'fit' ? room : room * activeMinutes / (hours * 60) / share;
+// The time axis: active time at one scale across the plot, and each squeezed pause
+// (over `minGap`) TL.gap pixels wide at every zoom, since it marks time left out rather
+// than time (narrower only when that many would take over 70% of the plot). `axis(t,
+// width)` is the time's x in pixels on a plot `width` wide, `axis.time(px, width)` the
+// time back; `axis.gaps` are the squeezed pauses, `axis.activeMinutes` the rest.
+export function gapPx(width, gaps) {
+  return gaps ? Math.min(TL.gap, 0.7 * width / gaps) : 0;
 }
 
-export function zoomHours(width, activeMinutes, share, room) {
-  return activeMinutes / 60 * room / (width * share);
+export function timeAxis(start, end, pauses, minGap = 30 * 60e3) {
+  const cut = pauses.filter((g) => g.end - g.start >= minGap && g.start >= start && g.end <= end);
+  const active = Math.max(end - start - cut.reduce((a, g) => a + (g.end - g.start), 0), 1);
+  const scale = (width) => {
+    const g = gapPx(width, cut.length);
+    return [g, (width - g * cut.length) / active];
+  };
+  const axis = (t, width) => {
+    const [g, per] = scale(width);
+    let acc = 0, prev = start;
+    for (const c of cut) {
+      if (t < c.start) break;
+      acc += (c.start - prev) * per;
+      if (t < c.end) return acc + (t - c.start) / (c.end - c.start) * g;
+      acc += g; prev = c.end;
+    }
+    return Math.min(width, acc + (Math.max(t, prev) - prev) * per);
+  };
+  axis.time = (px, width) => {
+    const [g, per] = scale(width);
+    let acc = 0, prev = start;
+    for (const c of cut) {
+      const run = (c.start - prev) * per;
+      if (px < acc + run) return prev + Math.max(px - acc, 0) / per;
+      acc += run;
+      if (px < acc + g) return c.start + (px - acc) / g * (c.end - c.start);
+      acc += g; prev = c.end;
+    }
+    return Math.min(end, prev + Math.max(px - acc, 0) / per);
+  };
+  axis.gaps = cut;
+  axis.activeMinutes = active / 60e3;
+  return axis;
+}
+
+// Zoom: how much active time one screen of the plot shows. `hours` is a preset's (or a
+// pinch's) hours per screen, or 'fit' for the whole session; `gaps` is the number of
+// squeezed pauses (each its fixed pixels on top of the active time), `room` the plot's
+// visible width. The width can come out under `room` (the session fits) or over TL.max
+// (too wide to draw): callers clamp it, and the presets are disabled there.
+export const ZOOMS = [['fit', 'Fit all'], [1, '1 h'], [4, '4 h'], [12, '12 h']];
+
+export function zoomWidth(hours, activeMinutes, gaps, room) {
+  if (hours === 'fit') return room;
+  const a = room * activeMinutes / (hours * 60), g = gaps * TL.gap;
+  return g <= 0.7 * (a + g) ? a + g : a / 0.3;
+}
+
+export function zoomHours(width, activeMinutes, gaps, room) {
+  return activeMinutes / 60 * room / Math.max(width - gaps * gapPx(width, gaps), 1e-9);
 }
 
 // The plot's width for a zoom, between `room` and TL.max.
@@ -232,10 +278,11 @@ export function zoomClamp(width, room) {
 }
 
 // The scroll position that keeps the time `offset` pixels into the scroller (past
-// the `lab` pixels of lane names) where it is when the plot goes from `from` to `to`
-// pixels wide.
-export function zoomScroll(scrollLeft, offset, lab, from, to) {
-  return Math.max(0, lab + (scrollLeft + offset - lab) * to / from - offset);
+// the `lab` pixels of lane names) where it is when the plot on time axis `axis` goes
+// from `from` to `to` pixels wide.
+export function zoomScroll(scrollLeft, offset, lab, axis, from, to) {
+  const t = axis.time(scrollLeft + offset - lab, from);
+  return Math.max(0, lab + axis(t, to) - offset);
 }
 
 // The `zoom` query value: 'fit', or hours per screen ("1h", "2.5h"); null for none.
@@ -355,7 +402,7 @@ const perHour = (v) => `${usd(v, v >= 100 ? 0 : 2)}/h`;
 // The spend rate lane under the context plot: $/hour on the same active-time axis,
 // zero across each squeezed pause. Split into the main thread and the subagents
 // (stacked, in their colors) when the session has both, else one curve.
-function rateLane(d, R, start, end, x, X, W, mainColor, hasMain, gapBands, spot) {
+function rateLane(d, R, start, end, x, X, width, draw, mainColor, hasMain, gapBands, spot) {
   const col = R.usd_all || R.usd;
   const split = hasMain && R.agent.some((a) => a >= 0);
   const low = spendRate(R.t, col, start, end, x.gaps, split ? (i) => R.agent[i] < 0 : () => true);
@@ -367,15 +414,17 @@ function rateLane(d, R, start, end, x, X, W, mainColor, hasMain, gapBands, spot)
   const Y = (v) => (H - v / rmax * (H - 4)).toFixed(1);
   const trace = (run, vals) => run.t.map((tm, j) => `L${X(tm)} ${Y(vals[j])}`).join('');
   const back = (run, vals) => run.t.map((tm, j) => `L${X(tm)} ${Y(vals[j])}`).reverse().join('');
-  const lowLine = low.map((run) => `M${X(run.start)} ${H}${trace(run, run.rate)}L${X(run.end)} ${H}`).join('');
-  const topLine = low.map((run, k) => `M${X(run.start)} ${H}${trace(run, top[k])}L${X(run.end)} ${H}`).join('');
-  const band = low.map((run, k) => `M${trace(run, top[k]).slice(1)}${back(run, run.rate)}Z`).join('');
-  const line = (dd, color) => s('path', { d: dd, fill: 'none', 'stroke-width': 1.5, 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke', style: `stroke:${color}` });
-  const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' },
-    s('path', { d: lowLine, style: `fill:${mainColor};fill-opacity:0.28` }),
-    split ? s('path', { d: band, style: 'fill:var(--s2);fill-opacity:0.32' }) : null,
+  // drawn again at each width: within a run the axis is linear at the same pixels per
+  // minute in every run, so each run's area keeps in step with its cost at any zoom
+  const lowLine = () => low.map((run) => `M${X(run.start)} ${H}${trace(run, run.rate)}L${X(run.end)} ${H}`).join('');
+  const topLine = () => low.map((run, k) => `M${X(run.start)} ${H}${trace(run, top[k])}L${X(run.end)} ${H}`).join('');
+  const band = () => low.map((run, k) => `M${trace(run, top[k]).slice(1)}${back(run, run.rate)}Z`).join('');
+  const line = (dd, color) => draw(s('path', { fill: 'none', 'stroke-width': 1.5, 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke', style: `stroke:${color}` }), () => ({ d: dd() }));
+  const svg = draw(s('svg', { preserveAspectRatio: 'none', 'aria-hidden': 'true' },
+    draw(s('path', { style: `fill:${mainColor};fill-opacity:0.28` }), () => ({ d: lowLine() })),
+    split ? draw(s('path', { style: 'fill:var(--s2);fill-opacity:0.32' }), () => ({ d: band() })) : null,
     line(lowLine, mainColor),
-    split ? line(topLine, 'var(--s2)') : null);
+    split ? line(topLine, 'var(--s2)') : null), () => ({ viewBox: `0 0 ${width()} ${H}` }));
   const chart = h('div.chart', { style: `height:${H}px;border-bottom:1px solid var(--l15)` }, gapBands(), spot());
   const lab = h('div.lab.ctxlab', null, h('b', { text: 'Spend rate' }), h('span', { text: '$/hour, 10-min window' }));
   for (const v of ticks.slice(1)) {
@@ -386,8 +435,8 @@ function rateLane(d, R, start, end, x, X, W, mainColor, hasMain, gapBands, spot)
   chart.append(svg);
 
   // hover: the rate at that moment, or the pause it falls in
-  const samples = low.flatMap((run, k) => run.t.map((tm, j) => ({ f: x(tm), t: tm, low: run.rate[j], high: high ? high[k].rate[j] : 0 })))
-    .sort((a, b) => a.f - b.f);
+  const samples = low.flatMap((run, k) => run.t.map((tm, j) => ({ t: tm, low: run.rate[j], high: high ? high[k].rate[j] : 0 })))
+    .sort((a, b) => a.t - b.t);
   chart.addEventListener('mousemove', (e) => {
     if (chart.closest('.tlscroll.dragging')) return;
     const rect = chart.getBoundingClientRect();
@@ -395,8 +444,8 @@ function rateLane(d, R, start, end, x, X, W, mainColor, hasMain, gapBands, spot)
     const g = x.gaps.find((p) => f > x(p.start) + 1e-4 && f < x(p.end));
     if (g) { showTip(e, `Pause of ${duration((g.end - g.start) / 1e3)}`, [{ label: 'Spend rate', value: perHour(0) }]); return; }
     let lo = 0, hi = samples.length - 1;
-    while (lo < hi) { const mid = (lo + hi) >> 1; if (samples[mid].f < f) lo = mid + 1; else hi = mid; }
-    if (lo > 0 && f - samples[lo - 1].f <= samples[lo].f - f) lo--;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (x(samples[mid].t) < f) lo = mid + 1; else hi = mid; }
+    if (lo > 0 && f - x(samples[lo - 1].t) <= x(samples[lo].t) - f) lo--;
     const p = samples[lo];
     showTip(e, `${stamp(new Date(p.t))} · spend rate`, [
       { label: 'Rate', value: perHour(p.low + p.high) },
@@ -419,15 +468,27 @@ function unfolded(d, r) {
   }
   if (!R.t.length) { card.append(empty(null, 'No model requests in this session.')); return card; }
   const start = R.t[0], end = Math.max(R.t[R.t.length - 1], start + 60e3);
-  const cut = activeAxis(start, end, d.pauses).gaps;
-  const activeMin = (end - start - cut.reduce((a, g) => a + g.end - g.start, 0)) / 60e3;
+  const ax = timeAxis(start, end, d.pauses);
+  const cut = ax.gaps, activeMin = ax.activeMinutes;
   const W = plotWidth(activeMin, cut.length);
-  const x = activeAxis(start, end, d.pauses, 30 * 60e3, Math.min(0.012, TL.gap / W));
-  const share = Math.max(1 - Math.min(0.012, TL.gap / W) * x.gaps.length, 0.3); // as activeAxis
+  // the plot's width now: every mark is placed for it, and placed again when the plot
+  // is laid out at another width (a zoom, a resize), since the pauses keep their pixels
+  let PW = W;
+  const x = (tm) => ax(tm, PW) / PW; // the fraction of the plot
+  x.gaps = cut;
+  const later = [];
+  const place = (el, f) => { const set = () => Object.assign(el.style, f()); set(); later.push(set); return el; };
+  const draw = (el, f) => { const set = () => { for (const [k, v] of Object.entries(f())) el.setAttribute(k, v); }; set(); later.push(set); return el; };
   let zoom = parseZoom(r && r.query ? r.query.get('zoom') : null); // null: the default width
   const pc = (f) => (f * 100).toFixed(3) + '%';
-  const X = (tm) => (x(tm) * W).toFixed(1);
-  const xs = R.t.map((tm) => x(tm)); // never decreasing: the requests come in time order
+  const X = (tm) => ax(tm, PW).toFixed(1);
+  let xs = R.t.map((tm) => x(tm)); // never decreasing: the requests come in time order
+  const relayout = (width) => {
+    if (!width || Math.abs(width - PW) < 0.01) return;
+    PW = width;
+    xs = R.t.map((tm) => x(tm));
+    for (const f of later) f();
+  };
   const typeOf = (i) => (R.agent[i] < 0 ? 'main thread' : d.agents[R.agent[i]].agent_type);
   const nearest = (frac) => {
     let lo = 0, hi = xs.length - 1;
@@ -450,10 +511,11 @@ function unfolded(d, r) {
     return el;
   };
   // the squeezed pauses, hatched across the charts; a spike a link pointed at, shaded
-  const gapBands = () => x.gaps.map((g) => h('div.tlgap', { style: `left:${pc(x(g.start))};width:${pc(x(g.end) - x(g.start))}` }));
+  const gapAt = (g) => () => ({ left: pc(x(g.start)), width: pc(x(g.end) - x(g.start)) });
+  const gapBands = () => x.gaps.map((g) => place(h('div.tlgap'), gapAt(g)));
   const at = r && r.query ? Date.parse(r.query.get('at') || '') : NaN;
   const to = r && r.query ? Date.parse(r.query.get('to') || '') : NaN;
-  const spot = () => (Number.isFinite(at) ? [h('div.tlspot', { style: `left:${pc(x(at))};width:max(4px, ${pc(Math.max(0, x(Number.isFinite(to) ? to : at) - x(at)))})` })] : []);
+  const spot = () => (Number.isFinite(at) ? [place(h('div.tlspot'), () => ({ left: pc(x(at)), width: `max(4px, ${pc(Math.max(0, x(Number.isFinite(to) ? to : at) - x(at)))})` }))] : []);
 
   // context per request: the main thread as a line (in its lane's color), subagents as dots
   const mainColor = entityColor('main', 'agent');
@@ -463,8 +525,8 @@ function unfolded(d, r) {
   const cmax = ticks[ticks.length - 1];
   const H = 230;
   const Y = (v) => (H - v / cmax * H).toFixed(1);
-  const path = line.map((i, k) => (k ? 'L' : 'M') + X(R.t[i]) + ' ' + Y(R.context[i])).join('');
-  const area = path + `L${X(R.t[line[line.length - 1]])} ${H}L${X(R.t[line[0]])} ${H}Z`;
+  const path = () => line.map((i, k) => (k ? 'L' : 'M') + X(R.t[i]) + ' ' + Y(R.context[i])).join('');
+  const area = (p) => p + `L${X(R.t[line[line.length - 1]])} ${H}L${X(R.t[line[0]])} ${H}Z`;
   const ctx = h('div.chart', { style: `height:${H}px` }, gapBands(), spot());
   const ctxLab = h('div.lab.ctxlab', null, h('b', { text: 'Context per request' }), h('span', { text: 'tokens' }));
   for (const v of ticks.slice(1)) {
@@ -472,18 +534,20 @@ function unfolded(d, r) {
     ctx.append(h('div.gridline', { style: `top:${top.toFixed(2)}%` }));
     if (top >= 28) ctxLab.append(h('span.ylab', { style: `top:${top.toFixed(2)}%`, text: tokens(v) }));
   }
-  const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' },
+  const svg = draw(s('svg', { preserveAspectRatio: 'none', 'aria-hidden': 'true' },
     s('defs', null, s('linearGradient', { id: 'ctx-fill', x1: 0, y1: 0, x2: 0, y2: 1 },
       s('stop', { offset: 0, style: `stop-color:${mainColor};stop-opacity:0.30` }), s('stop', { offset: 1, style: `stop-color:${mainColor};stop-opacity:0.02` }))),
-    s('path', { d: area, fill: 'url(#ctx-fill)' }),
-    s('path', { d: path, fill: 'none', 'stroke-width': 2, 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke', style: `stroke:${mainColor}` }));
+    s('path', { fill: 'url(#ctx-fill)' }),
+    s('path', { fill: 'none', 'stroke-width': 2, 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke', style: `stroke:${mainColor}` })), () => ({ viewBox: `0 0 ${PW} ${H}` }));
+  const [areaEl, lineEl] = svg.querySelectorAll('path');
+  draw(lineEl, () => { const p = path(); areaEl.setAttribute('d', area(p)); return { d: p }; });
   const dots = R.t.map((_, i) => i).filter((i) => R.agent[i] >= 0 && main.length);
   if (dots.length) {
-    svg.append(s('path', { d: dots.map((i) => `M${X(R.t[i])} ${Y(R.context[i])}l0 0.01`).join(''), fill: 'none', 'stroke-width': 3, 'stroke-linecap': 'round', 'vector-effect': 'non-scaling-stroke', style: 'stroke:var(--s2);opacity:0.55' }));
+    svg.append(draw(s('path', { fill: 'none', 'stroke-width': 3, 'stroke-linecap': 'round', 'vector-effect': 'non-scaling-stroke', style: 'stroke:var(--s2);opacity:0.55' }), () => ({ d: dots.map((i) => `M${X(R.t[i])} ${Y(R.context[i])}l0 0.01`).join('') })));
   }
   ctx.append(svg);
   for (const c of d.compactions) {
-    const mark = h('div', { class: c.agent_id ? 'tlcompact sub' : 'tlcompact', style: `left:${pc(x(c.t))}` });
+    const mark = place(h('div', { class: c.agent_id ? 'tlcompact sub' : 'tlcompact' }), () => ({ left: pc(x(c.t)) }));
     ctx.append(tipOn(mark, `Compaction at ${stamp(new Date(c.t))}`, [
       { label: 'Thread', value: c.agent_id ? 'a subagent' : 'main thread' },
       { label: 'Trigger', value: c.trigger || 'unknown' },
@@ -494,20 +558,20 @@ function unfolded(d, r) {
   hover(ctx);
 
   // the spend rate over active time, the main thread and the subagents stacked
-  const cost = rateLane(d, R, start, end, x, X, W, mainColor, main.length > 0, gapBands, spot);
+  const cost = rateLane(d, R, start, end, x, X, () => PW, draw, mainColor, main.length > 0, gapBands, spot);
 
   // pauses: a tick for each; over the long ones a chip with its length, wherever it
   // fits at the plot's width (the longest first, shortened before it is dropped)
   const pauses = h('div.pauserow');
   const chips = [];
   for (const p of d.pauses) {
-    const mid = (x(p.start) + x(p.end)) / 2;
+    const mid = () => (x(p.start) + x(p.end)) / 2;
     const title = `Pause of ${duration(p.minutes * 60)}, ${stamp(new Date(p.start))} to ${stamp(new Date(p.end))}`;
     const rows = [{ label: 'Next request', value: usd(p.next_usd) }, { label: 'Cache written', value: tokens(p.next_cache_write) }];
-    pauses.append(tipOn(h('span', { class: p.minutes >= 60 ? 'pausetick warn' : 'pausetick', style: `left:${pc(mid)}` }), title, rows, { focus: false }));
+    pauses.append(tipOn(place(h('span', { class: p.minutes >= 60 ? 'pausetick warn' : 'pausetick' }), () => ({ left: pc(mid()) })), title, rows, { focus: false }));
     if (p.minutes >= 30) {
       const chip = tipOn(h('span', { class: p.minutes >= 60 ? 'pausechip warn' : 'pausechip', hidden: true }), title, rows);
-      chips.push({ el: chip, mid, minutes: p.minutes, full: duration(p.minutes * 60), short: shortPause(p.minutes) });
+      chips.push({ el: chip, get mid() { return mid(); }, minutes: p.minutes, full: duration(p.minutes * 60), short: shortPause(p.minutes) });
     }
   }
   pauses.append(...chips.map((c) => c.el));
@@ -534,12 +598,12 @@ function unfolded(d, r) {
 
   // lanes: main thread, then one lane per agent type
   const lanes = [];
-  const gapMarks = x.gaps.map((g) => h('div.gapmark', { style: `left:${pc(x(g.start))};width:${pc(x(g.end) - x(g.start))};border-left:0;background:var(--card)` }));
+  const gapMarks = x.gaps.map((g) => place(h('div.gapmark', { style: 'border-left:0;background:var(--card)' }), gapAt(g)));
   // a bar at the very end stays inside the plot, so a plot that fits never scrolls
-  const span = (a) => `left:min(${pc(x(a.first))}, calc(100% - 3px));width:max(3px, ${pc(Math.max(x(a.last) - x(a.first), 0))})`;
+  const span = (el, a) => place(el, () => ({ left: `min(${pc(x(a.first))}, calc(100% - 3px))`, width: `max(3px, ${pc(Math.max(x(a.last) - x(a.first), 0))})` }));
   if (d.main) {
     lanes.push(h('div.lab', null, h('b', { text: 'Main thread' })),
-      h('div.lane', { style: 'background:transparent' }, tipOn(h('span', { style: `${span(d.main)};background:${entityColor('main', 'agent')}` }),
+      h('div.lane', { style: 'background:transparent' }, tipOn(span(h('span', { style: `background:${entityColor('main', 'agent')}` }), d.main),
         'Main thread', [{ label: 'Requests', value: String(d.main.requests) }, { label: 'Cost', value: usd(d.main.usd) }]), gapMarks));
   }
   const byType = new Map();
@@ -548,7 +612,7 @@ function unfolded(d, r) {
   types.forEach(([type, list]) => {
     const color = entityColor(type, 'agent');
     const maxUsd = maxOf(list.map((a) => a.usd), 1e-9);
-    const bar = (a) => tipOn(h('span', { style: `${span(a)};background:${color};opacity:${(0.45 + 0.55 * a.usd / maxUsd).toFixed(2)}` }),
+    const bar = (a) => tipOn(span(h('span', { style: `background:${color};opacity:${(0.45 + 0.55 * a.usd / maxUsd).toFixed(2)}` }), a),
       `${a.description || type} · ${hm(new Date(a.first))} to ${hm(new Date(a.last))}`, [
         { label: 'Requests', value: String(a.requests) }, { label: 'Tool calls', value: String(a.tool_calls) },
         { label: 'Peak context', value: tokens(a.peak_context) }, { label: 'Cost', value: usd(a.usd) }], { focus: false });
@@ -624,7 +688,7 @@ function unfolded(d, r) {
   };
   const floorFor = (rm) => {
     if (zoom === null) return plotFloor(W, rm);
-    const w = zoom === 'fit' ? rm : zoomClamp(zoomWidth(zoom, activeMin, share, rm), rm);
+    const w = zoom === 'fit' ? rm : zoomClamp(zoomWidth(zoom, activeMin, cut.length, rm), rm);
     return w <= rm ? 0 : Math.round(w);
   };
   const zoomButtons = ZOOMS.map(([z, label]) => h('button', { type: 'button', text: label, 'aria-pressed': 'false', onclick: (e) => {
@@ -636,7 +700,7 @@ function unfolded(d, r) {
     const rm = room();
     ZOOMS.forEach(([z], k) => {
       const b = zoomButtons[k];
-      const w = zoomWidth(z, activeMin, share, rm);
+      const w = zoomWidth(z, activeMin, cut.length, rm);
       const why = z === 'fit' ? null
         : w > TL.max ? `Too close for a session this long: its plot would pass ${TL.max.toLocaleString('en-US')} px`
           : w <= rm ? 'The whole session already fits at this zoom' : null;
@@ -648,11 +712,13 @@ function unfolded(d, r) {
   let urlTimer = 0;
   const setZoom = (z, offset) => {
     zoom = z;
-    const from = pauses.clientWidth || W;
+    const from = pauses.clientWidth || PW;
     const floor = floorFor(room());
     if (floor !== shownFloor) applyFloor(floor);
     const to = pauses.clientWidth || floor;
-    scroller.scrollLeft = zoomScroll(scroller.scrollLeft, offset, ctxLab.offsetWidth, from, to);
+    const left = zoomScroll(scroller.scrollLeft, offset, ctxLab.offsetWidth, ax, from, to);
+    relayout(to);
+    scroller.scrollLeft = left;
     markZoom();
     clearTimeout(urlTimer);
     urlTimer = setTimeout(() => {
@@ -666,10 +732,10 @@ function unfolded(d, r) {
   };
   // zoom by a factor around a point `offset` pixels into the scroller
   const zoomBy = (factor, offset) => {
-    const rm = room(), cur = pauses.clientWidth || W;
+    const rm = room(), cur = pauses.clientWidth || PW;
     const w = zoomClamp(cur * factor, rm);
     if (Math.abs(w - cur) < 0.5) return;
-    setZoom(w <= rm ? 'fit' : zoomHours(w, activeMin, share, rm), offset);
+    setZoom(w <= rm ? 'fit' : zoomHours(w, activeMin, cut.length, rm), offset);
   };
   scroller.addEventListener('wheel', (e) => {
     if (!e.ctrlKey) return;
@@ -713,6 +779,7 @@ function unfolded(d, r) {
       markZoom();
       if (floor !== shownFloor) applyFloor(floor);
       if (!pauses.clientWidth) return;
+      relayout(pauses.clientWidth);
       placeChips(pauses.clientWidth);
       placeAxis(pauses.clientWidth);
       uncut();
