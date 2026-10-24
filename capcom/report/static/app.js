@@ -16,7 +16,7 @@ import { renderLimits } from './limits.js';
 import { renderLimitWindow } from './limitwindow.js';
 import { renderChanges, renderChange } from './changes.js';
 import { freshToken } from './marks.js';
-import { networkNote } from './ask.js';
+import { networkNote, mascot } from './ask.js';
 
 const ICON = {
   overview: 'M3 12h4l3-8 4 16 3-8h4',
@@ -47,13 +47,6 @@ function navHref(id, href, r) {
 
 function icon(d, size = 16) {
   return s('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.8, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' }, s('path', { d }));
-}
-
-function mark() {
-  const st = { stroke: '#D97757' };
-  return s('svg', { width: 22, height: 22, viewBox: '0 0 24 24', fill: 'none', 'stroke-width': 2, 'stroke-linecap': 'round', 'aria-hidden': 'true', style: 'stroke:#D97757' },
-    s('circle', { cx: 12, cy: 12, r: 2.4, fill: '#D97757', stroke: 'none' }),
-    ...['M8 8a5.7 5.7 0 0 0 0 8', 'M16 8a5.7 5.7 0 0 1 0 8', 'M5 5a9.9 9.9 0 0 0 0 14', 'M19 5a9.9 9.9 0 0 1 0 14'].map((d) => s('path', { d, ...st })));
 }
 
 function route() {
@@ -97,7 +90,7 @@ function drawSidebar() {
     h('label', { for: 'capcom-find', text: 'Find a session' }), input);
   // drawn anew and swapped in, so the live rates tween and new sessions fade in
   const fresh = h('nav', { id: 'sidebar', class: 'sidebar', 'aria-label': 'capcom' },
-    h('a.brand', { href: '/' }, mark(), h('span', { text: 'capcom' })),
+    h('a.brand', { href: '/' }, mascot(26, true), h('span', { text: 'capcom' })),
     form,
     h('div.nav', null, NAV.map(([id, href, label, soon]) => h('a', { href: navHref(id, href, r), 'aria-current': id === active ? 'page' : null },
       icon(ICON[id]), h('span', { text: label }), soon ? h('span.soon', { text: soon, title: `Coming in milestone ${soon.slice(1)}` }) : null,
@@ -178,7 +171,7 @@ function topbar() {
   let bar = document.getElementById('topbar');
   if (bar) return bar;
   const menu = h('button.menu', { type: 'button', 'aria-controls': 'sidebar', 'aria-expanded': 'false', 'aria-label': 'Menu', onclick: () => setMenu(!menuOpen) }, icon(BURGER, 20));
-  bar = h('header.topbar', { id: 'topbar' }, h('a.brand', { href: '/' }, mark(), h('span', { text: 'capcom' })), h('span.where'), menu);
+  bar = h('header.topbar', { id: 'topbar' }, h('a.brand', { href: '/' }, mascot(26, true), h('span', { text: 'capcom' })), h('span.where'), menu);
   document.querySelector('.frame').before(bar);
   document.body.append(h('div.scrim', { 'aria-hidden': 'true', onclick: () => setMenu(false) }));
   // following a link in the sheet closes it (on the document: the sidebar node is

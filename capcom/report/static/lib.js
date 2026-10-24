@@ -195,15 +195,66 @@ export function overviewPath(query) {
   const group = pickedGroup(query);
   return group === 'category' ? 'overview' : `overview?group=${group}`;
 }
+// Spend's window from a page query: a range of days ending today (`days`), one local
+// day (`day=2026-10-23`) or one local clock hour (`hour=2026-10-24T08`, with the UTC
+// offset only for the second 01:00 of a night the clocks fall back). A drilled-in
+// day or hour keeps `days`, the range it was opened from, for the way back up.
+export const SPEND_DAYS = [1, 7, 14, 30, 90];
+export function spendScope(query) {
+  const back = SPEND_DAYS.includes(Number(query.get('days'))) ? Number(query.get('days')) : 14;
+  const hour = query.get('hour'), day = query.get('day');
+  if (hour) return { scale: 'hour', hour, day: hour.slice(0, 10), days: back };
+  if (day) return { scale: 'day', day, days: back };
+  return { scale: 'range', days: Number(query.get('days')) || 14 };
+}
 export function spendPath(query) {
-  return `spend?days=${Number(query.get('days')) || 14}&group=${pickedGroup(query)}`;
+  const sc = spendScope(query), group = pickedGroup(query);
+  if (sc.scale === 'hour') return `spend?hour=${encodeURIComponent(sc.hour)}&group=${group}`;
+  if (sc.scale === 'day') return `spend?day=${encodeURIComponent(sc.day)}&group=${group}`;
+  return `spend?days=${sc.days}&group=${group}`;
+}
+// A local date as YYYY-MM-DD, and a local clock hour (its start, ms) as Spend's
+// `hour` key: the wall hour, with the UTC offset only when the wall time alone
+// reads as another hour (the second 01:00 of a night the clocks fall back; a
+// local time that happens twice reads as the first).
+export const isoDay = (d) => `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`;
+export function hourKey(t) {
+  const d = new Date(t);
+  const key = `${isoDay(d)}T${two(d.getHours())}`;
+  if (new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours()).getTime() === t) return key;
+  const off = -d.getTimezoneOffset(), a = Math.abs(off);
+  return `${key}${off >= 0 ? '+' : '-'}${two(Math.floor(a / 60))}:${two(a % 60)}`;
+}
+// The per-hour chart's gray "typical day" bars: on or off, from the URL's
+// ?typical=1|0 first, then the viewer's last choice (kept in localStorage).
+export function pickedTypical(query) {
+  const q = query.get('typical');
+  if (q === '1' || q === '0') return q === '1';
+  try { return localStorage.getItem('capcom-typical') === '1'; } catch (e) { return false; }
+}
+export function rememberTypical(on) {
+  try { localStorage.setItem('capcom-typical', on ? '1' : '0'); } catch (e) { /* storage off */ }
+}
+// A link to Spend for a range (`{days}`), a day (`{day}`) or an hour (`{hour}`): the
+// split (unless by category, the default) and, drilled in, the range it came from
+// (unless 14 days, the default) ride along.
+export function spendHref(to, group, back = 14) {
+  const q = new URLSearchParams();
+  if (to.hour) q.set('hour', to.hour);
+  else if (to.day) q.set('day', to.day);
+  const drilled = Boolean(to.hour || to.day);
+  if (!drilled) q.set('days', to.days);
+  else if (back !== 14) q.set('days', back);
+  if (group && group !== 'category') q.set('group', group);
+  return '/spend?' + q.toString().replace(/%3A/g, ':');
 }
 // The range picker Spend and Limits share: the same ranges, the same `days` in the
 // URL (1 is today, from local midnight), so a link carries the range between them.
-// `off(days)`: why a range is off (shown disabled with it as tooltip), or null.
+// `off(days)`: why a range is off (shown disabled with it as tooltip), or null;
+// `also`: other query keys set with it (Spend leaves its drilled day and hour).
 export const RANGES = [[1, 'Today'], [7, '7 days'], [14, '14 days'], [30, '30 days'], [90, '90 days']];
-export function rangeTabs(days, off = () => null) {
-  return seg('Range', RANGES.map(([v, text]) => [v, text, off(v)]), days, (v) => setQuery({ days: v }));
+export function rangeTabs(days, off = () => null, also = {}) {
+  return seg('Range', RANGES.map(([v, text]) => [v, text, off(v)]), days, (v) => setQuery({ ...also, days: v }));
 }
 export const LIMIT_DAYS = RANGES.map((r) => r[0]);
 export function limitsPath(query) {
@@ -238,10 +289,14 @@ let arrivals = 0;
 // frame while it draws a page, takes the page's api() calls (router.js).
 export const apiHooks = { onPartial: null, pass: null };
 
-// Drop the kept results, so the next draw fetches fresh data.
+// Drop the kept results, so the next draw fetches fresh data. A load still in
+// flight is not dropped for its waiters: it starts again in place (the data it was
+// fetching may predate what changed), so a page awaiting it never sees an abort.
 export function forget() {
-  for (const e of store.values()) if (!e.done) e.ctrl.abort();
-  store.clear();
+  for (const [path, e] of [...store]) {
+    if (e.done) store.delete(path);
+    else if (!e.error) { e.ctrl.abort(); e.restart(); }
+  }
   partials.clear();
 }
 
@@ -254,33 +309,46 @@ export class ApiError extends Error {
 }
 
 function load(path, low = false) {
-  const ctrl = new AbortController();
   // a partial kept from a stopped poll is from before: its source says so ('kept')
   const kept = partials.get(path) || null;
-  const e = { path, ctrl, low, done: false, error: null, data: null, partial: kept, progress: 0, source: kept ? 'kept' : null, seq: 0, waiters: new Set() };
+  const e = { path, ctrl: null, low, done: false, error: null, data: null, partial: kept, progress: 0, source: kept ? 'kept' : null, seq: 0, waiters: new Set(), run: 0 };
   const wake = () => { for (const w of e.waiters) w(); };
-  e.promise = getProgressive(path, {
-    signal: ctrl.signal,
-    headers: low ? { 'X-Capcom-Priority': 'low' } : null,
-    onPartial: (partial, progress, source) => {
-      e.progress = Math.max(e.progress, progress || 0);
-      if (partial) { e.partial = partial; e.source = source; partials.set(path, partial); }
-      wake();
-      if (apiHooks.onPartial) apiHooks.onPartial(path, partial, progress, source);
-    },
-  }).then((data) => {
-    Object.assign(e, { done: true, data, progress: 1, seq: ++arrivals });
-    partials.delete(path);
-    wake();
-    return data;
-  }, (err) => {
-    // kept until the next navigation (stopLoads), so the redraws of this view
-    // show it instead of asking again and again
-    e.error = err.status ? new ApiError(err.status, err.body) : err;
-    wake();
-    throw e.error;
-  });
+  let settle;
+  e.promise = new Promise((resolve, reject) => { settle = { resolve, reject }; });
   e.promise.catch(() => {}); // the pages see the error; no unhandled rejection
+  // One fetch of the entry; `forget()` starts another in its place, and the result
+  // of the one it aborted is ignored (`run` says which is current).
+  const start = () => {
+    const ctrl = new AbortController();
+    const run = ++e.run;
+    e.ctrl = ctrl;
+    getProgressive(path, {
+      signal: ctrl.signal,
+      headers: low ? { 'X-Capcom-Priority': 'low' } : null,
+      onPartial: (partial, progress, source) => {
+        if (run !== e.run) return;
+        e.progress = Math.max(e.progress, progress || 0);
+        if (partial) { e.partial = partial; e.source = source; partials.set(path, partial); }
+        wake();
+        if (apiHooks.onPartial) apiHooks.onPartial(path, partial, progress, source);
+      },
+    }).then((data) => {
+      if (run !== e.run) return;
+      Object.assign(e, { done: true, data, progress: 1, seq: ++arrivals });
+      partials.delete(path);
+      wake();
+      settle.resolve(data);
+    }, (err) => {
+      if (run !== e.run) return;
+      // kept until the next navigation (stopLoads), so the redraws of this view
+      // show it instead of asking again and again
+      e.error = err.status ? new ApiError(err.status, err.body) : err;
+      wake();
+      settle.reject(e.error);
+    });
+  };
+  e.restart = () => { e.partial = null; e.source = null; e.progress = 0; start(); };
+  start();
   store.set(path, e);
   return e;
 }
@@ -606,7 +674,7 @@ export function sessionColor(color) {
 // range (`days`, Overview's `range`) is its own step in the history, so Back goes
 // 30 -> 14 -> 7 days before it leaves the page; other changes (a sort, a filter,
 // a picked spike) replace the current step.
-const RANGE_KEYS = ['days', 'range'];
+const RANGE_KEYS = ['days', 'range', 'day', 'hour'];
 
 export function setQuery(params) {
   const q = new URLSearchParams(location.search);

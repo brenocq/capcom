@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import threading
 import time
 from collections.abc import Iterator
@@ -158,10 +159,11 @@ def test_day_chart_splits_by_the_group_in_the_url(tmp_path: Path) -> None:
     with layout.synthetic_site(tmp_path) as base:
         chrome = layout.Chrome(binary, tmp_path / "profile")
         try:
-            # Spend's day bars, split by model, open their day split the same way
+            # Spend's day bars, split by model, open Spend for their day split the same way
             assert layout.load(chrome, f"{base}/spend?group=model")
             hrefs = chrome.js("[...document.querySelectorAll('a.day')].map((a) => a.search)")
-            assert hrefs and set(hrefs) == {"?group=model"}
+            link = re.compile(r"\?day=\d{4}-\d\d-\d\d&group=model")
+            assert hrefs and all(link.fullmatch(x) for x in hrefs)
 
             assert layout.load(chrome, f"{base}/day/{day}?group=model")
             got = chrome.js(DAY_STATE)
