@@ -203,7 +203,7 @@ def test_a_reply_with_no_thinking_and_a_big_text(tmp_path: Path) -> None:
     assert got is not None and got["thinking"]["blocks"] == 0
     t = got["text"]
     assert t["cut"] is True and len(t["text"].encode()) == tooldetail.MAX_OUTPUT
-    assert t["bytes"] == len(big) * 1000 and t["lines"] == 1000
+    assert t["bytes"] == len(big) * 1000 - 1 and t["lines"] == 1000  # trimmed
 
 
 # ------------------------------------------------------------------ Ask Roger
@@ -335,7 +335,7 @@ def test_a_call_without_a_result_may_be_still_running(
         click_row(chrome, "Bash", 1)
         until(chrome, "!!document.querySelector('.agcall.tooltext')")
         head = chrome.js("document.querySelector('.agcall.tooltext .agcallhead').textContent")
-        assert "Still running" in head
+        assert "still running" in head
         # the earlier call, whose result came, says how it went
         click_row(chrome, "Bash", 0)
         until(chrome, "document.querySelectorAll('.agcall.tooltext').length === 2")

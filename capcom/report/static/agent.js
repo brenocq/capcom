@@ -42,9 +42,12 @@ function at(t) { const d = new Date(t); return multiDay ? `${monthDay(d)} ${hm(d
 // "17:30 to 17:48", "Aug 6 17:30 to 17:48", "Aug 6 18:49 to Aug 7 11:59"
 const fromTo = (a, b) => `${at(a)} to ${sameDay(a, b) ? hm(new Date(b)) : at(b)}`;
 
-// "claude-opus-5-5" -> "Opus 5.5", "claude-3-5-haiku-20241022" -> "Haiku 3.5"
+// "claude-opus-5-5" -> "Opus 5.5", "claude-3-5-haiku-20241022" -> "Haiku 3.5"; another
+// provider's id as it is, cut past MODEL_CHARS
+const MODEL_CHARS = 24;
 export function modelName(id) {
   if (!id) return 'unknown model';
+  if (!id.startsWith('claude-')) return id.length > MODEL_CHARS ? id.slice(0, MODEL_CHARS - 1) + '…' : id;
   const words = id.replace(/^claude-/, '').replace(/-\d{8}$/, '').replace(/\[.*\]$/, '').split('-');
   const family = words.find((w) => /^[a-z]+$/i.test(w));
   const version = words.filter((w) => /^\d{1,2}$/.test(w)).join('.');
@@ -580,12 +583,12 @@ function status(r, name) {
 // step, which no request read yet, started within RUNNING_HOURS)
 function callFold(i, id, name, label, seconds, entry, running) {
   const head = (meta) => h('div.agcallhead', null, h('b', { text: name }), h('span.agcallmeta', { text: meta.filter(Boolean).join(' · ') }));
-  const tookText = seconds != null ? took(seconds) : running ? 'Still running' : 'no result';
+  const tookText = seconds != null ? took(seconds) : running ? 'still running' : 'no result';
   if (!entry) return h('div.agcall', null, head([label !== name ? label : null, tookText]));
   if (entry.state === 'loading') return h('div.agcall', { 'aria-busy': 'true' }, head([tookText]), h('p.note.agloading', { text: 'Reading the log…' }));
   if (entry.state !== 'ok') return h('div.agcall', null, head([tookText]), h('p.note', { text: failNote(entry, 'call') }));
   const x = entry.data, r = x.result;
-  const meta = r ? [status(r, x.name), r.seconds != null ? took(r.seconds) : tookText] : [running ? 'Still running' : 'no result in the log'];
+  const meta = r ? [status(r, x.name), r.seconds != null ? took(r.seconds) : tookText] : [running ? 'still running' : 'no result in the log'];
   const box = h('div.agcall.tooltext', null, head(meta));
   const kv = h('dl.agkv');
   for (const f of x.input.fields) {

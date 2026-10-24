@@ -412,9 +412,11 @@ def reply(paths: Sequence[Path], message_id: str, when: datetime | None) -> dict
             continue
         if blocks is None:
             continue
-        texts = [b["text"] for b in blocks if b["type"] == "text" and b["text"].strip()]
+        texts = [b["text"].strip() for b in blocks if b["type"] == "text" and b["text"].strip()]
         thinking = [b for b in blocks if b["type"] != "text"]
-        summary = [b["text"] for b in thinking if b["type"] == "thinking" and b["text"].strip()]
+        summary = [
+            b["text"].strip() for b in thinking if b["type"] == "thinking" and b["text"].strip()
+        ]
         return {
             "id": message_id,
             "text": _prose("\n\n".join(texts)) if texts else None,
