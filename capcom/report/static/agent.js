@@ -483,12 +483,21 @@ let currentSteps = null, currentRequests = null;
 function foldBody(d, i) {
   currentSteps = d.steps; currentRequests = d.requests;
   const st = d.steps;
-  if (!st.calls[i]) return [thinkFold(d.requests, st.request[i])];
+  if (!st.calls[i]) return [thinkFold(d.requests, st.request[i], st.moved && st.moved[i] ? movedNote(st, i) : null)];
   const calls = view.folds.get(i) || new Map();
   return st.tools[i].map(([id, name, label, end]) => callFold(i, id, name, label, end != null ? (end - st.start[i]) / 1000 : null, calls.get(id)));
 }
 
-function thinkFold(R, j) {
+// where a dash row's cost went: the tool step whose result its request read, which is
+// most often the row right above it
+function movedNote(st, i) {
+  const k = st.next.findIndex((n, m) => n === st.request[i] && st.calls[m]);
+  if (k < 0) return 'Its cost is counted on the step whose result it read.';
+  return k === i - 1 ? `Counted on the row above, ${st.label[k]}, whose result this request read.`
+    : `Counted on the ${st.label[k]} row, whose result this request read.`;
+}
+
+function thinkFold(R, j, note) {
   if (j == null || R.t[j] == null) return h('p.note', { text: 'No request for this step.' });
   const p = R.parts[j] || {};
   const row = (label, n, cost, sub) => h('tr', null, h('th', { scope: 'row', text: label }),
@@ -507,7 +516,8 @@ function thinkFold(R, j) {
     h('table.agtok', { 'aria-label': 'Tokens and cost of this request' },
       h('thead', null, h('tr', null, h('th', { scope: 'col', text: modelName(R.model[j]) }), h('th.num', { scope: 'col', text: 'Tokens' }), h('th.num', { scope: 'col', text: 'Cost' }), h('th'))),
       h('tbody', null, rows),
-      h('tfoot', null, h('tr', null, h('th', { scope: 'row', text: 'Total' }), h('td'), h('td.num', { text: usd(R.usd[j]) }), h('td')))));
+      h('tfoot', null, h('tr', null, h('th', { scope: 'row', text: 'Total' }), h('td'), h('td.num', { text: usd(R.usd[j]) }), h('td')))),
+    note ? h('p.agmoved', { text: note }) : null);
 }
 
 function status(r, name) {

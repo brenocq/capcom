@@ -453,3 +453,15 @@ def test_the_folds_open_close_and_stay_out_of_ask(
         until(chrome, "!!document.querySelector('table.agtok')")
         tok = chrome.js("document.querySelector('table.agtok').textContent")
         assert "Cache read" in tok and "5,000" in tok and "of it thinking" in tok
+        # it shows its own cost, so no note says where the cost went
+        assert not chrome.js("!!document.querySelector('.agmoved')")
+        # the next thinking row shows a dash: its fold keeps the total and names the
+        # row that carries it (the Bash step above, whose result its request read)
+        chrome.js(
+            "[...document.querySelectorAll('tr.agsrow')]"
+            ".filter((r) => r.textContent.includes('Thinking'))[1].click()"
+        )
+        until(chrome, "!!document.querySelector('.agmoved')")
+        note = chrome.js("document.querySelector('.agmoved').textContent")
+        assert note.startswith("Counted on the row above, Bash")
+        assert chrome.js("document.querySelector('table.agtok tfoot').textContent.includes('$')")

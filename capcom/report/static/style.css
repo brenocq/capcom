@@ -861,4 +861,5 @@ table.agtok tbody th { color: var(--ink); }
 table.agtok td.num, table.agtok th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 table.agtok tfoot th, table.agtok tfoot td { border-top: 1px solid var(--l12); font-weight: 600; color: var(--text); padding-top: 5px; }
 table.agtok .agsub { color: var(--muted); font-size: 11px; }
+.agmoved { margin: 6px 0 0; color: var(--muted); font-size: 11.5px; }
 @media (max-width: 600px) { .agkv { grid-template-columns: minmax(0, 1fr); gap: 2px; } .agkv dd + dt { margin-top: 6px; } }
