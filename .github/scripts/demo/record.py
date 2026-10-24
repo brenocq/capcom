@@ -5,12 +5,14 @@
 <work-dir> is demo/data.py's (it is built there first when missing). One tab
 shows capcom's website, clicked with real mouse events, telling one story in six
 steps: the spend jumped (Spend over 14 days by project, the cursor across the
-steep rise), who spent it (split by agent type: the coder subagents), why (the
-rise's spike marker opens the Spikes page on its cause), where (its session's
-page: the context, the cost of each request, the subagent lanes), is it a habit
-(Checks by kind: the same cause on top, opened), fix it (a settings change
-copied). A second tab draws each moment in a macOS-style window (frame.html)
-with a cursor and a caption strip naming the steps, on a transparent page.
+steep rise), why (split by agent type, the coder subagents climb; the rise's
+spike marker opens its cause), where (its session's timeline, the coder lanes
+opened, one of them clicked), which step (that agent's page: the long test runs,
+the second one's fold with its command and failing output), is it a habit
+(Checks by kind: the same cause on top, opened, its change copied), did it work
+(a marked change with its before, after and verdict). A second tab draws each
+moment in a macOS-style window (frame.html) with a cursor and a caption strip
+naming the steps, on a transparent page.
 Everything shown is capcom's own output on the synthetic data; nothing on the
 page is staged.
 
@@ -50,7 +52,7 @@ FRAME_W, FRAME_H = 1240, 845
 SCALE = 0.8
 FPS = 25  # ffmpeg's concat demuxer times frames in 1/25 s
 STEP = 1 / FPS
-STEPS = ["Spend jumped", "Who spent it?", "Why?", "Where?", "Is it a habit?", "Fix it"]
+STEPS = ["Spend jumped", "Why?", "Where?", "Which step?", "Is it a habit?", "Did it work?"]
 THEMES = ("light", "dark")
 # Lossy WebP at this quality (with lossless alpha) when the lossless file would be
 # over the size budget.
@@ -228,7 +230,7 @@ def across_rise(rec: Recorder, spike: dict[str, Any], window: dict[str, Any]) ->
     def at(t: float) -> float:
         return x + (t - since) / (until - since) * w
 
-    _, my, _, mh = rec.box(".spikemark", "Cache expired", "aria-label")
+    _, my, _, mh = rec.box(".spikemark", f"+${spike['excess_usd']:,.2f} over", "aria-label")
     start, end = (datetime.fromisoformat(spike[k]).timestamp() * 1000 for k in ("start", "end"))
     before, after = at(start - 4 * 3600e3), at(end + 1800e3)
     rec.move((before, my + mh + 70), 0.5)
@@ -237,86 +239,100 @@ def across_rise(rec: Recorder, spike: dict[str, Any], window: dict[str, Any]) ->
 
 
 def script(rec: Recorder, numbers: dict[str, Any]) -> None:
-    """The spend jumped -> who -> why -> where -> is it a habit -> fix it."""
+    """The spend jumped -> why -> where -> which step -> is it a habit -> did it work."""
     spike = max(numbers["spikes"]["spikes"], key=lambda s: s["excess_usd"])
     window = numbers["spend_project"]["window"]
+    coder = numbers["coder_agent"]["thread"]["agent_id"]
 
     # 1. Spend jumped: 14 days by project, the cursor across the steepest rise.
     rec.open("/spend?days=14&group=project")
     first = rec.page
     assert first is not None
     start = (rec.x, rec.y)
-    rec.hold(0.6)
+    rec.hold(0.5)
     across_rise(rec, spike, window)
-    rec.hold(2.2)
+    rec.hold(1.6)
     rec.still("1-spend")
 
-    # 2. Who spent it: the same chart by agent type, the coder subagents climbing.
+    # 2. Why: split by agent type, the coder subagents climb; the rise's marker
+    # opens the Spikes page on its cause.
     rec.keep_hover(False)
     rec.snap()
     rec.go(".seg button", "Agent type", seconds=0.5, step=1)
     rec.hold(0.3)
     across_rise(rec, spike, window)
-    rec.hold(2.0)
-    rec.still("2-agent")
-
-    # 3. Why: the rise's marker opens the Spikes page on that spike.
+    rec.hold(0.8)
     rec.keep_hover(False)
     rec.snap()
-    rec.go(".spikemark", "Cache expired", "aria-label", seconds=0.5, step=2, ready=".detail")
-    rec.hold(0.3)
+    mark = f"+${spike['excess_usd']:,.2f} over"
+    rec.go(".spikemark", mark, "aria-label", seconds=0.5, ready=".detail")
     _, top, _, _ = rec.box(".detail")
     rec.move((rec.x + 260, rec.y + 120), 0.3)
     rec.scroll(top - 12, seconds=0.6)
-    rec.hold(2.4)
-    rec.still("3-spike")
+    rec.hold(1.9)
+    rec.still("2-spike")
 
-    # 4. Where: down the evidence to "Open the session", then the session's page,
-    # a pause past the cache lifetime and what the request after it wrote.
+    # 3. Where: its session's timeline, the subagent lanes running through the long
+    # tool calls; the coder lanes open, and one of them leads to its agent page.
     _, link, _, lh = rec.box(".detail a.link", "Open the session")
-    rec.step = 3
-    rec.scroll(link + lh + 60 - APP_H, seconds=0.6)
+    rec.step = 2
+    rec.scroll(link + lh + 60 - APP_H, seconds=0.5)
     rec.go(".detail a.link", "Open the session", seconds=0.5, ready="div.lane")
-    rec.hold(0.3)
+    rec.hold(0.2)
     _, card, _, _ = rec.box("section.card", "How the session unfolded")
-    rec.scroll(card - 14, seconds=0.6)
-    tick = rec.app.eval(
-        "(() => { const t = document.querySelectorAll('.pausetick, .pausechip');"
-        " const r = t[Math.min(1, t.length - 1)].getBoundingClientRect();"
-        " return [r.x + r.width / 2, r.y + r.height / 2]; })()"
+    rec.scroll(card + 120, seconds=0.6)
+    rec.go("button.lanetoggle", "coder", seconds=0.5, settle=0.5)
+    rec.hold(1.0)
+    rec.still("3-session")
+    rec.go(
+        "div.lane.sub a.lanebar",
+        coder,
+        "href",
+        seconds=0.5,
+        step=3,
+        ready="button.agpbtn",
+        settle=1.5,
     )
-    rec.move((tick[0] - 40, tick[1] + 40), 0.5)
-    rec.keep_hover(True)
-    rec.move((tick[0], tick[1]), 0.4, hover=True)
-    rec.hold(2.3)
-    rec.still("4-session")
-    rec.keep_hover(False)
 
-    # 5. Is it a habit: Checks by kind puts the same cause on top; open its row.
+    # 4. Which step: the agent page, its Doing strip three long test runs; the
+    # second one's fold, the command, its failing output and the request after it.
+    rec.hold(0.8)
+    _, chart, _, _ = rec.box("section.card", "From spawn to hand-back")
+    rec.scroll(chart - 14, seconds=0.6)
+    rec.hold(1.0)
+    _, phase, _, _ = rec.box(".agpbtn", "Running the backfill tests")
+    rec.scroll(phase - 200, seconds=0.6)
+    rec.go(".agpbtn", "Running the backfill tests", seconds=0.5, settle=0.5)
+    secs = round(
+        (numbers["coder_agent"]["steps"]["end"][18] - numbers["coder_agent"]["steps"]["start"][18])
+        / 1000
+    )
+    rec.go("tr.agsrow", f"{secs // 60} min {secs % 60:02d} s", seconds=0.5, ready=".agfold")
+    _, fold, _, _ = rec.box(".agfold")
+    rec.move((rec.x + 420, rec.y + 10), 0.3)
+    rec.scroll(fold - 150, seconds=0.6)
+    rec.hold(2.2)
+    rec.still("4-step")
+
+    # 5. Is it a habit: Checks by kind puts the same cause on top; open it and copy
+    # its change (a one-hour cache for subagents).
     kinds = {k["kind"]: k["title"] for k in numbers["checks"]["rollups"]}
     habit = kinds["subagent_cache_expiry"]
     rec.go(".nav a", "Checks", seconds=0.6, step=4, ready="details.rollup")
     rec.hold(0.3)
     rec.go("details.rollup summary", habit, seconds=0.6, settle=0.6)
-    _, row, _, _ = rec.box("section.card.rollups")
-    rec.move((rec.x + 420, rec.y + 120), 0.3)
-    rec.scroll(row - 14, seconds=0.6)
-    rec.hold(2.3)
+    _, copy, _, ch = rec.box("details.rollup[open] button.copy", "Copy")
+    rec.scroll(copy + ch + 90 - APP_H, seconds=0.8)
+    rec.go("details.rollup[open] button.copy", "Copy", seconds=0.5, settle=0.3)
+    rec.move((rec.x + 60, rec.y + 34), 0.3)
+    rec.hold(1.8)
     rec.still("5-checks")
 
-    # 6. Fix it: down to a kind with a change to paste (servers loaded and never
-    # called), open it, and copy the change.
-    rec.step = 5
-    servers = kinds["mcp_servers_unused"]
-    _, sy, _, _ = rec.box("details.rollup summary", servers)
-    rec.scroll(sy - 160, seconds=0.8)
-    rec.go("details.rollup summary", servers, seconds=0.5, settle=0.6)
-    _, copy, _, ch = rec.box("button.copy", "Copy")
-    rec.scroll(copy + ch + 70 - APP_H, seconds=0.9)
-    rec.go("button.copy", "Copy", seconds=0.5, settle=0.3)
-    rec.move((rec.x + 60, rec.y + 34), 0.3)
-    rec.hold(2.8)
-    rec.still("6-copy")
+    # 6. Did it work: a change marked applied, its before and after, the verdict.
+    rec.go(".nav a", "Did it work?", seconds=0.6, step=5, ready=".verdict")
+    rec.move((rec.x + 380, rec.y + 60), 0.4)
+    rec.hold(2.4)
+    rec.still("6-changes")
     rec.loop_back(first, start)
 
 
@@ -391,7 +407,7 @@ def record(base: str, work: Path, out: Path, theme: str, stills: Path | None) ->
                 raise
             webp = out / f"demo-{theme}.webp"
             mode = encode(rec.frames, webp, tmp)
-            shutil.copy(dict(rec.stills)["3-spike"], out / f"demo-{theme}.png")
+            shutil.copy(dict(rec.stills)["2-spike"], out / f"demo-{theme}.png")
             if stills:
                 stills.mkdir(parents=True, exist_ok=True)
                 for name, png in rec.stills:

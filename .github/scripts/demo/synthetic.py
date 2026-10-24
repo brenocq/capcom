@@ -1,4 +1,4 @@
-"""A made-up two weeks of Claude Code logs, for the README's pictures and demo.
+"""A made-up four weeks of Claude Code logs, for the README's pictures and demo.
 
     python .github/scripts/demo/synthetic.py <claude-root> [--now ISO]
 
@@ -9,8 +9,11 @@ habits capcom is built to find: idle gaps past the cache lifetime, a late
 compaction, a subagent fan-out, a workflow's burst of agents, a large tool
 result, a model switch mid-session, tools and skills loaded but never used, a
 long CLAUDE.md, and the story the demo tells: `coder` subagents whose cache
-expires while their ten-minute test runs go on, twice in small and then once
-in large (four coders, twelve rewrites), the window's steepest rise. Every
+expires while their test runs go on, twice in small (one coder, five
+55-minute runs, which make the 1-hour cache the cheapest for subagents) and
+then once in large (four coders, ten-minute runs, twelve rewrites), the
+window's steepest rise. Two quieter weeks come before, where orbit-api idles past
+the cache lifetime every workday until a fix marked applied (Did it work?). Every
 session ends with a cost-state that matches its requests, a little above them
 (Claude Code's side calls), as real ones do.
 
@@ -26,7 +29,9 @@ import json
 import random
 import sys
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -101,6 +106,113 @@ def cost(model: str, u: dict[str, int]) -> float:
     ) / 1e6
 
 
+# The words a coder's steps show when opened on the agent page. Made up, like
+# everything here; none of it changes a token count.
+TODO_DONE = (
+    "Todos have been modified successfully. Ensure that you continue to use the todo "
+    "list to track your progress."
+)
+TODO_ITEMS = [
+    ("Load the Q3 fixtures", "Loading the Q3 fixtures"),
+    ("Run the backfill tests until they pass", "Running the backfill tests"),
+    ("Report back to the lead", "Reporting back"),
+]
+# Weeks whose row counts come up short, run by run, before the fix lands.
+SHORT_WEEKS = [("07", 4812, 4820), ("11", 5104, 5109)]
+
+
+def todos(done: int) -> dict[str, Any]:
+    """The to-do list with `done` items completed and the next one in progress."""
+    status = ["completed"] * done + ["in_progress"] + ["pending"] * len(TODO_ITEMS)
+    return {
+        "todos": [
+            {"content": c, "activeForm": a, "status": st}
+            for (c, a), st in zip(TODO_ITEMS, status, strict=False)
+        ]
+    }
+
+
+def test_output(table: str, run: int, runs: int, chars: int) -> str:
+    """`make backfill-test`'s output, `chars` long: the last run passes, the ones
+    before fail on weeks whose rows came up short (fewer each time). The loader's
+    log fills it to its length (inside the first failure, or before a passing run)."""
+    failing = SHORT_WEEKS[: max(0, min(len(SHORT_WEEKS), runs - 1 - run))]
+    path = f"tests/backfill/test_{table}.py"
+    dots = "." * (48 - len(failing))
+    head = ["Exit code 2"] if failing else []
+    head.append(f"python -m pytest {path} -q --db=backfill")
+    body = [
+        "=" * 30 + " test session starts " + "=" * 30,
+        "platform linux -- Python 3.12.7, pytest-8.3.3",
+        "collected 48 items",
+        "",
+        f"{path} {dots[:40]}{'F' * len(failing)}{dots[40:]}  [100%]",
+        "",
+    ]
+    fill_at = -1
+    fill: list[str] = []
+    for n, (week, got, want) in enumerate(failing):
+        body += [
+            "=" * 35 + " FAILURES " + "=" * 35,
+            f"_______ test_row_counts_match[2026-q3-week-{week}] _______",
+            "",
+            "    def test_row_counts_match(week):",
+            ">       assert loaded(week) == expected(week)",
+            f"E       AssertionError: assert {got} == {want}",
+            f"E        +  where {got} = loaded('2026-q3-week-{week}')",
+            "",
+            f"{path}:41: AssertionError",
+            "-" * 30 + " Captured log call " + "-" * 30,
+        ]
+        if n == 0:
+            fill_at = len(body)
+            fill = [
+                f"INFO     loader:load.py:88 week {week} day {d} batch {b:02}: "
+                f"{(got // 7 + d * 7 + b * 13) % 97 + 40} rows"
+                for d in range(1, 8)
+                for b in range(1, 40)
+            ]
+        body.append(f"WARNING  loader:load.py:112 {want - got} rows arrived after midnight UTC")
+    if failing:
+        body.append("=" * 30 + " short test summary info " + "=" * 30)
+        body += [
+            f"FAILED {path}::test_row_counts_match[2026-q3-week-{w}] - AssertionError"
+            for w, _, _ in failing
+        ]
+        body.append(f"{len(failing)} failed, {48 - len(failing)} passed in 597.31s")
+        body.append("make: *** [Makefile:42: backfill-test] Error 1")
+    else:
+        body.append("48 passed in 588.02s")
+        fill_at = 0
+        fill = [f"loading fixtures/{table}_q3.csv: batch {b:03}/400" for b in range(1, 401)]
+    lines = head + body[:fill_at]
+    rest = body[fill_at:]
+    size = sum(len(x) + 1 for x in lines + rest) - 1
+    for line in fill:
+        if size + len(line) + 1 > chars:
+            break
+        lines.append(line)
+        size += len(line) + 1
+    lines[-1] += " " * max(0, chars - size)
+    return "\n".join(lines + rest)[:chars]
+
+
+def run_reply(table: str, run: int) -> dict[str, str]:
+    """What the coder writes and thinks as it starts test run `run`."""
+    if run == 0:
+        return {
+            "text": f"Fixtures loaded. Running the {table} backfill tests.",
+            "thinking_text": "The dump is in. The suite runs against the shared database, "
+            "so it takes a while.",
+        }
+    return {
+        "text": "Some weeks come up a few rows short: rows that arrive after midnight "
+        "UTC land on the next day. I fixed assign_day in load.py; running the tests again.",
+        "thinking_text": "The missing rows are all late arrivals. Count them on the day "
+        "they happened, then rerun.",
+    }
+
+
 class Thread:
     """One agent thread (main or subagent): its writer, its cached context and clock."""
 
@@ -122,6 +234,8 @@ class Thread:
         output: int,
         tools: list[tuple[str, dict[str, Any]]] | None = None,
         thinking: int = 0,
+        text: str = "",
+        thinking_text: str = "",
     ) -> str:
         """One model call adding `new` tokens to the context; a call after the
         cache lifetime rewrites all of it."""
@@ -144,8 +258,11 @@ class Thread:
                 cache_write_1h=w1,
                 output=output,
                 thinking=thinking,
+                text=text,
+                thinking_text=thinking_text,
                 tools=tools or [],
-                records=2 if tools else 1,
+                # one streamed record per content block, as Claude Code writes them
+                records=max(2 if tools else 1, bool(text) + bool(thinking_text) + len(tools or [])),
                 effort="high",
             )
         )
@@ -154,17 +271,34 @@ class Thread:
         return mid
 
     def tool(
-        self, name: str, args: dict[str, Any], tokens: int, ran: float = 4.0, **kw: Any
+        self,
+        name: str,
+        args: dict[str, Any],
+        tokens: int,
+        ran: float = 4.0,
+        result: Callable[[int], str] | None = None,
+        error: bool = False,
+        before: list[tuple[str, dict[str, Any]]] | None = None,
+        **kw: Any,
     ) -> None:
-        """A call to `name` whose result is `tokens` long, back after `ran` seconds."""
+        """A call to `name` whose result is `tokens` long, back after `ran` seconds:
+        `result(chars)` when given, the words at that length (the agent page's fold
+        shows them), else filler. `before` are calls the same reply makes first
+        (a to-do list update), answered at once and left out of the context, so
+        the tokens and dollars stay those of the call alone."""
         self.request(
             new=self.session.rng.randint(150, 900),
             output=kw.pop("output", 260),
-            tools=[(name, args)],
+            tools=[*(before or []), (name, args)],
             **kw,
         )
+        *first, last = self.w.last_tool_ids
+        for tid in first:
+            self.w.tool_result(tid, self.t, chars=len(TODO_DONE), text=TODO_DONE)
         self.wait(ran)
-        self.w.tool_result(self.w.last_tool_ids[0], self.t, chars=tokens * 4)
+        chars = tokens * 4
+        text = result(chars) if result is not None else None
+        self.w.tool_result(last, self.t, chars=chars, text=text, is_error=error)
         self.pending += tokens
         self.wait(self.session.rng.uniform(2, 9))
 
@@ -324,10 +458,10 @@ class Session:
                 m.pending += report
         return threads
 
-    def coders(self, tables: list[str], waits: int, dump: int) -> None:
+    def coders(self, tables: list[str], waits: int, dump: int, run: int = 600) -> None:
         """One reply starts a `coder` subagent per table; each reads a large fixture
-        dump, then runs the table's backfill tests `waits` times. A run takes about
-        ten minutes, past a subagent's 5-minute cache, so the call after each run
+        dump, then runs the table's backfill tests `waits` times. A run takes `run`
+        seconds, past a subagent's 5-minute cache, so the call after each run
         rewrites the whole context: `waits` rewrites per table."""
         m = self.main
         cwd = PROJECTS[self.project]
@@ -342,7 +476,7 @@ class Session:
         ids = list(m.w.last_tool_ids)
         # When the first test runs come back: 15 minutes on, 20 s past an even minute
         # (capcom sums a session's spend in 2-minute steps; each round fills one).
-        first = m.t + timedelta(minutes=15)
+        first = m.t + timedelta(seconds=run + 300)
         first -= timedelta(seconds=first.timestamp() % 120 - 20)
         ends = []
         for i, (table, tid) in enumerate(zip(tables, ids, strict=True)):
@@ -351,22 +485,47 @@ class Session:
             th = Thread(self, sw, OPUS, "5m", m.t + timedelta(seconds=2 + i * 0.6))
             sw.user_prompt(th.t, "synthetic task")
             th.wait(2)
-            th.request(new=24_000, output=300)
+            # Its to-do list names the agent page's phases; the replies, thinking
+            # summaries and test output fill the step folds (all made up here).
+            th.request(
+                new=24_000,
+                output=300,
+                tools=[("TodoWrite", todos(0))],
+                text=f"I'll load the Q3 {table} fixtures, then run the backfill tests "
+                "until they pass.",
+                thinking_text=f"The {table} backfill needs last quarter's fixture dump "
+                "and the loader's schema; the tests compare row counts week by week.",
+            )
+            th.w.tool_result(th.w.last_tool_ids[0], th.t, chars=len(TODO_DONE), text=TODO_DONE)
             th.work(6, self.project, big=True)
             th.tool("Read", {"file_path": f"{cwd}/fixtures/{table}_q3.csv"}, dump, ran=1)
             # Each run's failures go straight into the next run's call (and the last
             # into the report), so every call after the first comes back to a cold
             # cache. The test runs share one database, so the coders' runs end
-            # within a few seconds of each other, every ten minutes.
+            # within a few seconds of each other, every `run` seconds.
             for k in range(waits):
-                back = first + timedelta(seconds=k * 600 + i * 12 + self.rng.uniform(0, 4))
+                back = first + timedelta(seconds=k * run + i * 12 + self.rng.uniform(0, 4))
                 th.tool(
                     "Bash",
-                    {"command": f"make backfill-test TABLE={table}"},
+                    {
+                        "command": f"make backfill-test TABLE={table}",
+                        "description": f"Run the {table} backfill tests",
+                    },
                     3_000,
                     ran=(back - th.t).total_seconds(),
+                    result=partial(test_output, table, k, waits),
+                    error=k < waits - 1,
+                    before=[("TodoWrite", todos(1))] if k == 0 else None,
+                    **run_reply(table, k),
                 )
-            th.request(new=300, output=900)
+            th.request(
+                new=300,
+                output=900,
+                text=f"Done: the {table} backfill loads all of Q3 and its 48 tests pass. "
+                "Late rows now count on the day they happened, not the day they arrived "
+                "(load.py, assign_day).",
+                thinking_text="All 48 pass. Summarize the fix and the row counts for the lead.",
+            )
             ends.append(th.t)
         m.t = max(ends) + timedelta(seconds=3)
         for tid in ids:
@@ -424,6 +583,16 @@ def ordinary(s: Session, turns: int, steps: tuple[int, int] = (4, 10), cap: int 
         s.main.request(new=400, output=s.rng.randint(300, 1200))
 
 
+def plain(project: str) -> dict[str, Any]:
+    """An ordinary session's setup in `project`."""
+    return {
+        "mcp": project == "orbit-api",
+        "skills": project != "pebble-cli",
+        "memory": 42_000 if project == "orbit-api" else 9_000,
+        "ttl": "5m" if project == "pebble-cli" else "1h",
+    }
+
+
 def generate(root: Path, now: datetime) -> dict[str, Any]:
     rng = random.Random(1969)
     today = now.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -432,11 +601,13 @@ def generate(root: Path, now: datetime) -> dict[str, Any]:
     total = 0.0
     facts: dict[str, Any] = {"sessions": {}}
 
-    def session(project: str, day: int, hour: float, **kw: Any) -> Session:
+    def session(
+        project: str, day: int, hour: float, gen: random.Random = rng, **kw: Any
+    ) -> Session:
         nonlocal n
         n += 1
-        start = day0 + timedelta(days=day, hours=hour, minutes=rng.uniform(0, 20))
-        return Session(root, rng, project, start.astimezone(UTC), n, **kw)
+        start = day0 + timedelta(days=day, hours=hour, minutes=gen.uniform(0, 20))
+        return Session(root, gen, project, start.astimezone(UTC), n, **kw)
 
     def done(s: Session, label: str | None = None) -> None:
         nonlocal total
@@ -457,15 +628,7 @@ def generate(root: Path, now: datetime) -> dict[str, Any]:
             hours = [9.0, 10.5, 13.0, 14.5, 16.5][: rng.randint(3, 5)]
         for h in hours:
             project = rng.choices(list(PROJECTS), [5, 3, 2, 2, 1])[0]
-            s = session(
-                project,
-                day,
-                h,
-                mcp=project == "orbit-api",
-                skills=project != "pebble-cli",
-                memory=42_000 if project == "orbit-api" else 9_000,
-                ttl="5m" if project == "pebble-cli" else "1h",
-            )
+            s = session(project, day, h, **plain(project))
             ordinary(s, rng.randint(6, 13), cap=CAP)
             done(s)
 
@@ -567,10 +730,12 @@ def generate(root: Path, now: datetime) -> dict[str, Any]:
             s.main.last = s.main.t - timedelta(hours=2)  # a new model has no cache
             ordinary(s, 5)
             done(s, "model-switch")
-        if day in (3, 7):  # the habit, small: a coder subagent waits on two long test runs
+        if day in (3, 7):  # the habit, small: a coder waits on five 55-minute test runs; on
+            # 5-minute checks they would cost more than the 1-hour cache, so Checks
+            # recommends the 1-hour cache for subagents, with the setting to paste
             s = session("quarry-etl", day, 15.0, title="Parallelize the loader", skills=True)
             ordinary(s, 2, cap=CAP)
-            s.coders(["loader"], waits=2, dump=90_000)
+            s.coders(["loader"], waits=5, dump=500_000, run=3_300)
             ordinary(s, 1, cap=CAP)
             done(s)
         if day == 11:  # the habit, large: four coders wait on ten-minute test runs
@@ -614,6 +779,27 @@ def generate(root: Path, now: datetime) -> dict[str, Any]:
     while s.main.t < now - timedelta(minutes=3):
         ordinary(s, 1)
     done(s, "live")
+
+    # The two weeks before the fortnight, for Did it work?: orbit-api's sessions (the
+    # first of each workday among them) idle past the cache lifetime twice, until the
+    # user marks the fix applied on day 5 (data.py runs `capcom mark`); from day 6 on, no
+    # idle gaps. Their own seed, and written last, so the fortnight above stays as it was.
+    hist = random.Random(2026)
+    for day in range(-14, 0):
+        if (day0 + timedelta(days=day)).weekday() >= 5:
+            continue
+        for i, h in enumerate([9.0, 11.0, 14.0, 16.0][: hist.randint(3, 4)]):
+            project = "orbit-api" if i == 0 else hist.choices(list(PROJECTS), [5, 3, 2, 2, 1])[0]
+            s = session(project, day, h, hist, **plain(project))
+            ordinary(s, hist.randint(6, 13), cap=CAP)
+            for _ in range(2 if project == "orbit-api" else 0):  # lunch, a meeting
+                s.prompt(hist.uniform(70, 95) * 60)
+                ordinary(s, hist.randint(2, 4))
+            done(s)
+    facts["marked"] = {
+        "finding": f"idle_cache_rewrites@{PROJECTS['orbit-api'].replace('/', '-')}",
+        "on": (day0 + timedelta(days=5)).date().isoformat(),
+    }
     facts["total_cost_state_usd"] = round(total, 2)
     facts["now"] = _iso(now)
     return facts

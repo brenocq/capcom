@@ -3,11 +3,12 @@
     python .github/scripts/features/build.py <data.json> <out-dir>
 
 <data.json> is demo/data.py's output: every chart and number on a card is what
-capcom computed on the synthetic logs (spend by project, a spike's window and
-cause, the fan-out session's subagents, the checks rolled up by kind, the usage
-windows and their forecast, `capcom calibrate`); the OpenClaw and Private cards
-are diagrams. Writes feature-{adding-up,why,fan-out,checks,limits,openclaw,trust,
-private}.svg into <out-dir>.
+capcom computed on the synthetic logs (spend by project and one day by hour, a
+spike's window and cause, a session's timeline with its pauses, a coder agent's
+steps, the checks rolled up by kind with a marked change's verdict, the usage
+windows and their forecast); the Ask Roger card keeps one real answer as text,
+and the Private card is a diagram. Writes feature-{adding-up,why,timeline,
+every-step,checks,limits,ask-roger,private}.svg into <out-dir>.
 
 Each card runs on one loop: the scene fades in, plays, holds its last frame and
 fades out. Every element's own style is its last frame, so prefers-reduced-motion
@@ -20,12 +21,16 @@ import json
 import math
 import sys
 from collections.abc import Callable
+from datetime import datetime
 from html import escape
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "demo"))
 
+import roger
+import synthetic  # the Every step card shows its made-up test output
 from svg import (
     PANEL,
     bands,
@@ -169,6 +174,7 @@ def adding_up(data: dict[str, Any]) -> str:
         )
     end = c.step("opacity:0", "opacity:1", draw[1], 0.4)
     ex, ey = points[-1]
+    drill = drill_down(c, data["spike_day"], times, box)
     body = (
         '<g class="scene">'
         + legend(PX + 16, PY + 20, list(zip(colors[:3], labels[:3], strict=False)))
@@ -176,6 +182,7 @@ def adding_up(data: dict[str, Any]) -> str:
         'style="stroke:var(--border)"/>'
         + f'<g clip-path="url(#ac)">{chart}</g>'
         + "".join(pins)
+        + drill
         + f'<g class="{end}"><circle cx="{r(ex)}" cy="{r(ey)}" r="3" style="fill:var(--fg)"/>'
         + text(ex + 7, ey + 4, usd(total[-1], cents=False), "fg", 13, weight=600)
         + text(ex + 7, ey + 18, "14 days", "muted", 10.5)
@@ -189,10 +196,63 @@ def adding_up(data: dict[str, Any]) -> str:
         ],
         "Adding up: two weeks of spend drawing in, one line per project and the total, numbered "
         "spike markers popping onto the total line, which ends at "
-        f"{usd(total[-1], cents=False)}.",
+        f"{usd(total[-1], cents=False)}; then the steepest day opens into its 24 hours.",
         c.css(),
         body,
         defs,
+    )
+
+
+def drill_down(
+    c: Css, day: dict[str, Any], times: list[float], box: tuple[float, float, float, float]
+) -> str:
+    """The drill-down beat: the spike's day lights up on the chart, then opens into
+    an inset of its 24 hourly bars, as a click on a day does on the website."""
+    x0, y0, w, h = box
+    X = lambda t: x0 + (t - times[0]) / (times[-1] - times[0]) * w  # noqa: E731
+    a = X(ms(day["window"]["since"]) / 1000)
+    b = X(ms(day["window"]["until"]) / 1000)
+    lit = c.step("opacity:0", "opacity:1", 5.0, 0.3)
+    hours = day["hourly"]["hours"]
+    top = max(hr["total"] for hr in hours)
+    peak = max(range(len(hours)), key=lambda i: hours[i]["total"])
+    ix, iy, iw, ih = x0 + 4, y0 - 4, 160, 52
+    bw = (iw - 16) / len(hours)
+    bars = []
+    for i, hr in enumerate(hours):
+        bh = max(hr["total"] / top * (ih - 26), 0.8)
+        k = c.step(
+            "transform:scaleY(0)", "transform:scaleY(1)", 5.7 + i * 0.03, 0.3, origin="50% 100%"
+        )
+        color = "var(--accent)" if i == peak else "var(--gray)"
+        bars.append(
+            f'<rect class="{k}" x="{r(ix + 8 + i * bw)}" y="{r(iy + ih - 8 - bh)}" '
+            f'width="{r(bw - 1.2)}" height="{r(bh)}" style="fill:{color}"/>'
+        )
+    on = datetime.fromisoformat(day["window"]["since"])
+    pop = c.step(
+        "opacity:0;transform:scale(.85)", "opacity:1;transform:scale(1)", 5.4, 0.35, origin="100% 0"
+    )
+    return (
+        f'<rect class="{lit}" x="{r(a)}" y="{y0}" width="{r(b - a)}" height="{h}" rx="2" '
+        'style="fill:var(--accent);fill-opacity:.14"/>'
+        f'<g class="{pop}">'
+        f'<path d="M{r(ix + iw)} {r(iy + ih / 2)}L{r(a)} {r(y0 + 8)}" stroke-dasharray="2 3" '
+        'style="stroke:var(--muted)"/>'
+        f'<rect x="{r(ix)}" y="{r(iy)}" width="{iw}" height="{ih}" rx="6" '
+        'style="fill:var(--surface);stroke:var(--border)"/>'
+        + text(ix + 8, iy + 14, f"{on:%b} {on.day}, by hour", "fg", 10, weight=600)
+        + text(
+            ix + iw - 8,
+            iy + 14,
+            f"{hours[peak]['start'][11:16]} · {usd(hours[peak]['total'], cents=False)}",
+            "clay",
+            10,
+            "end",
+            600,
+        )
+        + "".join(bars)
+        + "</g>"
     )
 
 
@@ -285,69 +345,314 @@ def why(data: dict[str, Any]) -> str:
     )
 
 
-def fan_out(data: dict[str, Any]) -> str:
+def spend_rate(
+    t: list[float], cost: list[float], runs: list[tuple[float, float]], window: float = 600e3
+) -> list[list[tuple[float, float]]]:
+    """The session page's spend rate (session.js spendRate): each request's cost
+    spread over a triangle `window` wide on either side of it, cut at its run's
+    edges and scaled back up, in $/hour, sampled every 2 minutes of each run."""
+
+    def cdf(u: float) -> float:
+        if u <= -window:
+            return 0.0
+        if u < 0:
+            return (u + window) ** 2 / (2 * window * window)
+        if u < window:
+            return 1 - (window - u) ** 2 / (2 * window * window)
+        return 1.0
+
+    out = []
+    for r0, r1 in runs:
+        r1 = max(r1, r0 + 60e3)
+        own = [k for k in range(len(t)) if r0 <= t[k] <= r1]
+        weight = {k: cost[k] / max(cdf(r1 - t[k]) - cdf(r0 - t[k]), 1e-9) for k in own}
+        n = max(2, math.ceil((r1 - r0) / 120e3) + 1)
+        pts = []
+        for j in range(n):
+            u = r0 + (r1 - r0) * j / (n - 1)
+            v = sum(
+                weight[k] * (1 - abs(u - t[k]) / window) / window
+                for k in own
+                if abs(u - t[k]) <= window
+            )
+            pts.append((u, v * 3600e3))
+        out.append(pts)
+    return out
+
+
+def timeline(data: dict[str, Any]) -> str:
     c = Css()
-    sess = data["fan_out_session"]
-    spike = next(s for s in data["spikes"]["spikes"] if s["cause"] == "fan_out")
-    agents = sorted(sess["agents"], key=lambda a: ms(a["first"]))
-    burst = [a for a in agents if ms(spike["start"]) - 60_000 <= ms(a["first"]) <= ms(spike["end"])]
-    t0 = min(ms(a["first"]) for a in burst) - 2 * 60_000
-    t1 = max(ms(a["last"]) for a in burst) + 90_000
-    types = list(dict.fromkeys(a["agent_type"] for a in burst))
-    color = {t: f"var(--s{i + 1})" for i, t in enumerate(types)}
-    x0, y0, w = PX + 52, PY + 34, PW - 68
-    X = lambda t: x0 + (min(max(t, t0), t1) - t0) / (t1 - t0) * w  # noqa: E731
-    lane = min(6.5, 82 / len(burst))
-    out = [text(PX + 16, y0 + 5, "main", "muted", 10.5)]
-    # The main thread: a lane that runs on through the burst.
-    m0, m1 = X(ms(sess["main"]["first"])), X(ms(sess["main"]["last"]))
-    grow = c.step(
-        "transform:scaleX(0)", "transform:scaleX(1)", 0.3, 4.2, ease="linear", origin="0 0"
+    sess = data["idle_session"]
+    req = sess["requests"]
+    t0, t1 = ms(sess["session"]["first_seen"]), ms(sess["session"]["last_seen"])
+    pauses = [(ms(p["start"]), ms(p["end"])) for p in sess["pauses"]]
+    edges = [t0] + [x for p in pauses for x in p] + [t1]
+    runs = [(edges[2 * i], edges[2 * i + 1]) for i in range(len(pauses) + 1)]
+    x0, w = PX + 64, PW - 80
+    sliver = 14.0
+    active = sum(b - a for a, b in runs)
+    # Fit all (linear time) and the session page's squeezed axis: each pause a
+    # fixed hatched sliver, the runs sharing the rest by their length.
+    lin, sq = [], []
+    sx = x0
+    for a, b in runs:
+        lin.append((x0 + (a - t0) / (t1 - t0) * w, (b - a) / (t1 - t0) * w))
+        sw = (b - a) / active * (w - sliver * len(pauses))
+        sq.append((sx, sw))
+        sx += sw + sliver
+    cy, ch = PY + 30, 46  # context
+    my, ay, ry, rh = PY + 82, PY + 96, PY + 110, 30  # main, Explore, spend rate
+    peak = sess["main"]["peak_context"] * 1.08
+    main_t = [(req["t"][i], req["context"][i]) for i in range(len(req["t"])) if req["agent"][i] < 0]
+    squeeze = (3.5, 0.8)
+    groups = []
+    for i, ((a, b), (sx, sw)) in enumerate(zip(runs, sq, strict=True)):
+        X = lambda tt, a=a, b=b, sx=sx, sw=sw: sx + (tt - a) / max(b - a, 1) * sw  # noqa: E731
+        pts = [(X(tt), cy + ch - v / peak * ch) for tt, v in main_t if a <= tt <= b]
+        d = f"M{r(sx)} {cy + ch}" + "".join(f"L{r(px)} {r(py)}" for px, py in pts)
+        d += f"L{r(sx + sw)} {r(pts[-1][1] if pts else cy + ch)}L{r(sx + sw)} {cy + ch}Z"
+        line = "".join(f"{'L' if j else 'M'}{r(px)} {r(py)}" for j, (px, py) in enumerate(pts))
+        ticks = "".join(
+            f'<rect x="{r(X(ms(g["first"])))}" y="{ay}" '
+            f'width="{r(max(X(ms(g["last"])) - X(ms(g["first"])), 3))}" height="6" rx="1" '
+            'style="fill:var(--s3)"/>'
+            for g in sess["agents"]
+            if a <= ms(g["first"]) <= b
+        )
+        lx, lw = lin[i]
+        k = lw / sw
+        move = c.step(
+            f"transform:translateX({r(lx - sx, 2)}px) scaleX({r(k, 4)})",
+            "transform:translateX(0) scaleX(1)",
+            squeeze[0],
+            squeeze[1],
+            ease="cubic-bezier(.6,0,.3,1)",
+            origin="0 0",
+        )
+        groups.append(
+            f'<g class="{move}"><rect x="{r(sx)}" y="{cy}" width="{r(sw)}" height="1" '
+            'fill="none"/>'
+            f'<path d="{d}" fill="url(#tlf)"/>'
+            f'<path d="{line}" fill="none" stroke-width="1.4" vector-effect="non-scaling-stroke" '
+            'style="stroke:var(--s1)"/>'
+            f'<rect x="{r(sx)}" y="{my}" width="{r(sw)}" height="6" '
+            'style="fill:var(--fg);fill-opacity:.7"/>'
+            f"{ticks}</g>"
+        )
+    draw = c.step(
+        "transform:scaleX(0)", "transform:scaleX(1)", 0.3, 2.4, ease="linear", origin="0 0"
+    )
+    defs = (
+        fade("tlf", "var(--s1)", 0.35, 0.04)
+        + fade("tlr", "var(--accent)", 0.45, 0.06)
+        + f'<clipPath id="tlc"><rect class="{draw}" x="{x0 - 2}" y="{cy - 4}" '
+        f'width="{w + 4}" height="{ay + 10 - cy}"/></clipPath>'
+        '<pattern id="tlh" width="5" height="5" patternUnits="userSpaceOnUse" '
+        'patternTransform="rotate(45)"><rect width="5" height="5" style="fill:var(--panel)"/>'
+        '<line x1="0" y1="0" x2="0" y2="5" stroke-width="2.2" style="stroke:var(--border)"/>'
+        "</pattern>"
+    )
+    out = [
+        text(PX + 16, cy + 27, "context", "muted", 10),
+        text(PX + 16, my + 6, "main", "muted", 10),
+        text(PX + 16, ay + 6, "Explore \u00d72", "muted", 10),
+        text(PX + 16, ry + rh - 11, "spend", "muted", 10),
+        text(PX + 16, ry + rh + 1, "$/hour", "muted", 9.5),
+        f'<g clip-path="url(#tlc)">{"".join(groups)}</g>',
+    ]
+    # The pauses: hatched slivers with their length, once squeezed.
+    hatch = c.step("opacity:0", "opacity:1", squeeze[0] + squeeze[1] - 0.1, 0.4)
+    marks = []
+    for i, p in enumerate(sess["pauses"]):
+        px = sq[i][0] + sq[i][1]
+        mins = round(p["minutes"])
+        label = f"{mins // 60} h {mins % 60:02}" if mins >= 60 else f"{mins} min"
+        pw = len(label) * 5.6 + 10
+        marks.append(
+            f'<rect x="{r(px + 1)}" y="{cy - 2}" width="{sliver - 2}" '
+            f'height="{ry + rh + 2 - cy}" fill="url(#tlh)"/>'
+            f'<rect x="{r(px + sliver / 2 - pw / 2)}" y="{PY + 7}" width="{r(pw)}" height="15" '
+            'rx="7.5" style="fill:var(--surface);stroke:var(--border)"/>'
+            + text(px + sliver / 2, PY + 18, label, "fg", 9.5, "middle", 600)
+        )
+    out.append(f'<g class="{hatch}">{"".join(marks)}</g>')
+    # The spend-rate lane draws once the axis is squeezed: it jumps after each pause,
+    # where the whole context is written to the cache again.
+    rates = spend_rate(req["t"], req["usd"], runs)
+    top = max(v for run in rates for _, v in run) * 1.08
+    lane = []
+    for (a, b), (sx, sw), run in zip(runs, sq, rates, strict=True):
+        X = lambda tt, a=a, b=b, sx=sx, sw=sw: sx + (tt - a) / max(b - a, 1) * sw  # noqa: E731
+        pts = [(X(tt), ry + rh - v / top * rh) for tt, v in run]
+        tr = "".join(f"L{r(px)} {r(py)}" for px, py in pts)
+        lane.append(
+            f'<path d="M{r(sx)} {ry + rh}{tr}L{r(sx + sw)} {ry + rh}Z" fill="url(#tlr)"/>'
+            f'<path d="M{tr[1:]}" fill="none" stroke-width="1.4" style="stroke:var(--accent)"/>'
+        )
+    rate_on = c.step(
+        "transform:scaleX(0)",
+        "transform:scaleX(1)",
+        squeeze[0] + squeeze[1] + 0.4,
+        1.6,
+        ease="cubic-bezier(.45,.05,.4,1)",
+        origin="0 0",
+    )
+    defs += (
+        f'<clipPath id="tlrc"><rect class="{rate_on}" x="{x0 - 2}" y="{ry - 4}" '
+        f'width="{w + 4}" height="{rh + 6}"/></clipPath>'
     )
     out.append(
-        f'<rect class="{grow}" x="{r(m0)}" y="{y0}" width="{r(m1 - m0)}" height="6" '
-        f'rx="3" style="fill:var(--fg);fill-opacity:.7"/>'
+        f'<line x1="{x0}" y1="{ry + rh + 0.5}" x2="{x0 + w}" y2="{ry + rh + 0.5}" '
+        'style="stroke:var(--border)"/>'
+        f'<g clip-path="url(#tlrc)">{"".join(lane)}</g>'
     )
-    for i, a in enumerate(burst):
-        ax, ay = X(ms(a["first"])), y0 + 12 + i * lane
-        aw = max(X(ms(a["last"])) - ax, 4)
-        at = 0.3 + (ax - m0) / max(m1 - m0, 1) * 4.2 + i * 0.06
-        k = c.step(
-            "transform:scaleX(0);opacity:0",
-            "transform:scaleX(1);opacity:1",
-            at,
-            0.5,
-            origin="0 50%",
-        )
-        out.append(
-            f'<rect class="{k}" x="{r(ax)}" y="{r(ay)}" width="{r(aw)}" '
-            f'height="{r(lane - 1.6)}" rx="1.5" style="fill:{color[a["agent_type"]]}"/>'
-        )
-    out.append(text(PX + 16, y0 + 12 + lane * len(burst) / 2 + 4, "agents", "muted", 10.5))
-    note_t = 0.3 + 4.2 * 0.75
-    note = c.step(
-        "opacity:0;transform:translateY(4px)", "opacity:1;transform:translateY(0)", note_t, 0.5
-    )
-    head = spike["headline"]
-    amount = f"+{usd(spike['excess_usd'])}"
-    out.append(
-        f'<g class="{note}"><text x="{PX + PW - 16}" y="{PY + 20}" font-size="12" '
-        f'text-anchor="end"><tspan class="fg" font-weight="600">{escape(head)}</tspan>'
-        f'<tspan class="muted"> · </tspan><tspan class="clay" font-weight="600">'
-        f"{escape(amount)}</tspan></text></g>"
-    )
-    out.append(legend(PX + 16, PY + PH - 10, [(color[t], t) for t in types]))
     body = '<g class="scene">' + "".join(out) + "</g>"
+    p1, p2 = sess["pauses"][:2]
     return card(
-        "Fan-out",
+        "Timeline",
         [
-            "Subagents get lanes of their own: see a burst of",
-            "spawns, what each cost and which call started it.",
+            "Each session's context, threads and subagents on",
+            "one axis, long pauses squeezed, with the spend rate.",
         ],
-        f"Fan-out: a session's main thread runs along a timeline while {len(burst)} "
-        f"subagent lanes burst in below it; {head}, {amount}.",
+        f"Timeline: a four-hour session drawn on linear time, mostly empty, then its "
+        f"{round(p1['minutes'])} and {round(p2['minutes'])} minute pauses squeeze into "
+        "hatched slivers and a spend-rate lane draws beneath, jumping after each pause.",
         c.css(),
         body,
+        defs,
+    )
+
+
+KIND_COLOR = {
+    "think": "var(--s1)",
+    "test": "var(--s2)",
+    "files": "var(--s3)",
+    "other": "var(--gray)",
+}
+
+
+def every_step(data: dict[str, Any]) -> str:
+    c = Css()
+    ag = data["coder_agent"]
+    th, st, rq = ag["thread"], ag["steps"], ag["requests"]
+    n = len(st["start"])
+    t0, t1 = st["start"][0], st["end"][-1]
+    x0, w = PX + 16, PW - 32
+    X = lambda tt: x0 + (tt - t0) / (t1 - t0) * w  # noqa: E731
+    sy, sh = PY + 30, 14
+    runs = [i for i in range(n) if st["kind"][i] == "test" and "backfill" in st["short"][i]]
+    pick = runs[1]
+    out = [
+        text(x0, PY + 20, f"{th['name']} · {th['agent_type']}", "fg", 11, weight=600),
+        text(
+            PX + PW - 16,
+            PY + 20,
+            f"{round(th['alive_seconds'] / 60)} min · {usd(th['usd'])}",
+            "muted",
+            10.5,
+            "end",
+        ),
+    ]
+    strip = []
+    for i in range(n):
+        a, b = X(st["start"][i]), X(st["end"][i])
+        strip.append(
+            f'<rect x="{r(a)}" y="{sy}" width="{r(max(b - a - 0.6, 0.8))}" height="{sh}" '
+            f'style="fill:{KIND_COLOR.get(st["kind"][i], "var(--gray)")}"/>'
+        )
+    fill = c.step(
+        "transform:scaleX(0)", "transform:scaleX(1)", 0.3, 1.8, ease="linear", origin="0 0"
+    )
+    defs = (
+        f'<clipPath id="esc"><rect class="{fill}" x="{x0}" y="{sy - 2}" width="{w}" '
+        f'height="{sh + 4}"/></clipPath>'
+    )
+    out.append(f'<g clip-path="url(#esc)">{"".join(strip)}</g>')
+    for i in runs:
+        a, b = X(st["start"][i]), X(st["end"][i])
+        mins = round((st["end"][i] - st["start"][i]) / 60e3)
+        at = 0.3 + (b - x0) / w * 1.8
+        k = c.step("opacity:0", "opacity:1", at, 0.3)
+        label = text((a + b) / 2, sy + 10.5, f"{mins} min", "", 9.5, "middle", 600)
+        out.append(f'<g class="{k}" style="fill:var(--panel)">{label}</g>')
+    out.append(
+        legend(
+            x0,
+            PY + PH - 10,
+            [
+                ("var(--s1)", "thinking"),
+                ("var(--s3)", "files"),
+                ("var(--s2)", "make backfill-test"),
+            ],
+            10,
+        )
+    )
+    # The second run opens: an outline on its step, then its fold drops in.
+    a, b = X(st["start"][pick]), X(st["end"][pick])
+    ring_on = c.step("opacity:0", "opacity:1", 2.5, 0.3)
+    out.append(
+        f'<rect class="{ring_on}" x="{r(a - 1.5)}" y="{sy - 2.5}" width="{r(b - a + 2.4)}" '
+        f'height="{sh + 5}" rx="3" fill="none" stroke-width="1.8" style="stroke:var(--fg)"/>'
+    )
+    run = synthetic.test_output("events", 1, len(runs), 4000).splitlines()
+    error = next(x for x in run if x.startswith("E ") and "AssertionError" in x)
+    summary = next(x for x in run if " failed" in x and " passed" in x)
+    secs = round((st["end"][pick] - st["start"][pick]) / 1000)
+    lines = [
+        ("$ make backfill-test TABLE=events", "fg"),
+        (f"Exit code 2 · {secs // 60} min {secs % 60} s", "muted"),
+        ("E   " + error[1:].strip(), "clay"),
+        (summary.strip("= "), "muted"),
+    ]
+    bx, by, bw, bh = x0, sy + 26, 250, 62
+    drop = c.step(
+        "opacity:0;transform:scaleY(.4)",
+        "opacity:1;transform:scaleY(1)",
+        2.9,
+        0.35,
+        origin="50% 0",
+    )
+    box = [
+        f'<path d="M{r((a + b) / 2)} {sy + sh + 3}V{by}" stroke-width="1" '
+        'style="stroke:var(--border)"/>',
+        f'<rect x="{bx}" y="{by}" width="{bw}" height="{bh}" rx="6" '
+        'style="fill:var(--surface);stroke:var(--border)"/>',
+    ]
+    for j, (s, cls) in enumerate(lines):
+        k = c.step("opacity:0", "opacity:1", 3.3 + j * 0.35, 0.25)
+        box.append(
+            f'<g class="{k}">'
+            + text(bx + 9, by + 16 + j * 13, s, f"{cls} mono", 9.5, weight=600 if j == 0 else 400)
+            + "</g>"
+        )
+    out.append(f'<g class="{drop}">{"".join(box)}</g>')
+    # What reading that output cost: the next request, a full cache rewrite.
+    nxt = st["next"][pick]
+    k = c.step(
+        "opacity:0;transform:translateX(-6px)", "opacity:1;transform:translateX(0)", 4.9, 0.4
+    )
+    rx = bx + bw + 14
+    out.append(
+        f'<g class="{k}">'
+        + text(rx, by + 14, "next request", "muted", 10.5)
+        + text(rx, by + 34, usd(rq["usd"][nxt]), "clay", 18, weight=600)
+        + text(rx, by + 50, f"{rq['cache_write'][nxt] / 1e3:.0f}k tokens", "muted", 10)
+        + text(rx, by + 62, "written to cache", "muted", 10)
+        + "</g>"
+    )
+    body = '<g class="scene">' + "".join(out) + "</g>"
+    return card(
+        "Every step",
+        [
+            "One agent from spawn to hand-back: what it ran,",
+            "for how long, and what each step cost.",
+        ],
+        f"Every step: a coder agent's steps filling a strip left to right, three long test "
+        f"runs in orange; the second opens to its command, its failing test and exit code, "
+        f"beside the next request, {usd(rq['usd'][nxt])}.",
+        c.css(),
+        body,
+        defs,
     )
 
 
@@ -390,7 +695,11 @@ def checks(data: dict[str, Any]) -> str:
     total = ch["total"]
     weekly = round(total["usd_per_week"])
     kinds = [k for k in ch["rollups"] if not k["judgement_call"]]
-    rows = sorted(kinds, key=lambda k: -k["saving_usd_per_week"])[:4]
+    rows = sorted(kinds, key=lambda k: -k["saving_usd_per_week"])[:3]
+    applied = next((k for k in rows if k.get("applied")), None)
+    worked = next(
+        (m for m in data["changes"]["changes"] if applied and m["kind"] == applied["kind"]), None
+    )
     calls = total.get("judgement_calls") or {}
     x0, w = PX + 16, PW - 32
     # The total, its digits rolling up, and what it adds.
@@ -444,6 +753,22 @@ def checks(data: dict[str, Any]) -> str:
             )
             + "</g>"
         )
+        if k is applied:
+            cx = x0 + len(k["title"]) * 5.7 + 8
+            chip = c.step(
+                "opacity:0;transform:scale(.6)",
+                "opacity:1;transform:scale(1)",
+                2.6,
+                0.3,
+                ease="cubic-bezier(.3,1.6,.5,1)",
+                origin="50% 50%",
+            )
+            out.append(
+                f'<g class="{chip}"><rect x="{r(cx)}" y="{y - 9.5}" width="44" height="13" '
+                'rx="6.5" fill="none" style="stroke:var(--ok)"/>'
+                f'<text x="{r(cx + 22)}" y="{y}" font-size="9" font-weight="600" '
+                'text-anchor="middle" style="fill:var(--ok)">applied</text></g>'
+            )
         grow = c.step("transform:scaleX(0)", "transform:scaleX(1)", t + 0.2, 0.7, origin="0 0")
         bx, bars = x0, []
         full = w * k["saving_usd_per_week"] / top
@@ -457,8 +782,27 @@ def checks(data: dict[str, Any]) -> str:
         out.append(
             f'<g class="{grow}" style="opacity:{0.35 if overlap else 1}">' + "".join(bars) + "</g>"
         )
+    if worked and worked["verdict"] == "working":
+        y = PY + 46 + len(rows) * 20
+        on = datetime.fromisoformat(worked["applied_on"])
+        per = worked["measure"].replace(" 1,000 ", " 1k ")
+        per = per[0].lower() + per[1:]
+        wk = c.step(
+            "opacity:0;transform:translateY(-5px)", "opacity:1;transform:translateY(0)", 3.0, 0.4
+        )
+        out.append(
+            f'<g class="{wk}">'
+            f'<circle cx="{x0 + 5}" cy="{y - 3.5}" r="5" style="fill:var(--ok)"/>'
+            f'<path d="M{x0 + 2.6} {y - 3.6}l1.8 1.8l3 -3.6" fill="none" stroke-width="1.5" '
+            'stroke-linecap="round" stroke-linejoin="round" style="stroke:var(--panel)"/>'
+            f'<text x="{x0 + 15}" y="{y}" font-size="9.5">'
+            '<tspan font-weight="600" style="fill:var(--ok)">Worked</tspan>'
+            f'<tspan class="muted"> since {on:%b} {on.day}: {worked["before"]:.1f} → '
+            f"{worked['after']:.0f} {per}, "
+            f"{usd(worked['measured_usd_per_week'])}/wk saved</tspan></text></g>"
+        )
     if calls.get("findings"):
-        y = PY + 52 + len(rows) * 20
+        y = PY + 52 + (len(rows) + 1) * 20
         n = calls["findings"]
         jc = c.step("opacity:0", "opacity:1", 0.6 + len(rows) * 0.35 + 0.4, 0.4)
         out.append(
@@ -479,12 +823,20 @@ def checks(data: dict[str, Any]) -> str:
     return card(
         "Checks",
         [
-            "Setup habits by kind, ranked by what they cost a",
-            "week, net of a fresh start, with the change to make.",
+            "Setup habits ranked by what they cost a week, with",
+            "the change to make, and later whether it worked.",
         ],
         f"Checks: up to ${weekly} a week counting up, then one row per kind of habit, "
         + ", ".join(f"{k['title']} {usd(k['saving_usd_per_week'])}" for k in rows)
         + ", each bar split by the projects it spans; overlapping kinds are counted once"
+        + (
+            f"; {applied['title']} is marked applied, and it worked: "
+            f"{worked['before']:.1f} to {worked['after']:.0f} "
+            f"{worked['measure'][0].lower()}{worked['measure'][1:]}, "
+            f"{usd(worked['measured_usd_per_week'])} a week saved"
+            if applied and worked and worked["verdict"] == "working"
+            else ""
+        )
         + (
             f", and {calls['findings']} judgement call kept apart."
             if calls.get("findings")
@@ -623,171 +975,133 @@ def limits(data: dict[str, Any]) -> str:
     )
 
 
-def openclaw(data: dict[str, Any]) -> str:
+# Ask Roger's answer on the synthetic logs, about the largest spike, asked "What does
+# this show, and what stands out?" in `capcom serve`: Haiku through the claude CLI,
+# captured once (the card must not need a network call to build). Its numbers are
+# checked against the data below, so a change to the synthetic logs fails loudly.
+ASK_QUESTION = "What does this show, and what stands out?"
+ASK_ANSWER = (
+    "This part shows a $51.96 spike in quarry-etl, caused by the cache expiring during "
+    "long tool calls. The biggest cause is 12 requests that ran after a Bash call took "
+    "13 minutes, past the 5-minute cache lifetime, so 7.7M tokens were written again."
+)
+ASK_CHIPS = ["What is the prompt cache?", "How do I run long jobs safely?"]
+
+
+def wrap(s: str, width: int) -> list[str]:
+    lines, cur = [], ""
+    for word in s.split():
+        if cur and len(cur) + 1 + len(word) > width:
+            lines.append(cur)
+            cur = word
+        else:
+            cur = f"{cur} {word}" if cur else word
+    return [*lines, cur]
+
+
+def ask_roger(data: dict[str, Any]) -> str:
     c = Css()
-    del data
-    sources = [
-        ("Claude Code", "~/.claude", PY + 22),
-        ("OpenClaw", "~/.openclaw", PY + 86),
-    ]
+    s = max(data["spikes"]["spikes"], key=lambda x: x["excess_usd"])
+    if usd(s["excess_usd"]) not in ASK_ANSWER or s["project"] not in ASK_ANSWER:
+        raise SystemExit(
+            f"Ask Roger's kept answer no longer matches the top spike ({s['headline']}, "
+            f"{usd(s['excess_usd'])}): capture it again in capcom serve"
+        )
     out = []
-    for i, (name, path, y) in enumerate(sources):
-        k = c.step(
-            "opacity:0;transform:translateY(4px)",
-            "opacity:1;transform:translateY(0)",
-            0.4 + i * 0.3,
-            0.4,
-        )
-        out.append(
-            f'<g class="{k}"><rect x="{PX + 16}" y="{y}" width="104" height="42" rx="7" '
-            'style="fill:var(--surface);stroke:var(--border)"/>'
-            + text(PX + 26, y + 18, name, "fg", 11.5, weight=600)
-            + f'<text class="mono muted" x="{PX + 26}" y="{y + 33}" font-size="10">'
-            + f"{path}</text></g>"
-        )
-    lx0, lx1 = PX + 182, PX + PW - 16
-    lanes = [
-        (
-            "your sessions",
-            "var(--s1)",
-            PY + 36,
-            0,
-            [(0.02, 0.2), (0.3, 0.52), (0.63, 0.75), (0.84, 0.97)],
-        ),
-        (
-            "OpenClaw, through Claude Code",
-            "var(--s2)",
-            PY + 80,
-            0,
-            [(0.12, 0.3), (0.46, 0.58), (0.7, 0.92)],
-        ),
-        (
-            "OpenClaw, straight to a provider",
-            "var(--s3)",
-            PY + 124,
-            1,
-            [(0.05, 0.16), (0.24, 0.4), (0.55, 0.66), (0.78, 0.88)],
-        ),
-    ]
-    for i, (label, color, y, src, spans) in enumerate(lanes):
-        sy = sources[src][2] + 21
-        t = 1.2 + i * 0.45
-        flow = c.step("stroke-dashoffset:120", "stroke-dashoffset:0", t, 0.6, ease="ease-in-out")
-        mx = (PX + 120 + lx0) / 2
-        out.append(
-            f'<path class="{flow}" d="M{PX + 121} {sy}C{r(mx)} {sy} {r(mx)} {y} {lx0 - 6} {y}" '
-            f'fill="none" stroke-width="1.5" stroke-dasharray="120" style="stroke:{color}"/>'
-        )
-        lab = c.step("opacity:0", "opacity:1", t + 0.3, 0.4)
-        out.append(f'<g class="{lab}">' + text(lx0, y - 9, label, "muted", 10) + "</g>")
-        out.append(
-            f'<line x1="{lx0}" y1="{y + 0.5}" x2="{lx1}" y2="{y + 0.5}" '
-            'style="stroke:var(--border)"/>'
-        )
-        for j, (a, b) in enumerate(spans):
-            bx = lx0 + a * (lx1 - lx0)
-            k = c.step(
-                "transform:scaleX(0)",
-                "transform:scaleX(1)",
-                t + 0.6 + j * 0.18,
-                0.4,
-                origin="0 50%",
-            )
-            out.append(
-                f'<rect class="{k}" x="{r(bx)}" y="{y - 4}" width="{r((b - a) * (lx1 - lx0))}" '
-                f'height="8" rx="2" style="fill:{color}"/>'
-            )
-    body = '<g class="scene">' + "".join(out) + "</g>"
-    return card(
-        "OpenClaw",
-        [
-            "Its Claude Code sessions and its direct calls to",
-            "model providers, on the same timeline, read-only.",
-        ],
-        "OpenClaw: Claude Code's logs and OpenClaw's feed three lanes of one timeline: your own "
-        "sessions, OpenClaw's sessions through Claude Code, and OpenClaw's calls straight to a "
-        "model provider.",
-        c.css(),
-        body,
+    x0 = PX + 16
+    about = c.step("opacity:0", "opacity:1", 0.3, 0.3)
+    out.append(
+        f'<g class="{about}">'
+        + text(x0, PY + 20, "About", "muted", 10)
+        + text(x0 + 32, PY + 20, s["headline"], "fg", 10, weight=600)
+        + "</g>"
     )
-
-
-def trust(data: dict[str, Any]) -> str:
-    c = Css()
-    rows = [x for x in data["calibrate"] if x["scope"] == "comparable"]
-    cs = sum(x["cost_state"] for x in rows)
-    cc = sum(x["capcom"] for x in rows)
-    spread = (cc - cs) / cs * 100
-    x0, y0, w = PX + 16, PY + 26, PW - 32
-    lw = 120
-    out = []
-    for i, (label, v, color) in enumerate(
-        [("Claude Code's own", cs, "var(--muted)"), ("capcom", cc, "var(--accent)")]
-    ):
-        y = y0 + i * 24
-        full = (w - lw - 70) * v / max(cs, cc)
+    # The question, a bubble on the right.
+    qw = len(ASK_QUESTION) * 5.5 + 20
+    qx = PX + PW - 16 - qw
+    ask = c.step(
+        "opacity:0;transform:translateY(5px)", "opacity:1;transform:translateY(0)", 0.7, 0.35
+    )
+    out.append(
+        f'<g class="{ask}"><rect x="{r(qx)}" y="{PY + 25}" width="{r(qw)}" height="20" '
+        f'rx="10" style="fill:var(--clay)"/>'
+        f'<text x="{r(qx + qw / 2)}" y="{PY + 39}" font-size="10.5" text-anchor="middle" '
+        f'style="fill:var(--panel)">{escape(ASK_QUESTION)}</text></g>'
+    )
+    # Roger waves, and his answer types in beside him.
+    rw = 40
+    lines = wrap(ASK_ANSWER, 66)
+    bx, by = PX + 62, PY + 50
+    bw, bh = PX + PW - 16 - bx, 16 + 13 * len(lines)
+    _, vy, vw, _ = roger.VIEWBOX
+    rx_, ry_ = PX + 14, by + bh - (roger.feet() - vy) * rw / vw  # his feet on the bubble's base
+    bub = c.step(
+        "opacity:0;transform:scale(.9)", "opacity:1;transform:scale(1)", 1.4, 0.3, origin="0 100%"
+    )
+    out.append(
+        roger.group(rx_, ry_, rw)
+        + f'<g class="{bub}"><rect x="{r(bx)}" y="{by}" width="{r(bw)}" height="{bh}" rx="9" '
+        'style="fill:var(--surface);stroke:var(--border)"/>'
+        f'<path d="M{r(bx + 0.5)} {by + bh - 16}l-7 8l7 -2z" style="fill:var(--surface)"/></g>'
+    )
+    t = 1.8
+    clips = []
+    for j, line in enumerate(lines):
+        d = len(line) * 0.018
         k = c.step(
             "transform:scaleX(0)",
             "transform:scaleX(1)",
-            0.4 + i * 0.15,
-            2.2,
-            ease="cubic-bezier(.3,.6,.3,1)",
+            t,
+            d,
+            ease=f"steps({len(line)})",
             origin="0 0",
         )
-        out.append(text(x0, y + 4, label, "fg" if i else "muted", 11, weight=600 if i else 400))
-        out.append(
-            f'<rect class="{k}" x="{x0 + lw}" y="{y - 6}" width="{r(full)}" height="12" '
-            f'rx="3" style="fill:{color};fill-opacity:{1 if i else 0.55}"/>'
-        )
-        n = c.step("opacity:0", "opacity:1", 2.4, 0.4)
-        out.append(f'<g class="{n}">' + text(x0 + lw + full + 6, y + 4, usd(v), "fg", 11) + "</g>")
-    # Each comparable session's spread on a -5..+5 % strip, landing inside the 2 % band.
-    sy = y0 + 76
-    sx0, sw = x0 + 30, w - 60
-    S = lambda p: sx0 + (p + 5) / 10 * sw  # noqa: E731
-    band = c.step("opacity:0", "opacity:1", 2.7, 0.5)
-    out.append(
-        f'<rect class="{band}" x="{r(S(-2))}" y="{sy - 14}" width="{r(S(2) - S(-2))}" '
-        'height="28" rx="4" style="fill:var(--ok);fill-opacity:.16"/>'
-    )
-    out.append(
-        f'<line x1="{sx0}" y1="{sy}" x2="{sx0 + sw}" y2="{sy}" style="stroke:var(--border)"/>'
-    )
-    for p in (-5, -2, 0, 2, 5):
-        out.append(
-            f'<line x1="{r(S(p))}" y1="{sy - 3}" x2="{r(S(p))}" y2="{sy + 3}" '
-            'style="stroke:var(--border)"/>'
-        )
-        out.append(text(S(p), sy + 26, f"{p:+d} %" if p else "0", "muted", 10, "middle"))
-    for i, row in enumerate(rows):
-        jitter = ((i * 7) % 5 - 2) * 2.2
-        start = -4.6 + (i * 37 % 92) / 10
-        k = c.step(
-            f"transform:translate({r(S(start) - S(row['spread']))}px,-22px);opacity:0",
-            "transform:translate(0,0);opacity:1",
-            1.0 + i * 0.08,
-            0.9,
-            ease="cubic-bezier(.3,.8,.3,1)",
+        clips.append(
+            f'<clipPath id="arc{j}"><rect class="{k}" x="{r(bx + 8)}" y="{by + 3 + j * 13}" '
+            f'width="{r(bw - 12)}" height="13"/></clipPath>'
         )
         out.append(
-            f'<circle class="{k}" cx="{r(S(row["spread"]))}" cy="{r(sy + jitter)}" '
-            'r="3" style="fill:var(--accent);fill-opacity:.85"/>'
+            f'<g clip-path="url(#arc{j})">'
+            + text(bx + 10, by + 14 + j * 13, line, "fg", 10)
+            + "</g>"
         )
-    lab = c.step("opacity:0", "opacity:1", 3.2, 0.4)
-    out.append(
-        f'<g class="{lab}">'
-        + text(S(2) + 8, sy - 6, "within 2 %", "fg", 11.5, weight=600)
-        + text(S(2) + 8, sy + 8, f"{len(rows)} sessions", "muted", 10.5)
-        + "</g>"
+        t += d + 0.05
+    cx = bx
+    chips = []
+    for j, chip in enumerate(ASK_CHIPS):
+        cw = len(chip) * 4.9 + 16
+        k = c.step("opacity:0", "opacity:1", t + 0.2 + j * 0.2, 0.3)
+        chips.append(
+            f'<g class="{k}"><rect x="{r(cx)}" y="{by + bh + 6}" width="{r(cw)}" height="17" '
+            'rx="8.5" fill="none" style="stroke:var(--border)"/>'
+            + text(cx + cw / 2, by + bh + 18, chip, "muted", 9.5, "middle")
+            + "</g>"
+        )
+        cx += cw + 6
+    out += chips
+    arm = roger.on_loop("arm", [1.0])
+    eyes = roger.on_loop("eyes", [1.0, 5.5])
+    _, _, ease = roger.motion("arm")
+    css = (
+        c.css()
+        + roger.theme_css()
+        + f".rg-arm{{animation:rg-arm {r(LOOP, 2)}s {ease} infinite}}"
+        + keyframes("rg-arm", LOOP, arm)
+        + f".rg-eyes{{animation:rg-eyes {r(LOOP, 2)}s {ease} infinite}}"
+        + keyframes("rg-eyes", LOOP, eyes)
     )
     body = '<g class="scene">' + "".join(out) + "</g>"
     return card(
-        "Trust",
-        ["Checked against Claude Code's own cost records,", "session by session."],
-        f"Trust: capcom's total ({usd(cc)}) against Claude Code's own ({usd(cs)}), "
-        f"{spread:+.1f} %, and each session's spread landing within 2 %.",
-        c.css(),
+        "Ask Roger",
+        [
+            "Ask about any chart or number on the page: a",
+            "plain answer from capcom's own totals, if you opt in.",
+        ],
+        f"Ask Roger: the mascot waves as a question about the largest spike gets a typed "
+        f"answer: {ASK_ANSWER}",
+        css,
         body,
+        defs="".join(clips),
     )
 
 
@@ -815,9 +1129,9 @@ def private(data: dict[str, Any]) -> str:
         'style="fill:var(--panel)"/>',
     ]
     rows = [
-        ("Reads the logs read-only", "never writes, moves or locks them"),
-        ("Makes no network requests", "prices ship with it"),
-        ("Nothing leaves your machine", "the website is on 127.0.0.1"),
+        ("Reads your logs read-only", "never writes, moves or locks them"),
+        ("No network", "Ask Roger only, when you turn it on"),
+        ("Tool details read live", "never stored, cached or exported"),
     ]
     x0 = PX + 140
     for i, (head, sub) in enumerate(rows):
@@ -846,8 +1160,9 @@ def private(data: dict[str, Any]) -> str:
             "Your logs hold your conversations: capcom reads",
             "them where they are and keeps it all local.",
         ],
-        "Private: a padlock snapping shut beside three checks: reads the logs "
-        "read-only, makes no network requests, nothing leaves your machine.",
+        "Private: a padlock snapping shut beside three checks: reads your logs "
+        "read-only, no network (Ask Roger only, when you turn it on), tool details read "
+        "live and never stored.",
         c.css(),
         body,
     )
@@ -856,11 +1171,11 @@ def private(data: dict[str, Any]) -> str:
 CARDS: dict[str, Callable[[dict[str, Any]], str]] = {
     "adding-up": adding_up,
     "why": why,
-    "fan-out": fan_out,
+    "timeline": timeline,
+    "every-step": every_step,
     "checks": checks,
     "limits": limits,
-    "openclaw": openclaw,
-    "trust": trust,
+    "ask-roger": ask_roger,
     "private": private,
 }
 

@@ -2,7 +2,7 @@
 # Points the `assets` branch at one new parentless commit holding the README's
 # media, as built into .github/assets/ by build_all.py:
 #
-#   python .github/scripts/build_all.py
+#   python .github/scripts/build_all.py --video PATH/TO/capcom-tour.mp4
 #   .github/scripts/publish-assets.sh
 #   git push --force-with-lease origin assets
 #
@@ -15,7 +15,7 @@ set -eu
 
 root=$(git rev-parse --show-toplevel)
 dir="$root/.github/assets"
-files="banner.svg demo-light.webp demo-dark.webp demo-light.png demo-dark.png feature-adding-up.svg feature-why.svg feature-fan-out.svg feature-checks.svg feature-limits.svg feature-openclaw.svg feature-trust.svg feature-private.svg"
+files="banner.svg demo-light.webp demo-dark.webp demo-light.png demo-dark.png feature-adding-up.svg feature-why.svg feature-timeline.svg feature-every-step.svg feature-checks.svg feature-limits.svg feature-ask-roger.svg feature-private.svg video-poster.png"
 
 GIT_INDEX_FILE=$(mktemp -u "${TMPDIR:-/tmp}/capcom-assets-index.XXXXXX")
 export GIT_INDEX_FILE

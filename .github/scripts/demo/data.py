@@ -2,15 +2,16 @@
 
     python .github/scripts/demo/data.py <work-dir>
 
-Fills <work-dir>/claude with synthetic.py's two weeks, then runs capcom with
-CLAUDE_CONFIG_DIR, XDG_CACHE_HOME, XDG_STATE_HOME and OPENCLAW_STATE_DIR inside
-<work-dir> (never the real ~/.claude, ~/.openclaw, ~/.cache/capcom or
-~/.local/state/capcom) and HOME set to the made-up /home/dev, so project paths
-read ~/code/<name>. It scans, has limits.py play the status-line recorder over the
-same weeks (so the usage windows have samples), then asks a `capcom serve` on
-127.0.0.1 for what the website shows (the same JSON API) and keeps it in
-<work-dir>/data.json, with `capcom calibrate`'s table. The banner, the cards and
-the demo all draw from that file or that server.
+Fills <work-dir>/claude with synthetic.py's four weeks, then runs capcom with
+CLAUDE_CONFIG_DIR, XDG_CACHE_HOME, XDG_STATE_HOME, XDG_DATA_HOME and
+OPENCLAW_STATE_DIR inside <work-dir> (never the real ~/.claude, ~/.openclaw,
+~/.cache/capcom, ~/.local/state/capcom or ~/.local/share/capcom) and HOME set to the
+made-up /home/dev, so project paths read ~/code/<name>. It scans, marks the fix
+synthetic.py's history weeks stop on (`capcom mark`, for Did it work?), has
+limits.py play the status-line recorder over the same weeks (so the usage windows
+have samples), then asks a `capcom serve` on 127.0.0.1 for what the website shows
+(the same JSON API) and keeps it in <work-dir>/data.json, with `capcom calibrate`'s
+table. The banner, the cards and the demo all draw from that file or that server.
 """
 
 from __future__ import annotations
@@ -37,6 +38,9 @@ import synthetic
 FAKE_HOME = "/home/dev"
 
 
+DATA_HOME = ".local/share"
+
+
 def sandbox_env(work: Path) -> dict[str, str]:
     """The environment capcom runs in: every root it reads or writes inside `work`."""
     env = dict(os.environ)
@@ -46,6 +50,9 @@ def sandbox_env(work: Path) -> dict[str, str]:
         CLAUDE_CONFIG_DIR=str(work / "claude"),
         XDG_CACHE_HOME=str(work / "cache"),
         XDG_STATE_HOME=str(work / "state"),
+        # Relative to `work` (capcom always runs there): Did it work? prints where the
+        # marks live, and this reads like the default, not the build's temp folder.
+        XDG_DATA_HOME=DATA_HOME,
         OPENCLAW_STATE_DIR=str(work / "openclaw"),
         HOME=FAKE_HOME,
     )
@@ -123,8 +130,8 @@ def calibration(text: str) -> list[dict[str, Any]]:
 
 def build(work: Path, now: datetime | None = None) -> dict[str, Any]:
     work.mkdir(parents=True, exist_ok=True)
-    for d in ("cache", "openclaw", "state"):
-        (work / d).mkdir(exist_ok=True)
+    for d in ("cache", DATA_HOME, "openclaw", "state"):
+        (work / d).mkdir(parents=True, exist_ok=True)
     now = now or datetime.now(UTC)
     if not (work / "claude" / "projects").exists():
         facts = synthetic.generate(work / "claude", now)
@@ -132,6 +139,9 @@ def build(work: Path, now: datetime | None = None) -> dict[str, Any]:
         facts = json.loads((work / "claude" / "synthetic.json").read_text())
     (work / "claude" / "synthetic.json").write_text(json.dumps(facts, indent=1))
     capcom(work, "scan")
+    marked = facts.get("marked")
+    if marked and not (work / DATA_HOME / "capcom" / "changes.jsonl").exists():
+        capcom(work, "mark", marked["finding"], "--on", marked["on"])
     data: dict[str, Any] = {"facts": facts}
     data["calibrate"] = calibration(capcom(work, "calibrate"))
     with serve(work) as base:
@@ -142,9 +152,23 @@ def build(work: Path, now: datetime | None = None) -> dict[str, Any]:
             data[f"spend_{group}"] = get(base, f"/api/spend?days=14&group={group}")
         data["spikes"] = get(base, "/api/spikes?days=14")
         data["checks"] = get(base, "/api/checks?days=14")
+        data["changes"] = get(base, "/api/changes")
+        # the day of the largest spike, hour by hour (the Adding up card's drill-down)
+        top = max(data["spikes"]["spikes"], key=lambda x: x["excess_usd"])
+        data["spike_day"] = get(base, f"/api/spend?day={top['start'][:10]}&group=project")
+        idle = facts["sessions"].get("idle")
+        if idle:
+            data["idle_session"] = get(base, f"/api/session/{idle}")
         fan = facts["sessions"].get("fan-out")
         if fan:
             data["fan_out_session"] = get(base, f"/api/session/{fan}")
+        wait = facts["sessions"].get("tool-wait")
+        if wait:
+            sess = get(base, f"/api/session/{wait}")
+            data["tool_wait_session"] = sess
+            # the coder the demo and the cards open: the first, backfilling events
+            coder = next(a for a in sess["agents"] if a["agent_type"] == "coder")
+            data["coder_agent"] = get(base, f"/api/agent/{wait}?agent={coder['agent_id']}")
     (work / "data.json").write_text(json.dumps(data, indent=1))
     return data
 
