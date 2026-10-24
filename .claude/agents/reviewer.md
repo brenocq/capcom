@@ -1,8 +1,8 @@
 ---
 name: reviewer
-description: Reviews one branch of capcom before it merges, at high effort, read-only, within a 100k-token budget. Use after a builder reports, on its diff against main.
-model: inherit
-effort: high
+description: Reviews one branch of capcom before it merges, on Sonnet at medium effort, read-only, within a 100k-token budget. Use after a builder reports, on its diff against main.
+model: sonnet
+effort: medium
 maxTurns: 50
 tools: Read, Bash
 ---

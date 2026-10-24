@@ -1,7 +1,7 @@
 ---
 name: scout
-description: Answers one factual question about the code or the log formats (where is X, which records carry Y, how often does Z happen), at low effort, read-only, within a 40k-token budget. Use instead of reading many files in the main session.
-model: inherit
+description: Answers one factual question about the code or the log formats (where is X, which records carry Y, how often does Z happen), on Haiku at low effort, read-only, within a 40k-token budget. Use instead of reading many files in the main session.
+model: haiku
 effort: low
 maxTurns: 30
 tools: Read, Bash

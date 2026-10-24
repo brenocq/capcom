@@ -1,7 +1,7 @@
 ---
 name: fixer
-description: Fixes one bug or makes one small, well-specified change in capcom, at medium effort, within an 80k-token conversation budget. Use when the cause or the change is already known.
-model: inherit
+description: Fixes one bug or makes one small, well-specified change in capcom, on Sonnet at medium effort, within an 80k-token conversation budget. Use when the cause or the change is already known.
+model: sonnet
 effort: medium
 maxTurns: 60
 tools: Read, Edit, Write, Bash

@@ -1,7 +1,7 @@
 ---
 name: analyst
-description: Runs capcom on the real logs and judges its output (do the totals match Claude Code's own cost records, are the spike explanations and setup warnings right and useful), at medium effort, within a 100k-token budget. Use at each milestone's end.
-model: inherit
+description: Runs capcom on the real logs and judges its output (do the totals match Claude Code's own cost records, are the spike explanations and setup warnings right and useful), on Sonnet at medium effort, within a 100k-token budget. Use at each milestone's end.
+model: sonnet
 effort: medium
 maxTurns: 50
 tools: Read, Bash
