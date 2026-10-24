@@ -858,6 +858,10 @@ tr.agfoldrow > td { padding-top: 0; padding-bottom: 10px; background: var(--sel)
 .agdiff .add { color: var(--sc-green); }
 .agdiff .agsep { color: var(--muted); }
 .agall { justify-self: start; font-size: 12px; }
+.agreply { max-width: 760px; }
+.agprose { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); font-size: 13px; line-height: 1.55; max-height: 420px; overflow: auto; }
+.agsummary { color: var(--muted); font-style: italic; max-height: none; }
+.agnothink { margin: 0; font-size: 11.5px; }
 .agthink { background: var(--card); border: 1px solid var(--l12); border-radius: 8px; padding: 8px 12px; max-width: 520px; }
 table.agtok { border-collapse: collapse; width: 100%; font-size: 12px; }
 table.agtok th, table.agtok td { padding: 3px 8px 3px 0; text-align: left; font-weight: 400; }

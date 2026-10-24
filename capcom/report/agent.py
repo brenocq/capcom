@@ -736,7 +736,8 @@ def timeline_json(
 ) -> dict[str, Any]:
     """Steps, requests and phases as columns and rows, times in epoch ms. `parts`:
     each request's cost by token kind (input, cache_read, cache_write_5m,
-    cache_write_1h, output, web), for a thinking step's fold."""
+    cache_write_1h, output, web), for a thinking step's fold, which also asks
+    `capcom serve` for what the request wrote by its message id (`id`)."""
     step_cols: dict[str, list[Any]] = {
         k: []
         for k in (
@@ -773,7 +774,16 @@ def timeline_json(
     keys = ("t", "context", "usd", "output", "cache_read", "cache_write", "estimated")
     req_cols: dict[str, list[Any]] = {
         k: []
-        for k in (*keys, "input", "cache_write_5m", "cache_write_1h", "thinking", "model", "parts")
+        for k in (
+            *keys,
+            "input",
+            "cache_write_5m",
+            "cache_write_1h",
+            "thinking",
+            "model",
+            "parts",
+            "id",
+        )
     }
     for n, (r, usd) in enumerate(zip(reqs, costs, strict=True)):
         u = r.usage
@@ -782,6 +792,7 @@ def timeline_json(
         req_cols["cache_write_1h"].append(u.cache_write_1h)
         req_cols["thinking"].append(u.thinking)
         req_cols["model"].append(r.model)
+        req_cols["id"].append(r.message_id)  # a thinking fold asks /api/reply by it
         req_cols["parts"].append(
             {k: round(v, 6) for k, v in parts[n].items()} if parts is not None else None
         )

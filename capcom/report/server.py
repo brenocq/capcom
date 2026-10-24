@@ -18,9 +18,10 @@ behind the part (`askfacts.py`), and the CLI may look up more through capcom's o
 read-only MCP server (`asktools.py`). It writes nothing, so it stays on under
 `--read-only`.
 
-`GET /api/tool/<session>` (`tooldetail.py`), the agent page's step fold, is the one
-reply with text from the logs: one tool call, read from its log file when asked,
-behind the same token, and never cached.
+`GET /api/tool/<session>` and `GET /api/reply/<session>` (`tooldetail.py`), the
+agent page's step fold, are the only replies with text from the logs: one tool
+call, or one request's reply text and thinking summary, read from its log file when
+asked, behind the same token, and never cached.
 
 API replies are cached per index generation (`ApiCache`): the key holds the index
 files' sizes and modification times and the index's `PRAGMA data_version` on a held
@@ -1002,8 +1003,8 @@ class Handler(BaseHTTPRequestHandler):
         if route.strip("/") == "version":  # the pages' 10 s look for news: never a job
             self._json(HTTPStatus.OK, version(self.site))
             return
-        if name == "tool" and len(parts) == 2:
-            self._tool(parts[1], query)
+        if name in ("tool", "reply") and len(parts) == 2:
+            self._from_log(name, parts[1], query)
             return
         if name in MAY_ARG and len(parts) == 2 and not parts[1]:
             parts = parts[:1]
@@ -1022,11 +1023,13 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             site.jobs.user_end()
 
-    def _tool(self, session_id: str, query: dict[str, str]) -> None:
+    def _from_log(self, name: str, session_id: str, query: dict[str, str]) -> None:
         """GET /api/tool/<session>?agent=<id or main>&id=<tool_use_id>: one tool
-        call's input and result, read from its log file now (`tooldetail.py`). It
-        needs this launch's token, as a header (no other site's page can send it),
-        and it is never cached: the logs' text goes to the page and nowhere else."""
+        call's input and result; GET /api/reply/<session>?agent=&id=<message_id>:
+        one request's reply text and thinking summary. Read from the thread's log
+        file now (`tooldetail.py`). It needs this launch's token, as a header (no
+        other site's page can send it), and it is never cached: the logs' text goes
+        to the page and nowhere else."""
         site = self.site
         token = self.headers.get(TOKEN_HEADER) or ""
         if not site.log_roots:
@@ -1040,11 +1043,12 @@ class Handler(BaseHTTPRequestHandler):
         except IndexMissing as err:
             self._error(HTTPStatus.SERVICE_UNAVAILABLE, "no_index", str(err))
             return
+        find = tooldetail.lookup if name == "tool" else tooldetail.reply_lookup
         try:
             agent = query.get("agent") or "main"
             hint = tooldetail.hint_of(query.get("t"))
-            tid = query.get("id", "")
-            found = tooldetail.lookup(index, session_id, agent, tid, site.log_roots, hint)
+            key = query.get("id", "")
+            found = find(index, session_id, agent, key, site.log_roots, hint)
             self._json(HTTPStatus.OK, found)
         except ValueError:
             self._error(HTTPStatus.BAD_REQUEST, "bad_request", "Malformed id.")
@@ -1052,7 +1056,9 @@ class Handler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, err.code, err.message)
         except sqlite3.Error:
             self._error(
-                HTTPStatus.SERVICE_UNAVAILABLE, "index_busy", "The index could not be read."
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "index_busy",
+                "The index is busy (a scan is writing it). Try again in a moment.",
             )
         finally:
             index.close()

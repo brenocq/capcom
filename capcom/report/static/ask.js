@@ -124,13 +124,13 @@ export function mascot(size, mini = false) {
 // (their titles come from the logs), the user's own notes, pasted config.
 const DROP = [
   '.askmark', 'button', 'form', 'pre', 'svg', 'input', 'textarea', 'select', 'script', 'style',
-  '.facts', '.evidence', '.tooltext', 'details.astable', 'table', '.usernote', '.markform', '.tip', '[hidden]',
+  '.facts', '.evidence', '.tooltext', '.replytext', 'details.astable', 'table', '.usernote', '.markform', '.tip', '[hidden]',
   '.detail .tags > .note', '.spikelist', '.spikerow .meta', '.lab .what', '.privname', '.ylab', '.wx', '.histlabs', '.thrlab', '.legend',
 ].join(',');
 
 // The private pieces of a page, by what they are: text from the logs (session
 // titles, a subagent's spawn description, evidence rows, an opened tool fold's
-// call and output) or the user's own (notes,
+// call and output, an opened thinking fold's reply text and summary) or the user's own (notes,
 // pasted config, what is typed in a field). A selection never sends them, only
 // their kind (capcom/report/ask.py, LEFT_OUT, takes only these names).
 const PRIVATE = [
@@ -138,6 +138,7 @@ const PRIVATE = [
   ['.lab .what, .privname', 'agent names'],
   ['.facts, .evidence', 'evidence rows'],
   ['.tooltext', 'tool details'],
+  ['.replytext', 'reply text'],
   ['.usernote, .markform, input, textarea, select, [contenteditable]', 'your notes'],
   ['pre', 'pasted config'],
 ];
@@ -161,7 +162,7 @@ const CELL_DROP = '.tip, [hidden], script, style, svg, .askmark';
 const PRIVATE_CELL = [
   ['a[href^="/session/"], a[href^="/session?"], .spikelist .meta, .spikerow .meta, .detail .tags > .note', 'a session'],
   ['.lab .what, .privname', 'an agent'],
-  ['.facts, .evidence, .tooltext, .usernote, .markform, input, textarea, select, [contenteditable], pre', '[left out]'],
+  ['.facts, .evidence, .tooltext, .replytext, .usernote, .markform, input, textarea, select, [contenteditable], pre', '[left out]'],
 ];
 function cellText(c) {
   for (const [sel, say] of PRIVATE_CELL) if (c.matches(sel) || c.querySelector(sel)) return say;
