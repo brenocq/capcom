@@ -412,6 +412,8 @@ class Facts:
         name = name.lstrip("/")
         files = definitions(name, what, self.roots(), self.claude_root())
         out: dict[str, Any] = {"name": name, "kind": what, "defined_in": files}
+        if len(files) > 1:
+            out["precedence"] = PRECEDENCE
         if not files:
             out["message"] = (
                 f"No file defining the {what} {name} was found in the projects' .claude "
@@ -419,12 +421,19 @@ class Facts:
                 "into Claude Code."
             )
         if what == "agent":
-            out["spawned_in"] = self.spawned_in(name)
+            out["spawned_in"] = self.spawned_in(name, defs=files)
         return out
 
-    def spawned_in(self, agent_type: str, limit: int = MAX_ROWS) -> list[dict[str, Any]]:
-        """The projects whose sessions spawned subagents of `agent_type`, most first."""
+    def spawned_in(
+        self,
+        agent_type: str,
+        limit: int = MAX_ROWS,
+        defs: Sequence[Mapping[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """The projects whose sessions spawned subagents of `agent_type`, most first;
+        with its definitions `defs`, the one Claude Code uses in each."""
         counts: dict[str, list[Any]] = {}
+        folders: dict[str, set[str]] = {}
         for a in self.agents.values():
             if (a.agent_type or "") != agent_type:
                 continue
@@ -432,13 +441,22 @@ class Facts:
             if info is None:
                 continue
             key, label, path = self.project(info.project_dir)
-            row = counts.setdefault(key, [label, path, 0, set()])
+            row = counts.setdefault(key, [label, path, 0, set(), key])
             row[2] += 1
             row[3].add(a.session_id)
+            got = folders.setdefault(key, set())
+            got.add(info.cwd or "")
+            got.add(self.names.paths.get(info.project_dir) or "")
         rows = sorted(counts.values(), key=lambda r: (-r[2], r[0]))[:limit]
-        return [
-            {"project": r[0], "folder": r[1], "spawns": r[2], "sessions": len(r[3])} for r in rows
-        ]
+        out = []
+        for r in rows:
+            item: dict[str, Any] = {
+                "project": r[0], "folder": r[1], "spawns": r[2], "sessions": len(r[3])
+            }  # fmt: skip
+            if defs:
+                item["uses"] = used_in(defs, folders[r[4]])
+            out.append(item)
+        return out
 
     def roots(self) -> list[Path]:
         """The folders whose `.claude/` may define agents, skills and commands: the
@@ -556,18 +574,20 @@ class Facts:
         if files:
             out.append(
                 f"The {agent_type} agent is defined in: "
-                + "; ".join(f"{f['path']} ({_level(f)})" for f in files[:4])
+                + "; ".join(f"{f['path']} ({_level(f)}; {f['use']})" for f in files[:4])
                 + "."
+                + (f" {PRECEDENCE}" if len(files) > 1 else "")
             )
         else:
             out.append(f"No file defining the {agent_type} agent was found (it may be built in).")
-        spawned = self.spawned_in(agent_type, CONTEXT_ROWS)
+        spawned = self.spawned_in(agent_type, CONTEXT_ROWS, defs=files)
         if spawned:
             out.append(
                 "Spawned in: "
                 + "; ".join(
                     f"{r['project']} ({r['folder']}), "
                     f"{r['spawns']} spawns in {r['sessions']} sessions"
+                    + (f", using {r['uses']}" if len(files) > 1 and r.get("uses") else "")
                     for r in spawned
                 )
                 + "."
@@ -628,7 +648,7 @@ def _level(f: Mapping[str, Any]) -> str:
         return f"a project {f['what']}, in {f.get('project') or 'a project'}"
     if f["level"] == "plugin":
         return f"from the plugin {f.get('plugin')}"
-    return f"a user {f['what']}, for every project"
+    return f"a user {f['what']}, in ~/.claude"
 
 
 def _numbers(metrics: Mapping[str, AttrValue], limit: int = 8) -> dict[str, float]:
@@ -709,7 +729,54 @@ def definitions(
             if plug:
                 row["plugin"] = plug
             found.append(row)
+    return _ranked(found)
+
+
+PRECEDENCE = (
+    "Claude Code uses a project's own file first, then the user's ~/.claude, then a plugin's."
+)
+_ORDER = {"project": 0, "user": 1, "plugin": 2}
+
+
+def _ranked(found: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`found` with the one Claude Code uses first (a project's own file overrides
+    the user's, which overrides a plugin's), each saying where it is used."""
+    found = sorted(found, key=lambda r: _ORDER[r["level"]])  # stable: roots' order kept
+    projects = [r.get("project") or "a project" for r in found if r["level"] == "project"]
+    user = any(r["level"] == "user" for r in found)
+    for r in found:
+        if r["level"] == "project":
+            r["use"] = f"the one used in {r.get('project') or 'its project'}"
+            r["overridden"] = False
+        elif r["level"] == "user":
+            r["overridden"] = bool(projects)
+            r["use"] = (
+                f"overridden in {', '.join(projects)} by the project's own file; "
+                "used in every other project"
+                if projects
+                else "the one used in every project"
+            )
+        else:
+            r["overridden"] = user or bool(projects)
+            if user:
+                r["use"] = "overridden by the user's file"
+            elif projects:
+                r["use"] = f"overridden in {', '.join(projects)}; used in every other project"
+            else:
+                r["use"] = "the one used"
     return found
+
+
+def used_in(defs: Sequence[Mapping[str, Any]], folders: Iterable[str]) -> str | None:
+    """The path of the definition Claude Code uses in a project with these folders."""
+    dirs = [Path(f) / ".claude" for f in folders if f and f.startswith("/")]
+    for r in defs:
+        if r["level"] == "project" and any(Path(r["path"]).is_relative_to(d) for d in dirs):
+            return str(r["path"])
+    for r in defs:
+        if r["level"] != "project":
+            return str(r["path"])
+    return None
 
 
 def _candidates(base: Path, name: str, what: str) -> list[Path]:

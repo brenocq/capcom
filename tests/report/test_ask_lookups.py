@@ -116,7 +116,7 @@ def test_the_cli_gets_the_facts_and_looks_up_with_capcoms_tools_only(
     # the prompt: the part, then what stands behind it from the index
     prompt = run["prompt"]
     assert "<facts>" in prompt and "marked applied on 2026-10-15" in prompt
-    assert "fixer.md (a project agent, in proj-a)" in prompt
+    assert "fixer.md (a project agent, in proj-a; the one used in proj-a)" in prompt
     for s in SECRETS:
         assert s not in prompt and s not in text
     argv = run["argv"]

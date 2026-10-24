@@ -21,7 +21,14 @@ import pytest
 from capcom.cost.prices import load_prices
 from capcom.report.analysis import Analysis
 from capcom.report.api import Context
-from capcom.report.askfacts import MAX_CONTEXT, Facts, FactsError, clip, definitions
+from capcom.report.askfacts import (
+    MAX_CONTEXT,
+    PRECEDENCE,
+    Facts,
+    FactsError,
+    clip,
+    definitions,
+)
 from capcom.store.index import open_index
 from capcom.timeline.groups import folder_name
 from capcom.types import (
@@ -360,13 +367,17 @@ def test_where_defined_agents_skills_commands_and_plugins(facts: Facts, world: W
             "level": "project",
             "what": "agent",
             "project": "proj-a",
+            "use": "the one used in proj-a",
+            "overridden": False,
         }
     ]
+    assert "precedence" not in out
     assert [r["project"] for r in out["spawned_in"]] == ["proj-a", "proj-b"]
     scout = facts.where_defined({"name": "scout", "kind": "agent"})["defined_in"]
     assert scout == [
-        {"path": str(world.claude_root / "agents/scout.md"), "level": "user", "what": "agent"}
-    ]
+        {"path": str(world.claude_root / "agents/scout.md"), "level": "user", "what": "agent",
+         "use": "the one used in every project", "overridden": False}
+    ]  # fmt: skip
     skill = facts.where_defined({"name": "review", "kind": "skill"})["defined_in"]
     assert skill[0]["path"].endswith("skills/review/SKILL.md")
     cmd = facts.where_defined({"name": "/ship", "kind": "command"})["defined_in"]
@@ -395,3 +406,40 @@ def test_nothing_from_the_logs_comes_out_of_any_lookup(facts: Facts) -> None:
     outs.append(facts.findings({}))
     outs.append(facts.where_defined({"name": "fixer"}))
     no_secrets(outs)
+
+
+def test_the_definition_claude_code_uses_comes_first(facts: Facts, world: World) -> None:
+    """The same agent at every level: a project's own file overrides the user's,
+    which overrides a plugin's, and each project that spawned it says which it got."""
+    user = world.claude_root / "agents" / "fixer.md"
+    user.write_text("---\nname: fixer\n---\nbody\n")
+    plugin = world.claude_root / "plugins/cache/market/helpers/1.0/agents/fixer.md"
+    plugin.write_text("---\nname: fixer\n---\nbody\n")
+    project = world.proj_a / ".claude/agents/fixer.md"
+    out = facts.where_defined({"name": "fixer"})
+    rows = out["defined_in"]
+    assert [(r["path"], r["level"], r["overridden"]) for r in rows] == [
+        (str(project), "project", False),
+        (str(user), "user", True),
+        (str(plugin), "plugin", True),
+    ]
+    assert rows[0]["use"] == "the one used in proj-a"
+    assert rows[1]["use"] == (
+        "overridden in proj-a by the project's own file; used in every other project"
+    )
+    assert rows[2]["use"] == "overridden by the user's file"
+    assert out["precedence"] == PRECEDENCE
+    uses = {r["project"]: r["uses"] for r in out["spawned_in"]}
+    assert uses == {"proj-a": str(project), "proj-b": str(user)}
+    # the facts say the same, the project's file first
+    text = facts.context({"kind": "finding", "finding": "model_mix", "scope": "fixer"})
+    assert text.index(str(project)) < text.index(str(user)) < text.index(str(plugin))
+    assert "overridden in proj-a by the project's own file" in text
+    assert PRECEDENCE in text
+    assert f"using {user}" in text
+    no_secrets(text)
+    # without a project file, the user's is the one used and the plugin's is overridden
+    project.unlink()
+    rows = facts.where_defined({"name": "fixer"})["defined_in"]
+    assert [(r["level"], r["overridden"]) for r in rows] == [("user", False), ("plugin", True)]
+    assert rows[0]["use"] == "the one used in every project"
