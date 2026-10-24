@@ -3,7 +3,7 @@
 
 import { h, api, usd, pct, monthDay, hm, tokens, seg, empty, setQuery, sessionHref, maxOf, copyButton, daysText, entityColor, OTHER_COLOR, segBar, tableToggle, tipOn } from './lib.js';
 import { pendingBlock } from './sessions.js';
-import { READ_ONLY, markForm, markedChip, noticedBanners, summaryCard } from './marks.js';
+import { READ_ONLY, markForm, markedChip, kindState, noticedBanners, summaryCard } from './marks.js';
 
 // The marks the finding cards show: each mark's result by id (from /api/changes),
 // and the Checks window a new mark answers.
@@ -30,14 +30,21 @@ export async function renderChecks(main, r) {
     main.append(h('section.card', null, empty('Nothing worth changing', `No check found a saving in ${daysText(days)}: the tools, skills and agents you load were used, and no compaction, pause or model switch cost much. Checks run again on each visit.`)));
     return;
   }
-  const t = d.total;
+  const t = d.total, done = d.applied;
   if (t) {
-    // the same line as `capcom checks` prints: a total only over findings that count separate dollars
+    // the same line as `capcom checks` prints: a total only over findings that count
+    // separate dollars, and (on this page) not marked as applied
     head.insertBefore(h('div.totalbox', { title: t.text },
       h('span.label', { text: totalLabel(t) }),
       h('span.big', null, 'up to ' + usd(t.usd_per_week, 0), h('small', { text: ' a week' })),
-      // the label says what it adds; the note only what it leaves out
-      t.judgement_calls ? h('span.note', { text: `Judgement calls, up to ${usd(t.judgement_calls.usd_per_week, 0)}/wk more, are listed apart and not in it.` }) : null), head.lastChild);
+      // the label says what it adds; the notes only what it leaves out
+      t.judgement_calls ? h('span.note', { text: `Judgement calls, up to ${usd(t.judgement_calls.usd_per_week, 0)}/wk more, are listed apart and not in it.` }) : null,
+      done ? h('span.note', { text: appliedNote(done) }) : null), head.lastChild);
+  } else if (done) {
+    head.insertBefore(h('div.totalbox', null,
+      h('span.label', { text: 'Still to apply' }),
+      h('span.big', { text: 'nothing' }),
+      h('span.note', { text: `Every finding is marked as applied (${done.findings}). Did it work? measures each one.` })), head.lastChild);
   }
   const [changes, noticed] = await Promise.all([changesP, noticedP]);
   marked = { results: new Map(((changes && changes.changes) || []).map((c) => [c.id, c])), days };
@@ -67,14 +74,14 @@ export async function renderChecks(main, r) {
     main.append(h('section.card.rollups', null, h('h2', { text: 'By kind' }),
       h('p.note', { style: 'margin:0 0 8px', text: 'Each kind across the places it was found, with the share of each (hover a bar for its numbers). Open a row for its findings.' }),
       scopeLegend(),
-      counted.map((r) => rollupRow(r, byN, titleOf, false))));
+      withAppliedHead(counted.map((r) => rollupRow(r, byN, titleOf, false)))));
   }
   if (judged.length) {
-    const sum = judged.reduce((a, r) => a + r.saving_usd_per_week, 0);
+    const sum = judged.reduce((a, r) => a + openSaving(r), 0);
     main.append(h('section.card.rollups.judged', null,
       h('div.split', null, h('h2', { text: 'Judgement calls' }), h('span.save.small', { text: 'up to ' + usd(sum, 2) + '/wk more' })),
       h('p.note', { style: 'margin:0 0 8px', text: 'A judgement call on quality, not in the total: such a change trades some quality for its saving, and would shrink the other savings on the same requests.' }),
-      judged.map((r) => rollupRow(r, byN, titleOf, false))));
+      withAppliedHead(judged.map((r) => rollupRow(r, byN, titleOf, false)))));
   }
   if (d.small && d.small.findings) {
     main.append(h('p.note', { style: 'margin:0', text: `${d.small.findings} more finding${d.small.findings === 1 ? '' : 's'} under ${usd(d.small.below_usd_per_week, 2)}/wk, ${usd(d.small.usd_per_week, 2)}/wk together: not listed, not in the total.` }));
@@ -88,17 +95,20 @@ let scopeColors = new Map();
 const scopeLegend = () => (scopeColors.size > 1 ? h('div.legend', { style: 'margin:0 0 6px' },
   [...scopeColors].map(([k, c]) => h('span', null, h('i', { style: `background:${c}` }), k === '(other)' ? 'the rest' : k))) : null);
 function rollupRow(r, byN, titleOf, open) {
-  const findings = r.findings.map((n) => byN.get(n)).filter(Boolean);
+  // the open findings first, then the ones marked as applied
+  const findings = r.findings.map((n) => byN.get(n)).filter(Boolean).sort((a, b) => !!a.mark - !!b.mark);
+  const state = kindState(findings);
   const many = r.scopes.length !== 1;
   const noun = r.scope_noun + (many ? 's' : '');
   const money = (x) => usd(x, x < 10 ? 2 : 0) + '/wk';
   const tags = [];
-  // a judgement call's own section already says it is not in the total
-  if (r.judgement_call) { /* no tag */ } else if (r.counted === 'none') tags.push(h('span.tag.over', { text: 'overlaps: not in the total', title: 'Its dollars are counted under the kind it overlaps.' }));
+  // a judgement call's own section already says it is not in the total; a kind fully
+  // applied is in none
+  if (r.judgement_call || state === 'all') { /* no tag */ } else if (r.counted === 'none') tags.push(h('span.tag.over', { text: 'overlaps: not in the total', title: 'Its dollars are counted under the kind it overlaps.' }));
   else if (r.counted === 'some') tags.push(h('span.tag.over', { text: 'partly in the total', title: 'Some of its findings overlap a larger one and are left out of the total.' }));
   // the kinds that kept one of its findings out of the total (none: no chip); their
   // names on hover here, and in full once the row is open
-  const near = r.overlaps.map((k) => titleOf.get(k) || k);
+  const near = state === 'all' ? [] : r.overlaps.map((k) => titleOf.get(k) || k);
   const shares = near.length ? `may share dollars with ${near.join(', ')}` : '';
   if (near.length) {
     tags.push(tipOn(h('span.tag.over', { text: `shares dollars with ${near.length === 1 ? near[0] : near.length + ' kinds'}` }),
@@ -130,11 +140,51 @@ function rollupRow(r, byN, titleOf, open) {
   }
   if (shares) body.append(h('p.note', { style: 'margin:0', text: shares[0].toUpperCase() + shares.slice(1) + '.' }));
   body.append(...findings.map((f) => card(f, true)));
-  return h('details.rollup', { open: open || null },
+  // what it would still save: the findings not applied; a kind fully applied shows
+  // what it was expected to save, quieter
+  const save = state === 'all'
+    ? h('span.save.done', { title: 'Marked as applied: not in the total' }, h('small', { text: 'was up to ' }), money(r.saving_usd_per_week))
+    : h('span.save', state === 'some' ? { title: `Up to ${money(r.saving_usd_per_week)} with the applied ones` } : null,
+      h('small', { text: 'up to ' }), money(openSaving(r)));
+  return h(`details.rollup${state === 'all' ? '.done' : ''}`, { open: open || null },
     h('summary', null,
-      h('span.mtext', null, h('b', { text: r.title }), where, tags.length ? h('span.tags', null, ...tags) : null),
-      h('span.save', null, h('small', { text: 'up to ' }), money(r.saving_usd_per_week))),
+      h('span.mtext', null, h('b', { text: r.title }), where,
+        state === 'none' ? null : appliedChips(findings, state, many),
+        tags.length ? h('span.tags', null, ...tags) : null),
+      save),
     body);
+}
+
+// What a kind would still save: over its findings not marked as applied.
+const openSaving = (r) => r.open_saving_usd_per_week ?? r.saving_usd_per_week;
+
+// "3 findings marked as applied (up to $120/wk) are left out of it."
+function appliedNote(a) {
+  const n = a.findings === 1 ? 'One finding marked as applied' : `${a.findings} findings marked as applied`;
+  const money = a.usd_per_week > 0 ? ` (up to ${usd(a.usd_per_week, a.usd_per_week < 10 ? 2 : 0)}/wk)` : '';
+  return `${n}${money} ${a.findings === 1 ? 'is' : 'are'} left out of it: the change is made.`;
+}
+
+// A kind's marks under its title: each its chip to that change's page, and for a kind
+// partly applied how many of its findings are; past three, the rest open with the row.
+function appliedChips(findings, state, many) {
+  const withMark = findings.filter((f) => f.mark);
+  const label = (f) => (many ? (f.scope === 'all' ? 'every project' : (f.scope_label || f.scope)) : null);
+  const chips = withMark.slice(0, 3).map((f) => markedChip(f.mark, marked.results.get(f.mark.id), label(f)));
+  const lead = state === 'some'
+    ? h('span.tag.part', { text: `partly applied: ${withMark.length} of ${findings.length}` })
+    : many && withMark.length > 1 ? h('span.tag.part', { text: `all ${withMark.length} applied` }) : null;
+  const more = withMark.length > 3 ? h('span.note', { text: `+${withMark.length - 3} more, open the row` }) : null;
+  return h('span.applied', null, lead, ...chips, more);
+}
+
+// "Applied" over the first kind fully applied, after the open ones (the API puts
+// them last).
+function withAppliedHead(rows) {
+  const i = rows.findIndex((x) => x.classList.contains('done'));
+  if (i < 0) return rows;
+  const n = rows.length - i;
+  return [...rows.slice(0, i), h('h3.donehead', { text: `Applied (${n} kind${n === 1 ? '' : 's'}): not in the total. Each chip opens its before and after on Did it work?` }), ...rows.slice(i)];
 }
 
 
@@ -149,7 +199,7 @@ export function totalLabel(t) {
 // the kind's title, which the row already says.
 function card(f, scoped = false) {
   const scopeName = f.scope && f.scope !== 'all' ? (f.scope_label || f.scope) : 'Every project';
-  const box = h('section.card.check');
+  const box = h(`section.card.check${f.mark ? '.applied' : ''}`);
   // what the card is about, for Ask Roger's facts (ask.js, refOf)
   box.dataset.askFinding = f.kind;
   box.dataset.askScope = f.scope || 'all';
@@ -157,9 +207,9 @@ function card(f, scoped = false) {
     h('span.n', { text: String(f.n) }),
     h('div.ctext', null,
       h('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;align-items:baseline' }, h('h2', { text: scoped ? scopeName : f.title, title: scoped ? (f.scope_path || null) : null }), !scoped && f.scope && f.scope !== 'all' ? h('span.chip', { text: f.scope_label || f.scope, title: f.scope_path || null }) : null,
-        f.counted ? null : h('span.tag.over', { text: f.metrics && f.metrics.judgement_call ? 'judgement call' : 'overlaps a larger finding', title: 'Not added to the total.' })),
+        f.counted || f.mark ? null : h('span.tag.over', { text: f.metrics && f.metrics.judgement_call ? 'judgement call' : 'overlaps a larger finding', title: 'Not added to the total.' })),
       h('p.para', { text: f.summary })),
-    h('span.save', { title: 'Estimated at this window’s pace' }, h('small', { text: 'up to ' }), usd(f.saving_usd_per_week, f.saving_usd_per_week < 10 ? 2 : 0) + '/wk'),
+    h(`span.save${f.mark ? '.done' : ''}`, { title: f.mark ? 'Marked as applied: not in the total' : 'Estimated at this window’s pace' }, h('small', { text: f.mark ? 'was up to ' : 'up to ' }), usd(f.saving_usd_per_week, f.saving_usd_per_week < 10 ? 2 : 0) + '/wk'),
     markAction(f, box)));
   box.append(body(f));
   return box;

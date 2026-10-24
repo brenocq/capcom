@@ -655,12 +655,14 @@ time, `base` plus the members' percents is `fitted.percent`.
 {days, since, until, overlapping,
  total: {usd_per_week, findings, of, all, text,
          judgement_calls: {usd_per_week, findings, items: [{kind, scope, usd_per_week}]}?} | null,
+ applied: {findings, usd_per_week} | null,
  rollups: [{kind, title, headline, saving_usd_per_week, scope_noun,
             scopes: [{scope, scope_label, saving_usd_per_week, share}],
-            findings: [n], overlaps: [kind], judgement_call, counted}],
+            findings: [n], overlaps: [kind], judgement_call, counted, applied,
+            open_saving_usd_per_week}],
  findings: [{n, kind, title, scope, scope_label, scope_path, summary, saving_usd_per_week, advice, change,
              evidence: [Evidence], metrics, overlaps: [kind], counted, overlapped_by: [n],
-             visual}],
+             visual, finding_id, mark, measure, applied}],
  small: {findings, usd_per_week, below_usd_per_week},
  footer}
 ```
@@ -675,6 +677,14 @@ Findings under $0.10/week are not in `findings` nor in the total: `small` counts
 them. `judgement_calls` (only when there are any) are findings whose saving trades
 quality (a cheaper model for an agent): never in the total. `footer` says in words
 what the total covers.
+
+A finding with an open mark (`mark`, from Did it work?) is `applied`: its change is
+made, so it leaves `total`, `counted` and `overlapped_by` (all three are worked out over
+the findings not applied, so a smaller finding an applied one kept out counts again),
+and `applied` sums those findings (their own total, overlaps counted once; null when
+none). A roll-up's `applied` counts its applied findings and
+`open_saving_usd_per_week` is its saving over the others (0 when all are); the kinds
+fully applied come after the open ones, which are ordered by that saving.
 
 Findings come ranked by weekly saving; `scope_label` names a project scope as in
 "Projects" (other scopes, an agent type or `all`, as they are). Some savings count the same dollars

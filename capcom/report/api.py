@@ -15,7 +15,7 @@ import hashlib
 import math
 import re
 import statistics
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from itertools import pairwise
@@ -1935,12 +1935,14 @@ def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     infos = ctx.infos()
     names = ctx.names(infos)
     dirs = {info.project_dir for info in infos.values()}
-    counted = counted_findings(found, dirs)
-    blockers = overlap_blockers(found, dirs)
-    overlapping = any(finding_overlaps(f) for f in found)
+    marks, measure_name = _open_marks(ctx)
+    # a finding marked as applied is done: it leaves the total and the overlap count,
+    # so a smaller one it kept out may count again (the open ones are counted alone)
+    applied = [f"{f.kind}@{f.scope}" in marks for f in found]
+    counted, blockers = _open_counts(found, applied, dirs)
+    overlapping = any(finding_overlaps(f) for f, a in zip(found, applied, strict=True) if not a)
     calls = _subagent_calls(ctx, since) if "one_command_subagents" in kinds else {}
     comps = _compactions(ctx, since) if "late_compactions" in kinds else {}
-    marks, measure_name = _open_marks(ctx)
     rows = []
     for i, f in enumerate(found):
         named = f.scope in dirs or f.scope.startswith("temporary (") or f.scope == TEMPORARY_LABEL
@@ -1966,10 +1968,14 @@ def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
                 "visual": _visual(f, calls, comps),
                 "finding_id": f"{f.kind}@{f.scope}",
                 "mark": marks.get(f"{f.kind}@{f.scope}"),
+                "applied": applied[i],
                 "measure": measure_name(f.kind),
             }
         )
-    total = savings_total(found, dirs)
+    open_found = [f for f, a in zip(found, applied, strict=True) if not a]
+    done = [f for f, a in zip(found, applied, strict=True) if a]
+    total = savings_total(open_found, dirs)
+    done_total = savings_total(done, dirs)
     return {
         "days": days,
         "since": iso(since, ctx.tz),
@@ -1977,14 +1983,40 @@ def checks(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
         "rollups": _rollups(found, rows),
         "findings": rows,
         "overlapping": overlapping,
+        # over the findings not marked as applied: what is still there to save
         "total": total,
+        # the findings marked as applied, left out of the total; None without any
+        "applied": {
+            "findings": len(done),
+            "usd_per_week": done_total["usd_per_week"] if done_total else 0.0,
+        }
+        if done
+        else None,
         "small": {
             "findings": len(small),
             "usd_per_week": round(sum(f.saving_usd_per_week for f in small), 6),
             "below_usd_per_week": MIN_LISTED_USD_PER_WEEK,
         },
-        "footer": _checks_footer(total, len(small)),
+        "footer": _checks_footer(total, len(small), len(done)),
     }
+
+
+def _open_counts(
+    found: Sequence[Finding], applied: Sequence[bool], dirs: Collection[str]
+) -> tuple[list[bool], list[list[int]]]:
+    """Which findings the total adds and, for each, the positions of the counted ones
+    that kept it out (counted_findings, overlap_blockers), over the findings not
+    marked as applied only: an applied one is never counted nor blocks another."""
+    pos = [i for i, a in enumerate(applied) if not a]
+    still = [found[i] for i in pos]
+    flags = counted_findings(still, dirs)
+    hits = overlap_blockers(still, dirs)
+    counted = [False] * len(found)
+    blockers: list[list[int]] = [[] for _ in found]
+    for k, i in enumerate(pos):
+        counted[i] = flags[k]
+        blockers[i] = [pos[j] for j in hits[k]]
+    return counted, blockers
 
 
 def _open_marks(ctx: Context) -> tuple[dict[str, Any], Any]:
@@ -2019,9 +2051,15 @@ def _rollups(found: Sequence[Finding], rows: Sequence[Mapping[str, Any]]) -> lis
     judged = {f.kind for f in found if f.metrics.get("judgement_call")}
     labels = {(r["kind"], r["scope"]): r for r in rows}
     left_out = [{found[n - 1].kind for n in row["overlapped_by"]} for row in rows]
+    # each kind's saving over its findings not marked as applied
+    still = {
+        r.kind: r.saving_usd_per_week
+        for r in rollup(f for f, row in zip(found, rows, strict=True) if not row.get("applied"))
+    }
     out = []
-    for r in sorted(rollup(found, left_out), key=lambda r: r.kind in judged):
+    for r in rollup(found, left_out):
         members = [row for row in rows if row["kind"] == r.kind]
+        live = [row for row in members if not row.get("applied")]
         out.append(
             {
                 "kind": r.kind,
@@ -2043,20 +2081,38 @@ def _rollups(found: Sequence[Finding], rows: Sequence[Mapping[str, Any]]) -> lis
                 "findings": [row["n"] for row in members],
                 "overlaps": list(r.overlaps),
                 "judgement_call": r.kind in judged,
-                # every finding of the kind counted in the total, some, or none
+                # every finding of the kind not marked as applied counted in the
+                # total, some, or none
                 "counted": (
                     "all"
-                    if all(row["counted"] for row in members)
+                    if all(row["counted"] for row in live)
                     else "some"
-                    if any(row["counted"] for row in members)
+                    if any(row["counted"] for row in live)
                     else "none"
                 ),
+                # how many of its findings are marked as applied, and its saving
+                # over the others (0 when every one is)
+                "applied": len(members) - len(live),
+                "open_saving_usd_per_week": round(still.get(r.kind, 0.0), 6),
             }
         )
+
+    # judgement calls last, apart; within each part the kinds fully applied after
+    # the open ones, the open ones by what they still would save
+    def order(x: dict[str, Any]) -> tuple[bool, bool, float, float]:
+        done = x["applied"] == len(x["findings"])
+        return (
+            x["judgement_call"],
+            done,
+            -x["open_saving_usd_per_week"],
+            -x["saving_usd_per_week"],
+        )
+
+    out.sort(key=order)
     return out
 
 
-def _checks_footer(total: Mapping[str, Any] | None, small: int) -> str:
+def _checks_footer(total: Mapping[str, Any] | None, small: int, applied: int = 0) -> str:
     """What the checks total covers, in plain words, for the page's footer."""
     parts = [
         "Each saving is an estimate at this window's pace, net of the cost of a fresh "
@@ -2072,6 +2128,12 @@ def _checks_footer(total: Mapping[str, Any] | None, small: int) -> str:
                 "Judgement calls on quality, such as a cheaper model for an agent, are "
                 "not in it: they would shrink the other savings on the same requests."
             )
+    if applied:
+        parts.append(
+            f"{applied} finding{'' if applied == 1 else 's'} marked as applied "
+            f"{'is' if applied == 1 else 'are'} left out of the total: the change is made, "
+            "and Did it work? measures what it saved."
+        )
     if small:
         parts.append(
             f"Findings under ${MIN_LISTED_USD_PER_WEEK:.2f}/week are not listed and not in it."
