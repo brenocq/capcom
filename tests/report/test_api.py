@@ -152,6 +152,97 @@ def test_spend_today(client: Client, group: str) -> None:
     assert client.get("/api/spend?days=7")[1]["hourly"] is None
 
 
+def test_spend_a_past_day(client: Client) -> None:
+    status, data, _ = client.get("/api/spend?day=2026-10-20&group=project")
+    assert status == 200
+    win = data["window"]
+    assert win["scale"] == "day" and win["days"] is None and win["day"] == "2026-10-20"
+    assert win["since"].startswith("2026-10-20T00:00") and win["end"].startswith("2026-10-21T00:00")
+    assert win["prev"] == "2026-10-19" and win["next"] == "2026-10-21"
+    assert win["current"] is False and win["group"] == "project"
+    assert close(data["totals"]["usd"], usd(S2))
+    assert data["cumulative"]["step_s"] == 300
+    assert data["cumulative"]["total"][-1] == pytest.approx(usd(S2), abs=1e-5)
+    hours = data["hourly"]["hours"]
+    assert len(hours) == 24 and hours[0]["start"].startswith("2026-10-20T00:00")
+    assert close(hours[15]["total"], usd(S2))
+    assert sum(x["total"] for x in hours) == pytest.approx(usd(S2), abs=1e-5)
+    assert data["sessions_count"] == 0 and data["temporary_sessions"] == 1
+    # a day has no week to lay out, nor days to compare
+    assert data["daily"] is None and data["heatmap"] is None and data["regime"] is None
+    assert data["minutes"] is None
+
+
+def test_spend_today_as_a_day_has_no_next(client: Client) -> None:
+    data = client.get("/api/spend?day=2026-10-21")[1]
+    assert data["window"]["next"] is None and data["window"]["current"] is True
+    assert close(data["totals"]["usd"], usd(TODAY))
+    assert sum(x["total"] for x in data["hourly"]["hours"]) == pytest.approx(usd(TODAY), abs=1e-5)
+    # another day is its own reply, not a cached one
+    assert close(client.get("/api/spend?day=2026-10-18")[1]["totals"]["usd"], usd(S3))
+
+
+def test_spend_an_hour(client: Client) -> None:
+    status, data, _ = client.get("/api/spend?hour=2026-10-21T09")
+    assert status == 200
+    win = data["window"]
+    assert win["scale"] == "hour" and win["hour"] == "2026-10-21T09" and win["day"] == "2026-10-21"
+    assert win["prev"] == "2026-10-21T08" and win["next"] == "2026-10-21T10"
+    in_hour = S1_MAIN[:3] + S1_AGENT  # 09:00 to 09:30
+    assert close(data["totals"]["usd"], usd(in_hour))
+    assert data["cumulative"]["step_s"] == 60
+    bars = data["minutes"]["hours"]
+    assert len(bars) == 12 and bars[0]["start"].startswith("2026-10-21T09:00")
+    assert bars[6]["start"].startswith("2026-10-21T09:30")
+    assert close(bars[0]["total"], usd(S1_MAIN[:2] + S1_AGENT))
+    assert close(bars[6]["total"], usd(S1_MAIN[2:3]))
+    assert data["hourly"] is None and data["daily"] is None and data["heatmap"] is None
+    assert [r["session_id"] for r in data["sessions"]] == ["s1"]
+
+
+def test_spend_the_hour_now_has_no_next(client: Client) -> None:
+    last = client.get("/api/spend?hour=2026-10-21T14")[1]["window"]
+    assert last["next"] == "2026-10-21T15" and last["current"] is False
+    data = client.get("/api/spend?hour=2026-10-21T15:00")[1]
+    assert data["window"]["next"] is None and data["window"]["current"] is True
+    assert data["totals"]["usd"] == 0 and data["sessions"] == []
+
+
+@pytest.mark.parametrize(
+    ("query", "code"),
+    [
+        ("day=2026-13-01", 400),
+        ("day=yesterday", 400),
+        ("day=2026-10-22", 404),
+        ("hour=2026-10-21T25", 400),
+        ("hour=2026-10-21T09:30", 400),
+        ("hour=2026-10-21", 400),
+        ("hour=2026-10-21T16", 404),
+        ("day=2026-10-21&hour=2026-10-21T09", 400),
+    ],
+)
+def test_spend_bad_day_or_hour(client: Client, query: str, code: int) -> None:
+    assert client.get(f"/api/spend?{query}")[0] == code
+
+
+def test_typical_hours_are_the_mean_over_the_days_before(client: Client) -> None:
+    status, data, _ = client.get("/api/typical-hours?day=2026-10-21")
+    assert status == 200
+    # the first request is on Oct 11: ten days of history before Oct 21, of 28
+    assert data["of_days"] == 28 and data["days"] == 10
+    hours = data["hours"]
+    assert len(hours) == 24 and hours[0]["start"].startswith("2026-10-21T00:00")
+    assert close(hours[15]["usd"], usd(S2 + S3 + S4) / 10)
+    assert all(x["usd"] == 0 for i, x in enumerate(hours) if i != 15)
+    # the day itself never counts: Oct 20 has only the nine days before it
+    data = client.get("/api/typical-hours?day=2026-10-20")[1]
+    assert data["days"] == 9 and close(data["hours"][15]["usd"], usd(S3 + S4) / 9)
+    first = client.get("/api/typical-hours?day=2026-10-11")[1]
+    assert first["days"] == 0 and all(x["usd"] == 0 for x in first["hours"])
+    assert client.get("/api/typical-hours?day=2026-10-22")[0] == 404
+    assert client.get("/api/typical-hours")[0] == 400
+
+
 def test_spend_sessions_and_buckets(client: Client) -> None:
     data = client.get("/api/spend?days=7")[1]
     assert data["sessions_count"] == 2 and data["temporary_sessions"] == 1
@@ -280,6 +371,19 @@ def test_session_detail(client: Client) -> None:
     cal = data["calibration"]
     assert cal["claude_code_usd"] == pytest.approx(usd(TODAY), abs=1e-5)
     assert cal["capcom_usd"] == pytest.approx(usd(TODAY), abs=1e-5)
+    # the cost adding up per category: it ends at the totals, never goes down, and
+    # keeps both sides of the 327-minute pause (a squeezed one) and the last request
+    series = data["cost_series"]
+    assert series["t"][-1] == cols["t"][-1] and series["t"] == sorted(series["t"])
+    for key, cat in data["totals"]["categories"].items():
+        if key in series:
+            assert series[key][-1] == pytest.approx(cat["usd"], abs=1e-5)
+            assert series[key] == sorted(series[key])
+    assert sum(series[k][-1] for k in ("cache_read", "cache_write", "output", "input")) == (
+        pytest.approx(usd(TODAY), abs=1e-5)
+    )
+    gap = next(i for i in range(1, len(cols["t"])) if cols["t"][i] - cols["t"][i - 1] > 3600e3)
+    assert {cols["t"][gap - 1], cols["t"][gap]} <= set(series["t"])
 
 
 def test_day_against_the_days_with_spend_before_it(client: Client) -> None:

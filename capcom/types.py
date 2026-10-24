@@ -53,7 +53,7 @@ class LogFile:
 
     path: Path
     kind: LogKind
-    project_dir: str  # folder name under projects/, e.g. "-home-breno-Github-kittex"
+    project_dir: str  # folder name under projects/, e.g. "-home-user-Github-proj"
     session_id: str
     agent_id: str | None = None  # set for subagent logs
     meta_path: Path | None = None  # subagents/agent-<agent_id>.meta.json, when present

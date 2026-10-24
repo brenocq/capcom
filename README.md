@@ -1,5 +1,5 @@
 <div align="center">
-  <img alt="capcom: a radio-signal mark, the word capcom and Roger, a terracotta capsule in mission-control headphones, beside a two-week spend chart drawing itself, with numbered spike markers; Roger waves and says: Roger that! Mission control for your Claude Code spend." src="https://github.com/brenocq/capcom/raw/assets/banner.svg" width="880">
+  <img alt="capcom: Roger, a terracotta capsule in mission-control headphones, and the word capcom, beside a two-week spend chart drawing itself, with numbered spike markers; Roger waves and says: Roger that! Mission control for your Claude Code spend." src="https://github.com/brenocq/capcom/raw/assets/banner.svg" width="880">
 
   <a href="#install">Install</a> · <a href="#what-you-get">What you get</a> · <a href="#commands">Commands</a> · <a href="#faq">FAQ</a>
 
@@ -78,7 +78,7 @@ that cost you the most, with the change to make.
 
 | Command | What it does |
 | --- | --- |
-| `capcom serve` | The website on 127.0.0.1 (`--open` opens it); rescans the logs in the background. Its Ask Claude chat, opened from Roger's button in the corner, explains a card in a few plain words (`--no-ask` turns it off). |
+| `capcom serve` | The website on 127.0.0.1 (`--open` opens it); rescans the logs in the background. Its Ask Roger chat, opened from Roger's button in the corner, explains a card in a few plain words (`--no-ask` turns it off). |
 | `capcom scan` | Reads new log lines into the index. |
 | `capcom top` | What changed, then totals by project, session, agent type, model or day (`--by`). |
 | `capcom spikes` | What changed, then each spend spike with its cause. |
@@ -106,7 +106,7 @@ and spikes. The prices ship with capcom, with the date they were checked.
 <br>
 
 No. capcom makes no network requests and uses only Python's standard library.
-The one exception is yours to turn on: the website's Ask Claude chat runs your
+The one exception is yours to turn on: the website's Ask Roger chat runs your
 own `claude` CLI (Haiku, with every tool and MCP server off and no session
 saved) when you ask a question, and sends only the numbers and labels of the
 card you asked about, never text from your logs. It opens Claude Code's logs
@@ -213,7 +213,7 @@ limits but is not in the logs, so it shows up as fit error.
 capcom's mascot: the terracotta capsule in mission-control headphones in the
 banner (in mission control, the CAPCOM is the one voice that talks to the crew).
 On the website he waves from the round button in the corner, which opens the
-Ask Claude chat: ask about the page, or press Explain on a dense card, and he
+Ask Roger chat: ask about the page, or press Explain on a dense card, and he
 answers in a few plain words through your own `claude` CLI, sent only the
 page's name and that card's numbers and labels. `capcom serve --no-ask` turns
 him off.

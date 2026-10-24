@@ -131,13 +131,29 @@ export function rateText(x, measure) {
   return x.toFixed(2);
 }
 
-// The chip of a marked finding on Checks: its verdict when known, linked to its page.
-export function markedChip(mark, result) {
-  const href = `/changes/${mark.id}`;
-  if (!result || result.verdict === 'too_early') {
-    return verdictChip('too_early', `Applied ${dayWord(mark.applied_on)}, being measured`, { href, title: 'Open the measure of this change' });
-  }
-  return verdictChip(result.verdict, null, { href, title: `Applied ${dayWord(mark.applied_on)}. Open the measure of this change` });
+// Where a marked finding stands, for its chip on Checks: the verdict of its measure
+// ("too_early" until /api/changes has one) and "Applied Oct 21 · too early", in the
+// verdict words of the Did it work? page. `where` leads it ("scout: applied …").
+export function markStatus(mark, result, where) {
+  const verdict = result && VERDICTS[result.verdict] ? result.verdict : 'too_early';
+  const applied = `${where ? where + ': applied' : 'Applied'} ${dayWord(mark.applied_on)}`;
+  return { verdict, text: `${applied} · ${VERDICTS[verdict].label.toLowerCase()}` };
+}
+
+// The page of one change on Did it work?: its before and after.
+export const changeHref = (mark) => `/changes/${encodeURIComponent(mark.id)}`;
+
+// The chip of a marked finding on Checks: where it stands, linked to its change's page.
+export function markedChip(mark, result, where) {
+  const st = markStatus(mark, result, where);
+  return verdictChip(st.verdict, st.text, { href: changeHref(mark), title: 'Open its before and after on Did it work?' });
+}
+
+// A kind's roll-up row on Checks, from its findings (each with its `mark` or none):
+// "none" applied, "some" or "all".
+export function kindState(findings) {
+  const n = findings.filter((f) => f.mark).length;
+  return n === 0 ? 'none' : n === findings.length ? 'all' : 'some';
 }
 
 // ------------------------------------------------------------------ the form

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import functools
 import json
+import math
 import re
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -43,6 +44,7 @@ from capcom.checks.facts import (
     Thread,
     heartbeat,
 )
+from capcom.checks.lifetimes import MAIN, SUBAGENT, Plans
 from capcom.checks.rollup import AGENT_KINDS
 from capcom.cost.top import TEMPORARY, project_label
 from capcom.explain.shared import (
@@ -519,19 +521,48 @@ def _definition_projects(
     if folder in {user_dir, Path.home() / ".claude" / "agents"}:
         return None
     root = _repo_root(folder.parent.parent)
-    trees = root / ".worktrees"
     found = {
-        p
-        for p, cwds in facts.project_cwd.items()
-        if any(Path(c) == root or Path(c).is_relative_to(trees) for c in cwds)
+        p for p, cwds in facts.project_cwd.items() if any(_repo_root(Path(c)) == root for c in cwds)
     }
     return found or None
 
 
 def _repo_root(cwd: Path) -> Path:
-    """The main checkout of a worktree under `<repo>/.worktrees/`; else `cwd`."""
-    parts = cwd.parts
-    return Path(*parts[: parts.index(".worktrees")]) if ".worktrees" in parts else cwd
+    """The main checkout of a worktree; else `cwd`. A worktree that still exists
+    names its main checkout in its `.git` file (`gitdir: <main>/.git/worktrees/x`);
+    otherwise a `.worktrees/` or `.claude/worktrees/` path segment marks it."""
+    main = _gitdir_main(cwd)
+    if main is not None:
+        return main
+    split = _split_worktree(str(cwd))
+    return Path(split[0]) if split else cwd
+
+
+def _gitdir_main(cwd: Path) -> Path | None:
+    """The main checkout a linked worktree's `.git` file points to; None when `cwd`
+    is not an existing linked worktree (or the file is unreadable)."""
+    try:
+        for d in (cwd, *cwd.parents):
+            git = d / ".git"
+            if git.is_dir():
+                return None
+            if git.is_file():
+                head = git.read_text(errors="replace").splitlines()[:1]
+                if not head or not head[0].startswith("gitdir:"):
+                    return None
+                gitdir = Path(head[0][len("gitdir:") :].strip())
+                if not gitdir.is_absolute():
+                    gitdir = d / gitdir
+                parts = gitdir.parts
+                if "worktrees" not in parts[:-1]:
+                    return None
+                i = len(parts) - 1 - parts[::-1].index("worktrees")
+                if i < 1 or parts[i - 1] != ".git":
+                    return None
+                return Path(*parts[: i - 1])
+    except (OSError, ValueError):
+        return None
+    return None
 
 
 def _scoped(
@@ -892,54 +923,43 @@ def long_subagent_reports(facts: Facts) -> list[Finding]:
 # --------------------------------------------------------------------------- memory
 
 
-_WORKTREES = "/.worktrees/"
-# Branch name prefixes that hold a slash (`feat/x` lands in .worktrees/feat/x/).
-_BRANCH_PREFIXES = frozenset(
-    {
-        "feat",
-        "fix",
-        "chore",
-        "docs",
-        "doc",
-        "refactor",
-        "test",
-        "tests",
-        "perf",
-        "build",
-        "ci",
-        "style",
-        "release",
-        "hotfix",
-        "bugfix",
-        "feature",
-        "exp",
-        "wip",
-        "dev",
-    }
-)
+_WORKTREES = ("/.worktrees/", "/.claude/worktrees/")
+# Names a memory file has inside a checkout: where a worktree's name ends when
+# nothing on disk says so.
+_ANCHORS = frozenset({"CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md", ".claude"})
+
+
+def _split_worktree(path: str) -> tuple[str, str, list[str]] | None:
+    """`(repo, marker folder, parts below it)` for a path under `<repo>/.worktrees/`
+    or `<repo>/.claude/worktrees/`; the first such marker, else None."""
+    hits = [(i, m) for m in _WORKTREES if (i := path.find(m)) >= 0]
+    if not hits:
+        return None
+    i, marker = min(hits)
+    return path[:i], marker, path[i + len(marker) :].split("/")
 
 
 def _strip_worktree(path: str) -> str:
     """`<repo>/.worktrees/<branch>/<rel>` as `<repo>/<rel>`: a worktree's copy of a
-    file is the same file. The branch ends at the first folder holding a `.git`
-    entry, or else after one folder (two after a prefix such as `feat/`)."""
-    i = path.find(_WORKTREES)
-    if i < 0:
+    file is the same file. The branch name may hold slashes. It ends at the first
+    folder holding a `.git` entry, or else before the first memory file name or
+    `.claude` folder, or else after one folder."""
+    split = _split_worktree(path)
+    if split is None:
         return path
-    root, rest = path[:i], path[i + len(_WORKTREES) :]
-    parts = rest.split("/")
+    root, marker, parts = split
     if len(parts) < 2:
         return path
     cut = 0
     for n in range(1, len(parts)):
         try:
-            if (Path(root, ".worktrees", *parts[:n]) / ".git").exists():
+            if (Path(root + marker, *parts[:n]) / ".git").exists():
                 cut = n
                 break
         except OSError:
             break
     if not cut:
-        cut = 2 if parts[0] in _BRANCH_PREFIXES and len(parts) > 2 else 1
+        cut = next((n for n, x in enumerate(parts) if n and x in _ANCHORS), 1)
     return "/".join([root, *parts[cut:]])
 
 
@@ -1231,7 +1251,7 @@ def subagent_resumed_late(facts: Facts) -> list[Finding]:
         title="Subagents resumed after their cache expired",
         what="when their parent resumed them past the cache lifetime",
         advice=(
-            "A subagent left waiting longer than its 5-minute cache lifetime rewrites its "
+            "A subagent left waiting longer than its cache lifetime rewrites its "
             "whole context when the parent resumes it. Have it report and finish, and "
             "start a fresh agent for the next step instead of resuming the old one."
         ),
@@ -1243,52 +1263,157 @@ def subagent_resumed_late(facts: Facts) -> list[Finding]:
     return out
 
 
+# The three ways to run the cache (capcom.checks.lifetimes), as the advice names them.
+PLAN_NAMES = {
+    "5m": "the 5-minute cache",
+    "1h": "the 1-hour cache",
+    "ping": "the 5-minute cache with a check every 4 minutes through tool waits",
+}
+THREAD_KINDS = ((MAIN, "Main threads"), (SUBAGENT, "Subagents"))
+SUBAGENT_TTL_KEY = "subagentPromptCacheTtl"
+
+
 def subagent_cache_expiry(facts: Facts) -> list[Finding]:
-    """Requests that rewrote at least half their prompt because a tool call ran past
-    the cache lifetime (5 minutes for subagents): the last result of the previous
-    request's calls came back after the lifetime (facts.expiry_kind, explain's
-    rule). Mostly subagents; a main thread's long call counts here too. Saving:
-    each rewrite's cost above reading the same tokens. These rewrites are left out
-    of the other two pause causes. No setting is known to change a subagent's
-    lifetime, so there is no change to paste."""
-    out = _rewrites(
-        facts,
-        facts.tool_waits,
-        kind="subagent_cache_expiry",
-        title="Caches expired during long tool calls",
-        what="after a tool call ran past the cache lifetime",
-        advice=(
-            "A subagent's cache lasts 5 idle minutes. Run a command that may take longer "
-            "(a build, a test suite, a wait for a lock) in the background and check its "
-            "output at least every 4 minutes, or do other work meanwhile: each check "
-            "keeps the cache warm for about a twelfth of what rewriting it costs. A "
-            "command waiting on a permission prompt looks the same here (the logs record "
-            "no run time): allow it in the agent's settings, or approve the command sooner."
-        ),
+    """Which way to run the prompt cache costs least, per thread kind (main threads,
+    subagents), on the window's own requests: the 5-minute cache, the 1-hour cache,
+    or the 5-minute cache with a check every 4 minutes through each wait the agent
+    can ping through (capcom.checks.lifetimes prices all three). Main threads have
+    no settings key for their lifetime, so their part only reports the lifetime in
+    use and its cost: no advice, no saving. Subagents have one
+    (subagentPromptCacheTtl): their saving is the cost under the lifetime in use
+    (the window's last write) above the cheapest of the three, nothing when the one
+    in use is already the cheapest. The full comparison is in the metrics. Its
+    evidence: requests that rewrote at least half their prompt because a tool call
+    ran past the lifetime their thread used (facts.expiry_kind, explain's rule),
+    left out of the other pause causes."""
+    plans = {k: p for k, p in facts.cache_plans.items() if p.requests}
+    if not plans:
+        return []
+    rws = list(facts.tool_waits.values())
+    count = sum(r.count for r in rws)
+    causes: dict[str, int] = defaultdict(int)
+    for rw in rws:
+        for name, n in rw.causes.items():
+            causes[name] += n
+    top = sorted(causes.items(), key=lambda kv: (-kv[1], kv[0]))
+    longest = max(rw.longest for rw in rws).total_seconds() / 60 if rws else 0.0
+    parts: list[str] = []
+    saving = 0.0
+    advice: list[str] = []
+    change: str | None = None
+    metrics: dict[str, AttrValue] = {}
+    for kind, label in THREAD_KINDS:
+        p = plans.get(kind)
+        if p is None:
+            continue
+        current, best = p.current, p.cheapest()
+        cost = _usd(p.cost(current))
+        if kind != SUBAGENT:
+            parts.append(f"{label} use {PLAN_NAMES[current]} ({cost} of cache reads and writes).")
+        elif best == current:
+            parts.append(f"{label} use {PLAN_NAMES[current]} ({cost}), the cheapest setup here.")
+            advice.append(f"Recommended for subagents: keep {PLAN_NAMES[current]}.")
+        else:
+            diff = p.cost(current) - p.cost(best)
+            saving += diff
+            parts.append(
+                f"{label} use {PLAN_NAMES[current]} ({cost}); {PLAN_NAMES[best]} would cost "
+                f"{_usd(diff)} less."
+            )
+            text, change = _subagent_advice(p, current, best)
+            advice.append(f"Recommended for subagents: {text}")
+        metrics.update(
+            {
+                f"{kind}_current": current,
+                f"{kind}_cheapest": best,
+                f"{kind}_5m_usd": round(p.five_min, 2),
+                f"{kind}_1h_usd": round(p.one_hour, 2),
+                f"{kind}_ping_usd": round(p.pinged, 2),
+                f"{kind}_recorded_usd": round(p.recorded, 2),
+                f"{kind}_pingable_waits": p.gaps[0] + p.long_gaps[0],
+                f"{kind}_unpingable_waits": p.gaps[1] + p.long_gaps[1],
+            }
+        )
+        if kind == SUBAGENT and 0 < ping_break_even(p) < 1:
+            metrics["subagent_ping_break_even"] = round(ping_break_even(p), 3)
+    if not saving and not count:
+        return []
+    advice.append(
+        "A command waiting on a permission prompt looks the same as a long one here (the "
+        "logs record no run time): allow it in the agent's settings, or approve the "
+        "command sooner."
     )
-    grouped = _by_group(facts.tool_waits)
-    for i, f in enumerate(out):
-        rws = grouped[f.scope]
-        causes: dict[str, int] = defaultdict(int)
-        for rw in rws:
-            for name, n in rw.causes.items():
-                causes[name] += n
-        top = sorted(causes.items(), key=lambda kv: (-kv[1], kv[0]))
-        longest = max(rw.longest for rw in rws).total_seconds() / 60
-        out[i] = replace(
-            f,
-            summary=(
-                f"{f.summary} The calls waited on: "
-                f"{', '.join(f'{n} ({c})' for n, c in top[:4])}; the longest ran "
-                f"{longest:.0f} min."
-            ),
+    evs = sorted((e for r in rws for e in r.evidence), key=lambda q: -q[0])
+    return [
+        Finding(
+            kind="subagent_cache_expiry",
+            title="Cache lifetime and long waits",
+            scope="all",
+            summary=" ".join(parts),
+            saving_usd_per_week=facts.per_week(saving),
+            advice=" ".join(advice),
+            change=change,
+            evidence=tuple(e for _, e in evs[:EVIDENCE_PER_FINDING]),
             metrics={
-                **f.metrics,
+                "rewrites": count,
+                "rewrite_tokens": sum(r.tokens for r in rws),
+                "rewrite_excess_usd": round(sum(r.excess_usd for r in rws), 6),
+                "rewrite_days": len(set().union(*(r.days for r in rws))) if rws else 0,
+                "cause": TOOL_WAIT_EXPIRY,
                 "tools": tuple(n for n, _ in top),
                 "longest_wait_minutes": round(longest, 1),
+                **metrics,
             },
         )
-    return out
+    ]
+
+
+def ping_break_even(p: Plans) -> float:
+    """The share of the pingable waits' extra cost that must be checked in time for
+    the 5-minute cache with checks to cost less than the 1-hour one: 0 when the
+    5-minute cache alone already does, 1 or more when it can never pay."""
+    if p.five_min <= p.one_hour:
+        return 0.0
+    if p.five_min <= p.pinged:
+        return float("inf")
+    return (p.five_min - p.one_hour) / (p.five_min - p.pinged)
+
+
+def _subagent_advice(p: Plans, current: str, best: str) -> tuple[str, str | None]:
+    """What subagents need to move from lifetime `current` to plan `best`, and the
+    settings to paste, if any. Only subagentPromptCacheTtl is a real key. The
+    5-minute cache with checks is recommended only when its break-even share is
+    reachable, and the advice states it."""
+    if best == "1h":
+        return (
+            f'set {SUBAGENT_TTL_KEY} to "1h" in your settings (user, project or local).',
+            _settings_change({SUBAGENT_TTL_KEY: "1h"}),
+        )
+    back = (
+        f"remove {SUBAGENT_TTL_KEY} wherever it is set (user, project or local settings)"
+        if current == "1h"
+        else ""
+    )
+    if best == "5m":
+        return f"{back}.", None
+    share = ping_break_even(p)
+    if share >= 1:  # never cheaper than the 1-hour cache, whatever gets checked
+        return (
+            f'set {SUBAGENT_TTL_KEY} to "1h" in your settings (user, project or local).',
+            _settings_change({SUBAGENT_TTL_KEY: "1h"}),
+        )
+    pays = (
+        f" It pays only if at least {math.ceil(share * 100)}% of long waits get a check within 4 "
+        "minutes; below that, the 1-hour cache costs less."
+        if share > 0
+        else ""
+    )
+    ping = (
+        "run a command that may take longer than 4 minutes (a build, a test suite) "
+        "in the background and check its output at least every 4 minutes: "
+        "each check keeps the cache warm for about a twelfth of what rewriting it costs." + pays
+    )
+    return (f"{back}, and {ping}" if back else ping[0].upper() + ping[1:]), None
 
 
 def _by_group(data: Mapping[str, Rewrite]) -> dict[str, list[Rewrite]]:
@@ -1492,6 +1617,11 @@ _OVERLAP_PAIRS: frozenset[frozenset[str]] = frozenset(
     {frozenset({a, b}) for a in _REREADS for b in _REREADS if a != b}
     | {frozenset({a, b}) for a in _PREFIX for b in _REWRITES}
     | {frozenset({a, b}) for a in _TAIL for b in _CONTEXT}
+    # a lifetime change for a thread kind reprices its idle and late-resume waits too
+    | {
+        frozenset({"subagent_cache_expiry", b})
+        for b in ("idle_cache_rewrites", "subagent_resumed_late")
+    }
     # an agent's unused tools include the MCP tools, connectors and skills it was
     # given: the same prefix tokens, counted by both
     | {frozenset({"agent_tools_unused", b}) for b in _PREFIX[:3]}

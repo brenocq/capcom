@@ -4,13 +4,17 @@
 //
 // kinds:
 //   page-scroll        the document scrolls sideways; el is an element past the edge
-//   overlap            two visible text runs or controls cover each other
+//   overlap            two visible text runs or controls cover each other (what
+//                      scrolls under a sticky box at a scroller's left edge is hidden)
+//   under-sticky       a text run cut in two by that sticky box: partly under it
 //   small-target       a control under 24 x 24 px (44 x 44 for the navigation and
 //                      buttons at touch widths); links inside running text and a
 //                      chart's data marks ([data-mark], .mk) are exempt
 //   clipped            text cut by a box that hides overflow, without an ellipsis
 //   truncated-no-title text cut with an ellipsis, but no title to read it in full
 //   escapes            text running out of its card or panel
+//   label-past-plot    a chart's value label (.amt) reaching past the side of its
+//                      plot (.pairs, .days), even where the plot scrolls
 //   see-through-sticky a sticky or fixed box over the content without a solid background
 //   sticky-too-tall    a sticky or fixed box over the content taller than 30 % of the screen
 //
@@ -78,7 +82,33 @@
     clipCache.set(el, res);
     return res;
   }
-  const shown = (r, el) => { const c = clips(el).any; return c ? inter(r, c) : box(r); };
+  // a box that stays at the left edge of a sideways scroller (a timeline's lane names)
+  // hides what scrolls under it: content there shows only right of that box
+  const covers = new Map();
+  function cover(el) {
+    for (let p = el; p && p !== doc; p = p.parentElement) {
+      const cs = getComputedStyle(p);
+      if (cs.position === 'sticky') return null; // inside the sticky box itself
+      if (cs.overflowX !== 'auto' && cs.overflowX !== 'scroll') continue;
+      if (!covers.has(p)) {
+        let right = null;
+        for (const k of p.querySelectorAll('*')) {
+          const ks = getComputedStyle(k);
+          if (ks.position === 'sticky' && ks.left !== 'auto' && visible(k)) right = Math.max(right ?? -1e9, k.getBoundingClientRect().right);
+        }
+        covers.set(p, right);
+      }
+      return covers.get(p);
+    }
+    return null;
+  }
+  const shown = (r, el) => {
+    const c = clips(el).any;
+    const out = c ? inter(r, c) : box(r);
+    const left = cover(el);
+    if (left !== null) out.left = Math.max(out.left, left);
+    return out;
+  };
 
   // ------------------------------------------------------------ the boxes
   const texts = []; // {r (shown rect), raw, el}
@@ -93,6 +123,8 @@
     range.selectNodeContents(n);
     for (const raw of range.getClientRects()) {
       if (raw.width < 1 || raw.height < 1) continue;
+      const edge = cover(el);
+      if (edge !== null && raw.left < edge - 1 && raw.right > edge + 1) add('under-sticky', el, `${Math.round(edge - raw.left)}px under`);
       const r = shown(raw, el);
       if (area(r) < 1) continue;
       texts.push({ r, raw, el });
@@ -221,6 +253,14 @@
     if (!card || !root.contains(card)) continue;
     const c = card.getBoundingClientRect();
     if (t.r.right > c.right + 2 || t.r.left < c.left - 2) add('escapes', t.el, 'out of ' + describe(card).split(' "')[0]);
+  }
+
+  // ------------------------------------------------------------ a value label past its plot
+  for (const t of texts) {
+    const plot = t.el.closest('.amt') && t.el.closest('.pairs, .days');
+    if (!plot) continue;
+    const p = plot.getBoundingClientRect();
+    if (t.raw.right > p.right + 1 || t.raw.left < p.left - 1) add('label-past-plot', t.el, `${Math.round(Math.max(t.raw.right - p.right, p.left - t.raw.left))} px`);
   }
   return out;
 })

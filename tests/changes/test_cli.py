@@ -20,7 +20,8 @@ def _out() -> io.StringIO:
 
 def test_mark_a_row_then_list_detail_and_unmark(tmp_path: Path) -> None:
     config = capcom.config.load_config()
-    idx = build({**before(40, 3), **after(40, 3)})
+    # in a subagent: a main thread's lifetime has no setting, so no saving to list
+    idx = build({**before(40, 3), **after(40, 3)}, agent="a1")
     p = tmp_path / "c.jsonl"
     now = now_after()
     out = _out()
@@ -41,7 +42,8 @@ def test_mark_a_row_then_list_detail_and_unmark(tmp_path: Path) -> None:
     assert "Marked #1" in text and "Tool-wait rewrites per 1,000 requests" in text
     assert "A verdict is due from 2026-10-08" in text
     [m] = load(p)
-    assert (m.kind, m.scope, m.applied_on) == ("subagent_cache_expiry", PROJECT, A)
+    # the cache-lifetime finding covers every project: the lifetime is one setting
+    assert (m.kind, m.scope, m.applied_on) == ("subagent_cache_expiry", "all", A)
     assert m.expected_usd_per_week is not None
 
     out = _out()

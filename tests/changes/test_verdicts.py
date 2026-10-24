@@ -60,8 +60,7 @@ def test_the_saving_is_the_rate_drop_times_the_after_workload_times_the_unit_pri
         if f.kind == "subagent_cache_expiry"
     ]
     assert found and found[0].metrics["rewrites"] == 28 * 3  # the finding counts the same
-    weeks = (local_midnight(A) - min(r.timestamp for r in idx.reqs)) / timedelta(days=7)
-    unit = found[0].saving_usd_per_week * weeks / (28 * 3)  # one rewrite's excess
+    unit = found[0].metrics["rewrite_excess_usd"] / (28 * 3)  # one rewrite's excess
     assert r.measured_usd_per_week == pytest.approx(
         r.before / 1000 * r.requests_per_week_after * unit, rel=1e-6
     )
