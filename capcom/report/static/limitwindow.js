@@ -41,7 +41,8 @@ export function windowStory(d) {
   return parts.join(' ');
 }
 
-// The fitted line's members, as the chart stacks them: named as in the lists below
+// The fitted line's members, as the chart draws them (each its own line from zero,
+// largest first): named as in the lists below
 // (the main thread, models without "claude-"), colored as Spend colors its members.
 export function fittedBands(d) {
   const label = (key) => (d.group === 'agent' && key === 'main' ? 'main thread' : d.group === 'model' ? key.replace(/^claude-/, '') : key);
@@ -81,7 +82,8 @@ export async function renderLimitWindow(main, r) {
   main.append(h('p.story', { text: windowStory(d) }));
 
   // how the percentage rose: the readings, and the fitted percent of the spend split
-  // by the page's group into stacked bands (each member's final share in the legend)
+  // by the page's group into a line per member, as Spend draws its members (each
+  // member's final share in the legend)
   const bands = fittedBands(d);
   const fitted = d.fitted.times.map((t, i) => [t, d.fitted.percent[i]]);
   const item = (color, label, value) => h('span', null, h('i', { style: `background:${color}` }), label, value ? h('em', null, ' ' + value) : null);
@@ -93,13 +95,13 @@ export async function renderLimitWindow(main, r) {
     bands.map((b) => item(b.color, b.label, '≈' + pctText(b.values[b.values.length - 1], 1)))));
   card.append(limitChart({
     segments: [{ points: d.points, reset: false, start_known: d.start_known }],
-    fitted: d.fit ? fitted : [], base: d.fitted.base, bands,
+    fitted: d.fit ? fitted : [], bands,
     now: d.current ? now : null, x0, x1: Math.max(x1, x0 + 1), height: 220, weekly, kind: d.window,
   }));
   const notes = [];
   if (d.fit) {
     const by = GROUPS.find(([v]) => v === d.group)[1].toLowerCase();
-    const split = bands.length ? `, and the bands under it split it by ${by}` : '';
+    const split = bands.length ? `, and the solid lines under it split it by ${by}, each adding up from zero` : '';
     notes.push(`The dashed line is the fit's percent of what was spent, adding up${split}: ${d.fit.note}`);
   } else notes.push('No fit of this window yet, so only the readings are drawn.');
   card.append(h('p.note', { text: notes.join(' ') }));

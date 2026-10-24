@@ -269,9 +269,10 @@ def test_window_page_words() -> None:
 
 
 @needs_node
-def test_the_bands_stack_from_the_base_to_the_fitted_line() -> None:
-    # an unseen start: the line starts at the first reading (5 %), the bands on it
-    fitted = {"base": 5, "percent": [5, 7.5, 9], "by": []}
+def test_each_member_of_the_fitted_line_is_its_own_line_from_zero() -> None:
+    # an unseen start: the fitted line starts at the first reading (5 %), and each
+    # member is drawn as Spend draws its members, its own percent from zero
+    fitted = {"base": 5, "times": [0, 1800e3, 3600e3], "percent": [5, 7.5, 9], "by": []}
     fitted["by"] = [
         {"key": "main", "percent": [0, 2, 3]},
         {"key": "scout", "percent": [0, 0.5, 1]},
@@ -279,7 +280,21 @@ def test_the_bands_stack_from_the_base_to_the_fitted_line() -> None:
     got = _run(
         f"const d = {json.dumps({'group': 'agent', 'fitted': fitted})};"
         " const lw = await import('./limitwindow.js'); const b = lw.fittedBands(d);"
-        " console.log(JSON.stringify([b.map((x) => x.label), m.stackBands(b, 3, 5)]));",
+        " const fit = d.fitted.times.map((t, i) => [t, d.fitted.percent[i]]);"
+        " const el = m.limitChart({ segments: [{ points: [[0, 5], [3600e3, 9]], reset: false }],"
+        "   fitted: fit, bands: b, x0: 0, x1: 3600e3, height: 100 });"
+        " const ps = paths(el);"
+        " console.log(JSON.stringify([b.map((x) => x.label), b.map((x) => x.color),"
+        "   ps.filter((p) => p.fill === 'none')"
+        "     .map((p) => [p.style, p.d, p['stroke-dasharray'] || null]),"
+        "   ps.filter((p) => p.class === 'fitband').length]));",
     )
-    assert got[0] == ["main thread", "scout"]
-    assert got[1] == [[5, 7, 8], [5, 7.5, 9]]  # the last band's top is the line
+    labels, colors, strokes, fills = got
+    assert labels == ["main thread", "scout"]
+    assert fills == 2  # one faded band per member
+    ys = {s: [float(v.split(" ")[1]) for v in d[1:].split("L")] for s, d, _ in strokes}
+    # 100 px for 100 %: y = 100 - percent
+    assert ys[f"stroke:{colors[0]}"] == [100, 98, 97]
+    assert ys[f"stroke:{colors[1]}"] == [100, 99.5, 99]
+    dashed = [d for s, d, dash in strokes if s == "stroke:var(--accent)" and dash]
+    assert dashed and dashed[-1].startswith("M0.0 95.0")  # the fitted line, on top

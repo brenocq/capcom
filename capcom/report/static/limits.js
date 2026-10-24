@@ -6,7 +6,7 @@ import {
   h, s, api, usd, tokens, seg, empty, setQuery, hm, monthDay, dayName, showTip, hideTip, entityColors, segBar, tableToggle,
   GROUPS, pickedGroup, rememberGroup, limitsPath, labelSpan,
 } from './lib.js';
-import { timeTicks, xAxis } from './charts.js';
+import { memberBands, timeTicks, xAxis } from './charts.js';
 import { withColors } from './spend.js';
 
 let uid = 0;
@@ -181,18 +181,6 @@ export function windowBounds(segments, x0, x1, weekly, gap) {
   return out;
 }
 
-// The top of each stacked band at each of `n` times: `base` plus the members up to
-// and including that one, so the last band's top is the whole line.
-export function stackBands(bands, n, base) {
-  const out = [];
-  let lo = Array.from({ length: n }, () => base);
-  for (const b of bands) {
-    lo = lo.map((v, i) => v + (b.values[i] ?? 0));
-    out.push(lo);
-  }
-  return out;
-}
-
 // Usage windows over time: each window's readings as a rising line that drops to
 // 0 at its reset, a dashed line at 100%, and the current window's forecast as a
 // fan (the 80% range, filled, with hairline edges, and the median dashed).
@@ -201,7 +189,8 @@ export function stackBands(bands, n, base) {
 // reading is dashed and labeled, since nothing was read there.
 // opts: {segments: [{points, resets_at, reset, hit_limit, start_known}], fan, now, x0, x1,
 //        height, left, weekly, since (ms: when recording began), runout (runoutMark),
-//        fitted: [[ms, percent]], base, bands: [{label, color, values}] (values at fitted's times)}
+//        fitted: [[ms, percent]], bands: [{label, color, values}] (each member's own percent
+//        at fitted's times, largest first)}
 export function limitChart(opts) {
   const W = 1000, left = opts.left || 40;
   const { x0, x1 } = opts;
@@ -218,26 +207,25 @@ export function limitChart(opts) {
   const X = (t) => ((t - x0) / (x1 - x0) * W).toFixed(1);
   const Y = (v) => (H - v / ymax * H).toFixed(1);
   const id = 'fan' + (++uid);
-  const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', 'aria-hidden': 'true', style: 'overflow:hidden' },
-    s('defs', null,
-      s('clipPath', { id: id + 'c' }, s('rect', { x: 0, y: 0, width: W, height: H }))));
+  const defs = s('defs', null, s('clipPath', { id: id + 'c' }, s('rect', { x: 0, y: 0, width: W, height: H })));
+  const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', 'aria-hidden': 'true', style: 'overflow:hidden' }, defs);
   const hover = [];
   const stroke = { fill: 'none', 'stroke-width': 2, 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke' };
   const gaps = [];
-  // the fitted line split into its members (the window page), stacked from `base`
-  // up to the line, first member at the bottom; drawn first, under the readings
+  // the fitted line split into its members (the window page), drawn as Spend draws
+  // its members: each one's own line from zero, largest first, a faded band down
+  // to the next one, and a fainter band from the fitted line down to the largest;
+  // drawn first, under the readings and the fitted line
   const fitted = opts.fitted || [];
   const bands = fitted.length > 1 ? opts.bands || [] : [];
-  const base = opts.base || 0;
-  const tops = stackBands(bands, fitted.length, base);
-  bands.forEach((b, k) => {
-    const lo = k ? tops[k - 1] : fitted.map(() => base);
-    const top = tops[k].map((v, i) => (i ? 'L' : 'M') + X(fitted[i][0]) + ' ' + Y(v)).join('');
-    let area = top;
-    for (let i = fitted.length - 1; i >= 0; i--) area += 'L' + X(fitted[i][0]) + ' ' + Y(lo[i]);
-    svg.append(s('path', { d: area + 'Z', class: 'fitband', style: `fill:${b.color};fill-opacity:0.45` }),
-      s('path', { d: top, fill: 'none', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke', style: `stroke:${b.color}` }));
-  });
+  if (bands.length) {
+    const marks = memberBands({
+      id, xs: fitted.map((p) => X(p[0])), Y, lines: bands.map((b) => b.values), colors: bands.map((b) => b.color),
+      total: fitted.map((p) => p[1]), tint: 'var(--text)', cls: 'fitband',
+    });
+    defs.append(...marks.defs);
+    svg.append(...marks.fills, ...marks.strokes);
+  }
   for (const sg of opts.segments) {
     const pts = sg.points;
     const endT = sg.resets_at ? new Date(sg.resets_at).getTime() : pts.length ? pts[pts.length - 1][0] : 0;
@@ -272,7 +260,8 @@ export function limitChart(opts) {
       svg.append(s('path', { d: `M${X(lp[0])} ${Y(lp[1])}L${X(fan[0][0])} ${Y(fan[0][1])}`, ...stroke, 'stroke-dasharray': '2 3', style: 'stroke:var(--text)' }));
     }
   }
-  // the fitted percent of what was spent, adding up (the window page): the bands' top
+  // the fitted percent of what was spent, adding up (the window page), on top of its
+  // members as Spend's total is: dashed, in the accent, so it reads apart from them
   if (fitted.length > 1) {
     svg.append(s('path', { d: fitted.map((p, i) => (i ? 'L' : 'M') + X(p[0]) + ' ' + Y(p[1])).join(''), ...stroke, 'stroke-dasharray': '5 4', style: 'stroke:var(--accent)' }));
   }
