@@ -4,7 +4,7 @@
 
 import {
   h, s, api, usd, tokens, pct, duration, stamp, hm, monthDay, empty, tipOn, showTip, hideTip,
-  outputUsd, lowerMark, LOWER_TITLE, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor, SERIES, OTHER_COLOR, maxOf,
+  outputUsd, lowerMark, LOWER_TITLE, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor, entityColor, maxOf,
   spikeText, spikeHref, sessionDot,
 } from './lib.js';
 import { niceTicks, activeAxis, xAxis } from './charts.js';
@@ -291,14 +291,14 @@ function unfolded(d) {
   if (d.main) {
     const l = (x(d.main.first) * 100), w = Math.max((x(d.main.last) - x(d.main.first)) * 100, 0.3);
     lanes.push(h('div.lab', null, h('b', { text: 'Main thread' })),
-      h('div.lane', { style: 'background:transparent' }, tipOn(h('span', { style: `left:${l.toFixed(2)}%;width:${w.toFixed(2)}%;background:var(--s1)` }),
+      h('div.lane', { style: 'background:transparent' }, tipOn(h('span', { style: `left:${l.toFixed(2)}%;width:${w.toFixed(2)}%;background:${entityColor('main', 'agent')}` }),
         'Main thread', [{ label: 'Requests', value: String(d.main.requests) }, { label: 'Cost', value: usd(d.main.usd) }]), gapMarks));
   }
   const byType = new Map();
   d.agents.forEach((a) => { if (!byType.has(a.agent_type)) byType.set(a.agent_type, []); byType.get(a.agent_type).push(a); });
   const types = [...byType.entries()].sort((a, b) => b[1].reduce((s1, z) => s1 + z.usd, 0) - a[1].reduce((s1, z) => s1 + z.usd, 0));
-  types.forEach(([type, list], k) => {
-    const color = SERIES[(k + 1) % SERIES.length] || OTHER_COLOR;
+  types.forEach(([type, list]) => {
+    const color = entityColor(type, 'agent');
     const maxUsd = maxOf(list.map((a) => a.usd), 1e-9);
     const bar = (a) => {
       const l = x(a.first) * 100, w = Math.max((x(a.last) - x(a.first)) * 100, 0.3);
@@ -359,8 +359,8 @@ function agentsTable(d) {
   card.append(h('div.scroll', null, h('table.data', null,
     h('thead', null, h('tr', null, ['Agent', 'Spawns', 'Tool calls (median)', 'Peak context (average)', 'Share of cost', 'Cost'].map((c, i) =>
       h('th', { scope: 'col', style: i && i !== 4 ? 'text-align:right' : null, text: c })))),
-    h('tbody', null, d.agent_types.map((a, i) => {
-      const color = a.agent_type === 'main' ? 'var(--s1)' : SERIES[i % SERIES.length];
+    h('tbody', null, d.agent_types.map((a) => {
+      const color = entityColor(a.agent_type, 'agent');
       return h('tr', null,
         h('td', null, h('span', { style: 'display:flex;align-items:center;gap:8px;font-weight:500' }, h('span.sw', { style: `background:${color}` }), a.agent_type === 'main' ? 'main thread' : a.agent_type)),
         h('td.num', { text: a.spawns == null ? 'n/a' : String(a.spawns), style: a.spawns == null ? 'color:var(--muted)' : null }),

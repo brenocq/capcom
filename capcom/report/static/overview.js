@@ -113,10 +113,10 @@ export async function renderOverview(main, r) {
   // by project, by agent type, checks
   const label = range === 'today' ? 'today' : 'the last 7 days';
   const projects = h('section.card', null, h('h2.small', { text: 'By project' }),
-    barList(top(block.by_project), (x) => x.usd, (x) => `${x.count} session${x.count === 1 ? '' : 's'}`));
+    barList(top(block.by_project), (x) => x.usd, (x) => `${x.count} session${x.count === 1 ? '' : 's'}`, 'project'));
   const agents = h('section.card', null, h('h2.small', { text: 'By agent type' }),
     barList(top(block.by_agent.map((a) => (a.key === 'main' ? { ...a, label: 'main threads' } : a))), (x) => x.usd,
-      (x) => (x.key === 'main' ? `${x.count} session${x.count === 1 ? '' : 's'}` : `${x.count} spawn${x.count === 1 ? '' : 's'}`)));
+      (x) => (x.key === 'main' ? `${x.count} session${x.count === 1 ? '' : 's'}` : `${x.count} spawn${x.count === 1 ? '' : 's'}`), 'agent'));
   const checks = h('section.card', null, h('div.split', null, h('h2.small', { text: 'Worth changing' }), h('a.link', { href: '/checks', text: 'All checks' })));
   const found = await pendingBlock('checks', 'days=14');
   // the largest kinds across their scopes (judgement calls are not savings to count)

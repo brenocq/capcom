@@ -2,9 +2,10 @@
 
 An agent definition is a Markdown file with YAML frontmatter, in
 `~/.claude/agents/*.md` or `<project>/.claude/agents/*.md`; the agent type is the
-frontmatter's `name:` (the file's stem when it has none). Only `name:` and `tools:`
-are read (`tools:` as an inline list, `tools: Read, Grep`, or a block list of
-`- Read` lines); nothing else in the file is kept, and nothing is written.
+frontmatter's `name:` (the file's stem when it has none). Only `name:`, `tools:`
+and `color:` are read (`tools:` as an inline list, `tools: Read, Grep`, or a block
+list of `- Read` lines; `color:` the name Claude Code draws the agent in, for the
+website's colors); nothing else in the file is kept, and nothing is written.
 """
 
 from __future__ import annotations
@@ -54,14 +55,22 @@ def read_frontmatter(path: Path) -> tuple[str | None, tuple[str, ...] | None]:
     """(name, tools) from a definition's frontmatter: the `name:` value, or None;
     the tools it lists, or None when it lists none (or every tool, `*`). Both None
     when the file cannot be read. Reads at most the frontmatter."""
+    name, tools, _ = _frontmatter(path)
+    return name, tools
+
+
+def _frontmatter(path: Path) -> tuple[str | None, tuple[str, ...] | None, str | None]:
+    """(name, tools, color): read_frontmatter's two and the `color:` value (lowercase),
+    or None."""
     name: str | None = None
+    color: str | None = None
     tools: list[str] | None = None
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             lines = _lines(fh)
             first = next(lines, "")
             if first.strip() != "---":
-                return None, None
+                return None, None, None
             in_block = False
             for _, line in zip(range(MAX_FRONTMATTER_LINES), lines, strict=False):
                 if line.strip() == "---":
@@ -78,11 +87,13 @@ def read_frontmatter(path: Path) -> tuple[str | None, tuple[str, ...] | None]:
                     in_block = not tools
                 elif line.startswith("name:"):
                     name = line[len("name:") :].strip().strip("'\"") or None
+                elif line.startswith("color:"):
+                    color = line[len("color:") :].strip().strip("'\"").lower() or None
     except OSError:
-        return None, None
+        return None, None, None
     if not tools or tools == ["*"]:
-        return name, None
-    return name, tuple(tools)
+        return name, None, color
+    return name, tuple(tools), color
 
 
 def read_tools(path: Path) -> tuple[str, ...] | None:
@@ -123,4 +134,26 @@ def find_all_definitions(dirs: Iterable[Path]) -> dict[str, list[AgentDefinition
             name, tools = read_frontmatter(path)
             kind = name or path.stem
             out.setdefault(kind, []).append(AgentDefinition(kind, path, tools))
+    return out
+
+
+def find_colors(dirs: Iterable[Path]) -> dict[str, str]:
+    """Agent type -> the `color:` of its definition, for the types whose definition
+    sets one; a type defined in several folders keeps the first one found (as
+    find_definitions)."""
+    out: dict[str, str] = {}
+    seen: set[str] = set()
+    for folder in dirs:
+        try:
+            files = sorted(p for p in folder.glob("*.md") if p.is_file())
+        except OSError:
+            continue
+        for path in files:
+            name, _, color = _frontmatter(path)
+            kind = name or path.stem
+            if kind in seen:
+                continue
+            seen.add(kind)
+            if color:
+                out[kind] = color
     return out

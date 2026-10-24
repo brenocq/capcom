@@ -90,11 +90,11 @@ export async function renderDay(main, r) {
   const spikes = h('section.card.grow3', null, h('h2.small', { text: 'Spikes that day' }), ...spikeList(picked || d.spikes, undefined, 6));
   const where = h('section.card.grow2b', null,
     h('h2.small', { text: 'By project' }),
-    barList(d.by_project.slice(0, 6), (p) => p.usd, (p) => (p.typical_usd != null ? `typical ${usd(p.typical_usd)}` : '')),
+    barList(d.by_project.slice(0, 6), (p) => p.usd, (p) => (p.typical_usd != null ? `typical ${usd(p.typical_usd)}` : ''), 'project'),
     h('h2.small', { style: 'margin-top:18px', text: 'By agent type' }),
-    barList(d.by_agent.slice(0, 6).map((a) => ({ ...a, label: a.key === 'main' ? 'main thread' : a.label })), (a) => a.usd, (a) => `${a.count} ${a.key === 'main' ? 'session' : 'agent'}${a.count === 1 ? '' : 's'}`),
+    barList(d.by_agent.slice(0, 6).map((a) => ({ ...a, label: a.key === 'main' ? 'main thread' : a.label })), (a) => a.usd, (a) => `${a.count} ${a.key === 'main' ? 'session' : 'agent'}${a.count === 1 ? '' : 's'}`, 'agent'),
     h('h2.small', { style: 'margin-top:18px', text: 'By model' }),
-    barList(d.by_model.slice(0, 6), (m) => m.usd, (m) => `${m.count} session${m.count === 1 ? '' : 's'}`));
+    barList(d.by_model.slice(0, 6), (m) => m.usd, (m) => `${m.count} session${m.count === 1 ? '' : 's'}`, 'model'));
   main.append(h('div.row-wrap', null, spikes, where));
 
   main.append(h('section.card', null,

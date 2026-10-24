@@ -342,6 +342,20 @@ def status(ctx: Context) -> dict[str, Any]:
     return out
 
 
+def colors(ctx: Context) -> dict[str, Any]:
+    """One color per project, agent type and model, the same on every page
+    (capcom.report.colors): assigned over every entity in the index."""
+    from capcom.checks import default_agent_dirs
+    from capcom.report.colors import entity_colors
+
+    infos = ctx.infos()
+    names = ctx.names(infos)
+    dirs = ctx.agent_dirs
+    if dirs is None:
+        dirs = default_agent_dirs(sorted(set(names.paths.values())))
+    return entity_colors(ctx.index, ctx.table, infos, names, dirs)
+
+
 # today's same-time comparison waits for a baseline of at least $1, or an hour of today
 SAME_HOUR_MIN_USD = 1.0
 

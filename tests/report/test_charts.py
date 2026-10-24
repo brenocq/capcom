@@ -188,22 +188,47 @@ console.log(JSON.stringify({ free, hit, inside, stuck }));
     assert set(got["stuck"]) == {"dx", "dy"}
 
 
+COLORS = {
+    "general": 2,
+    "palette": [["#111111", "#eeeeee"], ["#222222", "#dddddd"], ["#C8601A", "#F0904A"]],
+    "project": {"-home-x-capcom": 2, "capcom": 2, "-home-x-cv": 0, "cv": 0},
+    "agent": {"main": 1, "scout": 0},
+    "model": {"claude-opus-5-5": 1},
+}
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
 def test_colors_follow_the_entity_not_its_rank() -> None:
-    got = _node("""
+    got = _node(
+        """
+document.head = new Node('head');
+document.getElementById = (id) => document.head.children.find((c) => c.id === id) || null;
 const m = await import('./lib.js');
-const a = m.entityColors(['capcom', 'improved', 'toy-brain', '(other)']);
-const b = m.entityColors(['toy-brain', '(other)', 'improved', 'capcom']);
-const many = m.entityColors(['a', 'b', 'c', 'd', 'e', 'f', 'g']);
-console.log(JSON.stringify({ a: [...a], b: Object.fromEntries(b),
-  distinct: new Set([...a.values()]).size, many: [...many.values()] }));
-""")
-    a = dict(got["a"])
-    assert a == got["b"]
-    assert a["(other)"] == "var(--gray)"
-    assert got["distinct"] == 4
-    # six palette colors for the first six keys, the seventh shares the gray
-    assert len(set(got["many"][:6])) == 6 and got["many"][6] == "var(--gray)"
+const before = m.entityColor('capcom', 'project');
+m.useColors(COLORS_JSON, false);
+// two views with different keys: the day's chart (folder keys) and its bars (labels)
+const chart = m.entityColors(['-home-x-capcom', '-home-x-cv', '(other)'], 'project');
+const bars = m.entityColors(['cv', 'improved', 'capcom'], 'project');
+const style = document.getElementById('entity-colors');
+const [chartC, barsC] = [Object.fromEntries(chart), Object.fromEntries(bars)];
+console.log(JSON.stringify({ before, chart: chartC, bars: barsC,
+  agent: m.entityColor('main', 'agent'), anyKind: m.entityColor('claude-opus-5-5'),
+  unknown: [m.entityColor('improved', 'project'), m.entityColor('improved', 'project')],
+  css: style ? style.textContent : null }));
+""".replace("COLORS_JSON", json.dumps(COLORS))
+    )
+    assert got["before"].startswith("var(--s")  # no assignment yet: a stable palette slot
+    assert got["chart"]["-home-x-capcom"] == got["bars"]["capcom"] == "var(--ec2)"
+    assert got["chart"]["-home-x-cv"] == got["bars"]["cv"] == "var(--ec0)"
+    assert got["chart"]["(other)"] == "var(--gray)"
+    assert got["agent"] == "var(--ec1)" and got["anyKind"] == "var(--ec1)"
+    # a key the server does not know: the same general slot every time
+    assert got["unknown"][0] == got["unknown"][1] in ("var(--ec0)", "var(--ec1)")
+    # every palette color is defined for both themes
+    light, dark = got["css"].split("\n")
+    assert light.startswith(':root,[data-theme="light"]') and dark.startswith('[data-theme="dark"]')
+    for i, (lo, hi) in enumerate(COLORS["palette"]):
+        assert f"--ec{i}:{lo}" in light and f"--ec{i}:{hi}" in dark
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
