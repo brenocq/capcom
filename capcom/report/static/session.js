@@ -235,6 +235,44 @@ export function placePills(pills, width, textWidth, pad = 16, space = 4) {
   return out;
 }
 
+// The spend rate lane: dollars per hour of active time, each request's cost spread
+// over a triangle `window` wide on either side of it (so it reads like a moving
+// 10-minute window, without its steps), sampled every `step`.
+export const RATE = { window: 10 * 60e3, step: 2 * 60e3, minRun: 60e3 };
+
+// The spend rate of the requests at times `t` costing `usd`, in $/hour, over the runs
+// of active time between `start`, `end` and the squeezed `gaps` (sorted {start, end}):
+// [{start, end, t: [...], rate: [...]}], one per run. A request counts only in its own
+// run, its triangle cut at the run's edges and scaled back up, so the rate drops to
+// zero across a pause instead of bridging it and each run's area is its cost. A run
+// shorter than `minRun` is drawn that long. `pick(i)` says which requests count.
+export function spendRate(t, usd, start, end, gaps, pick = () => true, opt = RATE) {
+  const w = opt.window;
+  const cdf = (u) => (u <= -w ? 0 : u < 0 ? (u + w) ** 2 / (2 * w * w) : u < w ? 1 - (w - u) ** 2 / (2 * w * w) : 1);
+  const bounds = [];
+  let prev = start;
+  for (const g of gaps) { bounds.push([prev, g.start]); prev = g.end; }
+  bounds.push([prev, end]);
+  let i = 0;
+  return bounds.map(([r0, r1]) => {
+    r1 = Math.max(r1, r0 + opt.minRun);
+    const own = [];
+    while (i < t.length && t[i] <= r1) { if (t[i] >= r0 && pick(i)) own.push(i); i++; }
+    const weight = own.map((k) => usd[k] / Math.max(cdf(r1 - t[k]) - cdf(r0 - t[k]), 1e-9));
+    const n = Math.max(2, Math.ceil((r1 - r0) / opt.step) + 1);
+    const ts = [], rate = [];
+    let lo = 0;
+    for (let j = 0; j < n; j++) {
+      const u = r0 + (r1 - r0) * j / (n - 1);
+      while (lo < own.length && t[own[lo]] < u - w) lo++;
+      let v = 0;
+      for (let k = lo; k < own.length && t[own[k]] <= u + w; k++) v += weight[k] * (1 - Math.abs(u - t[own[k]]) / w) / w;
+      ts.push(u); rate.push(v * 3600e3);
+    }
+    return { start: r0, end: r1, t: ts, rate };
+  });
+}
+
 // "39 min" -> "39m", "4 h 46" -> "5 h": a pause's label when the whole one does not fit
 function shortPause(minutes) {
   return minutes < 60 ? `${Math.round(minutes)}m` : minutes < 48 * 60 ? `${Math.round(minutes / 60)} h` : `${Math.round(minutes / 1440)} d`;
@@ -269,6 +307,64 @@ function axisLabels(start, end, x, W) {
     if (placed.every(([a, b]) => l + w + 12 <= a || b + 12 <= l)) { placed.push([l, l + w]); out.push(m); }
   }
   return out.sort((a, b) => a.t - b.t);
+}
+
+const perHour = (v) => `${usd(v, v >= 100 ? 0 : 2)}/h`;
+
+// The spend rate lane under the context plot: $/hour on the same active-time axis,
+// zero across each squeezed pause. Split into the main thread and the subagents
+// (stacked, in their colors) when the session has both, else one curve.
+function rateLane(d, R, start, end, x, X, W, mainColor, hasMain, gapBands, spot) {
+  const col = R.usd_all || R.usd;
+  const split = hasMain && R.agent.some((a) => a >= 0);
+  const low = spendRate(R.t, col, start, end, x.gaps, split ? (i) => R.agent[i] < 0 : () => true);
+  const high = split ? spendRate(R.t, col, start, end, x.gaps, (i) => R.agent[i] >= 0) : null;
+  const top = low.map((run, k) => run.rate.map((v, j) => v + (high ? high[k].rate[j] : 0)));
+  const ticks = niceTicks(Math.max(...top.flat(), 1e-6), 2);
+  const rmax = ticks[ticks.length - 1];
+  const H = 110;
+  const Y = (v) => (H - v / rmax * (H - 4)).toFixed(1);
+  const trace = (run, vals) => run.t.map((tm, j) => `L${X(tm)} ${Y(vals[j])}`).join('');
+  const back = (run, vals) => run.t.map((tm, j) => `L${X(tm)} ${Y(vals[j])}`).reverse().join('');
+  const lowLine = low.map((run) => `M${X(run.start)} ${H}${trace(run, run.rate)}L${X(run.end)} ${H}`).join('');
+  const topLine = low.map((run, k) => `M${X(run.start)} ${H}${trace(run, top[k])}L${X(run.end)} ${H}`).join('');
+  const band = low.map((run, k) => `M${trace(run, top[k]).slice(1)}${back(run, run.rate)}Z`).join('');
+  const line = (dd, color) => s('path', { d: dd, fill: 'none', 'stroke-width': 1.5, 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke', style: `stroke:${color}` });
+  const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' },
+    s('path', { d: lowLine, style: `fill:${mainColor};fill-opacity:0.28` }),
+    split ? s('path', { d: band, style: 'fill:var(--s2);fill-opacity:0.32' }) : null,
+    line(lowLine, mainColor),
+    split ? line(topLine, 'var(--s2)') : null);
+  const chart = h('div.chart', { style: `height:${H}px;border-bottom:1px solid var(--l15)` }, gapBands(), spot());
+  const lab = h('div.lab.ctxlab', null, h('b', { text: 'Spend rate' }), h('span', { text: '$/hour, 10-min window' }));
+  for (const v of ticks.slice(1)) {
+    const at = (1 - v / rmax * (H - 4) / H) * 100;
+    chart.append(h('div.gridline', { style: `top:${at.toFixed(2)}%` }));
+    if (at >= 45) lab.append(h('span.ylab', { style: `top:${at.toFixed(2)}%`, text: perHour(v) }));
+  }
+  chart.append(svg);
+
+  // hover: the rate at that moment, or the pause it falls in
+  const samples = low.flatMap((run, k) => run.t.map((tm, j) => ({ f: x(tm), t: tm, low: run.rate[j], high: high ? high[k].rate[j] : 0 })))
+    .sort((a, b) => a.f - b.f);
+  chart.addEventListener('mousemove', (e) => {
+    if (chart.closest('.tlscroll.dragging')) return;
+    const rect = chart.getBoundingClientRect();
+    const f = (e.clientX - rect.left) / rect.width;
+    const g = x.gaps.find((p) => f > x(p.start) + 1e-4 && f < x(p.end));
+    if (g) { showTip(e, `Pause of ${duration((g.end - g.start) / 1e3)}`, [{ label: 'Spend rate', value: perHour(0) }]); return; }
+    let lo = 0, hi = samples.length - 1;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (samples[mid].f < f) lo = mid + 1; else hi = mid; }
+    if (lo > 0 && f - samples[lo - 1].f <= samples[lo].f - f) lo--;
+    const p = samples[lo];
+    showTip(e, `${stamp(new Date(p.t))} · spend rate`, [
+      { label: 'Rate', value: perHour(p.low + p.high) },
+      ...(split ? [{ label: 'Main thread', value: perHour(p.low) }, { label: 'Subagents', value: perHour(p.high) }] : []),
+      { label: 'Over', value: '10-min window' },
+    ]);
+  });
+  chart.addEventListener('mouseleave', hideTip);
+  return { lab, chart, split };
 }
 
 const NOTE = 'Active time; pauses over 30 minutes are squeezed to a mark.';
@@ -354,13 +450,8 @@ function unfolded(d, r) {
   }
   hover(ctx);
 
-  // cost per request
-  const cmaxUsd = maxOf(R.usd, 1e-6);
-  const bars = (sel) => R.t.map((_, i) => i).filter(sel).map((i) => `M${X(R.t[i])} 80L${X(R.t[i])} ${(80 - R.usd[i] / cmaxUsd * 76).toFixed(1)}`).join('');
-  const cost = hover(h('div.chart', { style: 'height:80px;border-bottom:1px solid var(--l15)' }, gapBands(), spot(),
-    s('svg', { viewBox: `0 0 ${W} 80`, preserveAspectRatio: 'none', 'aria-hidden': 'true' },
-      s('path', { d: bars((i) => R.agent[i] < 0), fill: 'none', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke', style: 'stroke:var(--muted)' }),
-      s('path', { d: bars((i) => R.agent[i] >= 0), fill: 'none', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke', style: 'stroke:var(--s2)' }))));
+  // the spend rate over active time, the main thread and the subagents stacked
+  const cost = rateLane(d, R, start, end, x, X, W, mainColor, main.length > 0, gapBands, spot);
 
   // pauses: a tick for each; over the long ones a chip with its length, wherever it
   // fits at the plot's width (the longest first, shortened before it is dropped)
@@ -451,6 +542,7 @@ function unfolded(d, r) {
   const keys = [[
     main.length ? item('', `background:${mainColor}`, 'Main thread') : null,
     dots.length ? item('.tldot', null, 'Subagent requests') : null,
+    cost.split ? item('', 'background:var(--s2)', 'Subagent spend') : null,
     d.compactions.some((c) => !c.agent_id) ? item('.tlkey.compact', null, 'Compaction') : null,
     d.compactions.some((c) => c.agent_id) ? item('.tlkey.compact.sub', null, 'Subagent compaction') : null,
     Number.isFinite(at) ? item('.tlkey.spot', null, 'The spike you followed') : null,
@@ -464,7 +556,7 @@ function unfolded(d, r) {
   const columns = (floor) => `var(--tllab) minmax(${floor}px, 1fr)`;
   const grid = h('div.tl', { style: `grid-template-columns:${columns(W)}` },
     ctxLab, ctx,
-    h('div.lab', null, h('b', { text: 'Cost per request' }), h('span', { text: `scale $0 to ${usd(cmaxUsd)}` })), cost,
+    cost.lab, cost.chart,
     h('div.lab', null, h('b', { text: 'Pauses' })), pauses,
     lanes,
     h('div.lab'), axis);

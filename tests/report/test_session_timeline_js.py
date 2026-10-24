@@ -98,3 +98,59 @@ def test_a_plot_slightly_wider_than_its_room_is_squeezed_in_a_longer_one_scrolls
     assert tiny == three_h  # far too narrow a room: the plot keeps its width and scrolls
     assert wide_week == week
     assert wide_short == 0
+
+
+MIN = 60_000
+
+
+def _rate(t: list[float], usd: list[float], start: float, end: float, gaps: list[dict]) -> list:
+    got = _run(
+        f"console.log(JSON.stringify(m.spendRate({json.dumps(t)}, {json.dumps(usd)},"
+        f" {start}, {end}, {json.dumps(gaps)})))"
+    )
+    assert isinstance(got, list)
+    return got
+
+
+def _area(run: dict) -> float:
+    """Dollars under one run's curve ($/h over ms)."""
+    pts = list(zip(run["t"], run["rate"], strict=True))
+    return sum((b - a) * (u + v) / 2 for (a, u), (b, v) in pairwise(pts)) / 3_600_000
+
+
+def test_a_steady_pace_reads_as_its_hourly_rate() -> None:
+    # $0.10 a minute for two hours: $6/h away from the edges
+    t = [i * MIN for i in range(121)]
+    (run,) = _rate(t, [0.1] * 121, 0, 120 * MIN, [])
+    middle = [v for tm, v in zip(run["t"], run["rate"], strict=True) if 20 * MIN < tm < 100 * MIN]
+    assert middle and all(abs(v - 6) < 0.05 for v in middle)
+
+
+def test_each_run_holds_its_own_cost_and_a_pause_is_not_bridged() -> None:
+    # a burst just before a two-hour pause, a slow trickle after it
+    t = [0, 5 * MIN, 9 * MIN, 10 * MIN, 130 * MIN, 150 * MIN, 170 * MIN]
+    usd = [0.5, 0.5, 3.0, 4.0, 0.1, 0.1, 0.1]
+    gaps = [{"start": 10 * MIN, "end": 130 * MIN}]
+    before, after = _rate(t, usd, 0, 170 * MIN, gaps)
+    assert before["end"] == 10 * MIN and after["start"] == 130 * MIN
+    assert _area(before) == pytest.approx(8.0, rel=0.02)
+    assert _area(after) == pytest.approx(0.3, rel=0.02)
+    # the burst's high rate stops at the pause: the first minutes after it are slow
+    assert max(before["rate"]) > 20
+    assert all(v < 2 for v in after["rate"])
+
+
+def test_a_lone_request_between_pauses_still_shows() -> None:
+    t = [0, 60 * MIN, 120 * MIN]
+    gaps = [{"start": 0, "end": 60 * MIN}, {"start": 60 * MIN, "end": 120 * MIN}]
+    runs = _rate(t, [1.0, 2.0, 1.0], 0, 120 * MIN, gaps)
+    assert len(runs) == 3
+    alone = runs[1]
+    assert alone["end"] - alone["start"] == MIN  # drawn a minute long
+    assert _area(alone) == pytest.approx(2.0, rel=0.02)
+    assert sum(_area(r) for r in runs) == pytest.approx(4.0, rel=0.02)
+
+
+def test_no_requests_no_rate() -> None:
+    (run,) = _rate([], [], 0, 30 * MIN, [])
+    assert run["rate"] and all(v == 0 for v in run["rate"])
