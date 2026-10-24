@@ -250,6 +250,14 @@ const PAGES = {
       card('', big('20%'), tableRows(5, 5)),
     ],
   }),
+  agent: () => ({
+    head: h('header.sk-sessionhead', null, line('220px', '.sk-note'), big('40%'), line('52%', '.sk-sub'), line('70%', '.sk-sub')),
+    body: [
+      h('div.grid', { style: '--min:150px' }, kpiCard(50), kpiCard(46), kpiCard(40), kpiCard(54), kpiCard(44), kpiCard(48)),
+      card('', big('30%'), legend(5), ghostLine(260, 0, 6)),
+      card('', big('20%'), tableRows(6, 5)),
+    ],
+  }),
   day: () => ({
     head: head(null, [300]),
     body: [
@@ -273,7 +281,7 @@ function limitsCard(height) {
     notes(92, 60), line('24%', '.sk-body'), barRows(6), line('20%', '.sk-body'), legend(7), barRows(6));
 }
 
-const pageOf = (r) => (r.name === 'changes' && r.arg ? 'change' : r.name);
+const pageOf = (r) => (r.name === 'changes' && r.arg ? 'change' : r.name === 'session' && r.rest && r.rest[1] === 'agent' ? 'agent' : r.name);
 
 // The placeholder <main> for route `r`, in place of the page until it draws.
 export function skeletonMain(r) {

@@ -373,7 +373,8 @@ counts every matching session, temporary folders included (`temporary` of them).
  thinned: {requests, kept, spikes} | null,
  main: {first, last, requests, usd, tool_calls, peak_context} | null,
  agents: [{agent_id, agent_type, description, first, last, requests, usd, tool_calls,
-           peak_context, finished}],   # time order; description null when not logged
+           peak_context, finished, spawned, alive_seconds, model_seconds, tool_seconds,
+           model}],   # time order; description null when not logged
  agent_types: [{agent_type, spawns, tool_calls, median_tool_calls, average_peak_context,
                 usd, share}],   # main: spawns and median_tool_calls null (one thread)
  pauses: [{start, end, minutes, next_usd, next_cache_write}],    # gaps of 5 minutes or more
@@ -415,6 +416,53 @@ unexplained. `note` says all of it in a few short
 sentences, else null. `capcom calibrate` prints the same part per session (`--days`, `--project`). A session whose replies are all placeholders has
 0 active seconds. A session is
 `running` when it wrote within the last 10 minutes.
+
+Each agent's `spawned` (epoch ms) is the Agent call that started it (its first
+request when the call is not logged), `alive_seconds` runs from there to its last
+request or tool result, split into `model_seconds` (the model thinking and writing)
+and `tool_seconds` (tool calls running, from the call to its result), as in
+`/api/agent`; `model` is the model it used most.
+
+### `GET /api/agent/<session_id>?agent=<agent_id|main>`
+
+One thread of a session, step by step, for the agent timeline page
+(`/session/<session_id>/agent/<agent_id>`). 404 when the session or the agent is not
+known. Times are epoch ms.
+
+```
+{session: {session_id, title, color, project},
+ thread: {agent_id, is_main, name, agent_type, description, model, models, spawned,
+          spawned_by: {agent_id, name} | null, first, last, finished, requests, usd,
+          start_context, peak_context, alive_seconds, model_seconds, tool_seconds,
+          idle_seconds},
+ neighbors: {prev: {agent_id, name} | null, next: {agent_id, name} | null},
+ steps: {start, end, kind, label, short, calls, phase, usd, next},   # columns
+ requests: {t, context, usd, output, cache_read, cache_write, estimated},   # columns
+ phases: [{n, name, guessed, start, end, seconds, usd, kinds: {kind: seconds},
+           first, last}],   # first, last: indexes into steps
+ kinds: [{key, label, seconds, steps, usd}],
+ idle: [[start, end]],   # waits for the user
+ todo: bool}
+```
+
+A step is either the model thinking and writing (from a prompt or a tool result to
+the request after it, `kind` "think") or one round of tool calls (from the call to
+its last result): `kind` is "test" (tests and builds), "files" (reading, editing and
+searching files), "shot" (screenshots and browsers) or "other". `label` names the
+tools in capcom's words: a file's name, a shell command's program and its plain
+words (never its arguments or text), and `short` a shorter form for the strip. A tool
+step carries the cost of the request that read its results (`next`, an index into
+`requests`, null when none did); a thinking step the cost of a request that read no
+tool result, so `steps.usd` adds up to the thread's cost. `phases` follow the
+thread's to-do list (TodoWrite snapshots, or TaskCreate and TaskUpdate) when it has
+one (`guessed` false, the item's active form as `name`); the stretches between, or
+the whole thread without one, are cut where the work changes (reading, editing,
+testing, other commands), small parts merged into their neighbors, and named from the
+files and commands they touched (`guessed` true). `idle` are the waits for the user:
+from a turn's end to the prompt that started the next one. `todo` says whether any phase
+came from a to-do list. `spawned_by` is the thread whose Agent call started it, and
+`neighbors` are the threads before and after it in the session's order (the main
+thread first).
 
 ### `GET /api/live`
 

@@ -15,6 +15,7 @@ import hashlib
 import math
 import re
 import statistics
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
@@ -26,6 +27,7 @@ from capcom.config import load_config
 from capcom.cost.model import price
 from capcom.cost.prices import canonical, is_placeholder
 from capcom.cost.top import MAIN_THREAD, project_label
+from capcom.report import agent as thread
 from capcom.report.analysis import Analysis, Unavailable
 from capcom.report.calibration import calibration_json
 from capcom.report.story import latest_change, regime_json
@@ -1010,6 +1012,8 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
     total = w.total.usd
     agents_json: list[dict[str, Any]] = []
     by_type: dict[str, list[_Span]] = {}
+    results = _results(ctx, session_id) if agent_order else {}
+    spawns = {c.tool_use_id: r for r in counted for c in r.tool_calls}
     for aid in agent_order:
         span, ai = spans[aid], agent_infos.get(aid)
         kind = (ai.agent_type if ai else None) or "(unknown agent)"
@@ -1018,6 +1022,7 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
             {"agent_id": aid, "agent_type": kind, "description": ai.description if ai else None}
             | span.to_json(ctx.tz)
             | {"finished": ai.finished if ai else None}
+            | _life(counted, aid, ai, spawns, results.get(aid, {}), ctx.table)
         )
     type_rows: list[dict[str, Any]] = []
     if main.requests:
@@ -1111,6 +1116,135 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
         "compactions": compactions,
         "spikes": _session_spikes(ctx, found, info, names),
     }
+
+
+def _results(ctx: Context, session_id: str) -> dict[str | None, dict[str, thread.Result]]:
+    """The tool results of a session by thread: tool_use_id -> when it came back."""
+    out: dict[str | None, dict[str, thread.Result]] = {}
+    kinds = frozenset({EventKind.TOOL_RESULT})
+    for e in ctx.index.events(session_id=session_id, kinds=kinds):
+        tid = e.attrs.get("tool_use_id")
+        if isinstance(tid, str):
+            got = out.setdefault(e.agent_id, {})
+            if tid not in got or e.timestamp > got[tid].time:
+                got[tid] = thread.Result(e.timestamp, e.attrs.get("is_image") is True)
+    return out
+
+
+def _spawn(ai: AgentInfo | None, spawns: Mapping[str, Request], first: datetime) -> Request | None:
+    """The request whose Agent call spawned a subagent (when it came before its first)."""
+    parent = spawns.get(ai.tool_use_id) if ai and ai.tool_use_id else None
+    return parent if parent is not None and parent.timestamp <= first else None
+
+
+def _thread_name(aid: str | None, ai: AgentInfo | None) -> str:
+    if aid is None:
+        return "Main thread"
+    return (ai.description if ai else None) or (ai.agent_type if ai else None) or "Subagent"
+
+
+def _life(
+    counted: Sequence[Request],
+    aid: str,
+    ai: AgentInfo | None,
+    spawns: Mapping[str, Request],
+    results: Mapping[str, thread.Result],
+    table: PriceTable,
+) -> dict[str, Any]:
+    """A subagent's life for the session page: spawn time, time alive, and how much of
+    it the model worked and its tools ran (the agent page's steps, without its log)."""
+    reqs = [r for r in counted if r.agent_id == aid]
+    parent = _spawn(ai, spawns, reqs[0].timestamp)
+    steps, _ = thread.build_steps(reqs, results, start=parent.timestamp if parent else None)
+    model_s, tool_s = thread.busy_seconds(steps)
+    first = steps[0].start if steps else reqs[0].timestamp
+    last = max([reqs[-1].timestamp, *(st.end for st in steps)])
+    return {
+        "spawned": ms(first),
+        "alive_seconds": round((last - first).total_seconds(), 1),
+        "model_seconds": round(model_s, 1),
+        "tool_seconds": round(tool_s, 1),
+        "model": Counter(canonical(table, r.model) for r in reqs).most_common(1)[0][0],
+    }
+
+
+def agent(ctx: Context, session_id: str, query: Mapping[str, str]) -> dict[str, Any]:
+    """One thread of a session (`?agent=<agent_id>`, or `main`), step by step."""
+    want = query.get("agent") or "main"
+    aid = None if want == "main" else want
+    info = next((x for x in ctx.index.sessions() if x.session_id == session_id), None)
+    counted = [r for r in ctx.index.requests(session_id=session_id) if not is_placeholder(r.model)]
+    if info is None and not counted:
+        raise ApiError(404, "not_found", "no such session")
+    agent_infos = {a.agent_id: a for a in ctx.index.agents(session_id=session_id)}
+    order: list[str | None] = [None] if any(r.agent_id is None for r in counted) else []
+    for r in counted:
+        if r.agent_id is not None and r.agent_id not in order:
+            order.append(r.agent_id)
+    if aid not in order:
+        raise ApiError(404, "not_found", "no such agent in this session")
+    reqs = [r for r in counted if r.agent_id == aid]
+    costs = [price(r, ctx.table).total for r in reqs]
+    spawns = {c.tool_use_id: r for r in counted for c in r.tool_calls}
+    ai = agent_infos.get(aid) if aid else None
+    parent = _spawn(ai, spawns, reqs[0].timestamp)
+    files = getattr(ctx.index, "thread_files", None)
+    paths = files(session_id, aid) if callable(files) else []
+    extras = thread.read_extras(paths, aid)
+    steps, idle = thread.build_steps(
+        reqs,
+        _results(ctx, session_id).get(aid, {}),
+        start=parent.timestamp if parent else None,
+        prompts=extras.prompts,
+        commands=extras.commands,
+    )
+    thread.attribute_costs(steps, costs)
+    times = {c.tool_use_id: r.timestamp for r in reqs for c in r.tool_calls}
+    phases = thread.build_phases(steps, thread.todo_intervals(extras.todos, times))
+    model_s, tool_s = thread.busy_seconds(steps)
+    first = steps[0].start if steps else reqs[0].timestamp
+    last = max([reqs[-1].timestamp, *(st.end for st in steps)])
+    models = Counter(canonical(ctx.table, r.model) for r in reqs)
+
+    def ref(x: str | None) -> dict[str, Any]:
+        return {"agent_id": x or "main", "name": _thread_name(x, agent_infos.get(x or ""))}
+
+    pos = order.index(aid)
+    names = ctx.names()
+    return {
+        "session": {
+            "session_id": session_id,
+            "title": info.title if info else None,
+            "color": info.color if info else None,
+            "project": project_display(info.project_dir if info else reqs[0].project_dir, names),
+        },
+        "thread": {
+            "agent_id": want,
+            "is_main": aid is None,
+            "name": _thread_name(aid, ai),
+            "agent_type": (ai.agent_type if ai else None) if aid else None,
+            "description": ai.description if ai else None,
+            "model": models.most_common(1)[0][0],
+            "models": [m for m, _ in models.most_common()],
+            "spawned": ms(parent.timestamp) if parent else None,
+            "spawned_by": ref(parent.agent_id) if parent else None,
+            "first": ms(first),
+            "last": ms(last),
+            "finished": ai.finished if ai else None,
+            "requests": len(reqs),
+            "usd": round(sum(costs), 6),
+            "start_context": reqs[0].usage.context,
+            "peak_context": max(r.usage.context for r in reqs),
+            "alive_seconds": round((last - first).total_seconds(), 1),
+            "model_seconds": round(model_s, 1),
+            "tool_seconds": round(tool_s, 1),
+            "idle_seconds": round(sum((b - a).total_seconds() for a, b in idle), 1),
+        },
+        "neighbors": {
+            "prev": ref(order[pos - 1]) if pos > 0 else None,
+            "next": ref(order[pos + 1]) if pos + 1 < len(order) else None,
+        },
+    } | thread.timeline_json(reqs, costs, steps, idle, phases)
 
 
 @dataclass(slots=True)

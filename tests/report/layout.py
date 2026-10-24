@@ -668,6 +668,16 @@ def discover(chrome: Chrome, base: str) -> list[tuple[str, str]]:
         )
         if href:
             pages.append((name, href))
+    # an agent's page, from the first session's links to its threads
+    session = next((h for n, h in pages if n == "session"), None)
+    if session:
+        load(chrome, base + session)
+        href = chrome.js(
+            "(document.querySelector(\"#main a[href*='/agent/']\") || {}).getAttribute"
+            "?.call(document.querySelector(\"#main a[href*='/agent/']\"), 'href')"
+        )
+        if href:
+            pages.append(("agent", href))
     seen: set[str] = set()
     return [(n, h) for n, h in pages if not (h in seen or seen.add(h))]  # type: ignore[func-returns-value]
 

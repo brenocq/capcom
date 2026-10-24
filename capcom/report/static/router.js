@@ -16,7 +16,7 @@ const POLL_MS = 200; // how often the frame looks at the replies still loading
 const REDRAW_MS = 350; // at most one redraw per this while partial replies come
 
 const LABELS = { overview: 'Overview', spend: 'Spend', sessions: 'Sessions', spikes: 'Spikes', checks: 'Checks', changes: 'Did it work?', limits: 'Limits', session: 'Session', day: 'Day' };
-const PAGE_PATH = /^\/(?:(?:spend|sessions|spikes|checks|changes|limits)\/?|(?:session|day|changes)\/[^/]+|limits\/window(?:\/[^/]+){3})?$/;
+const PAGE_PATH = /^\/(?:(?:spend|sessions|spikes|checks|changes|limits)\/?|(?:session|day|changes)\/[^/]+|session\/[^/]+\/agent\/[^/]+|limits\/window(?:\/[^/]+){3})?$/;
 
 let cfg = null; // {pages, route, decorate, onNavigate}
 let view = null;
@@ -322,6 +322,8 @@ export function go(href, { replace = false } = {}) {
 // which the page never shows, beside the one it waits for.
 export function apiFor(url) {
   const p = url.pathname.replace(/\/+$/, '') || '/';
+  const ag = /^\/session\/([^/]+)\/agent\/([^/]+)$/.exec(p);
+  if (ag) return [`agent/${encodeURIComponent(decodeURIComponent(ag[1]))}?agent=${encodeURIComponent(decodeURIComponent(ag[2]))}`];
   const m = /^\/(session|day|changes)\/([^/]+)$/.exec(p);
   if (m && m[1] === 'day') return [dayPath(decodeURIComponent(m[2]), url.searchParams)];
   if (m) return [`${m[1]}/${encodeURIComponent(decodeURIComponent(m[2]))}`];
