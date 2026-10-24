@@ -77,7 +77,7 @@ uv sync                       # once per worktree
 uv run pytest                 # tests (synthetic fixtures only)
 uv run ruff check . && uv run ruff format --check .
 uv run mypy capcom
-uv run capcom report          # on the real logs: under the memory cap below
+uv run capcom serve --open    # the website on the real logs: under the memory cap below
 ```
 
 The runtime uses the standard library only (`json`, `sqlite3`, `pathlib`);
