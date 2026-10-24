@@ -519,19 +519,48 @@ def _definition_projects(
     if folder in {user_dir, Path.home() / ".claude" / "agents"}:
         return None
     root = _repo_root(folder.parent.parent)
-    trees = root / ".worktrees"
     found = {
-        p
-        for p, cwds in facts.project_cwd.items()
-        if any(Path(c) == root or Path(c).is_relative_to(trees) for c in cwds)
+        p for p, cwds in facts.project_cwd.items() if any(_repo_root(Path(c)) == root for c in cwds)
     }
     return found or None
 
 
 def _repo_root(cwd: Path) -> Path:
-    """The main checkout of a worktree under `<repo>/.worktrees/`; else `cwd`."""
-    parts = cwd.parts
-    return Path(*parts[: parts.index(".worktrees")]) if ".worktrees" in parts else cwd
+    """The main checkout of a worktree; else `cwd`. A worktree that still exists
+    names its main checkout in its `.git` file (`gitdir: <main>/.git/worktrees/x`);
+    otherwise a `.worktrees/` or `.claude/worktrees/` path segment marks it."""
+    main = _gitdir_main(cwd)
+    if main is not None:
+        return main
+    split = _split_worktree(str(cwd))
+    return Path(split[0]) if split else cwd
+
+
+def _gitdir_main(cwd: Path) -> Path | None:
+    """The main checkout a linked worktree's `.git` file points to; None when `cwd`
+    is not an existing linked worktree (or the file is unreadable)."""
+    try:
+        for d in (cwd, *cwd.parents):
+            git = d / ".git"
+            if git.is_dir():
+                return None
+            if git.is_file():
+                head = git.read_text(errors="replace").splitlines()[:1]
+                if not head or not head[0].startswith("gitdir:"):
+                    return None
+                gitdir = Path(head[0][len("gitdir:") :].strip())
+                if not gitdir.is_absolute():
+                    gitdir = d / gitdir
+                parts = gitdir.parts
+                if "worktrees" not in parts[:-1]:
+                    return None
+                i = len(parts) - 1 - parts[::-1].index("worktrees")
+                if i < 1 or parts[i - 1] != ".git":
+                    return None
+                return Path(*parts[: i - 1])
+    except (OSError, ValueError):
+        return None
+    return None
 
 
 def _scoped(
@@ -892,54 +921,43 @@ def long_subagent_reports(facts: Facts) -> list[Finding]:
 # --------------------------------------------------------------------------- memory
 
 
-_WORKTREES = "/.worktrees/"
-# Branch name prefixes that hold a slash (`feat/x` lands in .worktrees/feat/x/).
-_BRANCH_PREFIXES = frozenset(
-    {
-        "feat",
-        "fix",
-        "chore",
-        "docs",
-        "doc",
-        "refactor",
-        "test",
-        "tests",
-        "perf",
-        "build",
-        "ci",
-        "style",
-        "release",
-        "hotfix",
-        "bugfix",
-        "feature",
-        "exp",
-        "wip",
-        "dev",
-    }
-)
+_WORKTREES = ("/.worktrees/", "/.claude/worktrees/")
+# Names a memory file has inside a checkout: where a worktree's name ends when
+# nothing on disk says so.
+_ANCHORS = frozenset({"CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md", ".claude"})
+
+
+def _split_worktree(path: str) -> tuple[str, str, list[str]] | None:
+    """`(repo, marker folder, parts below it)` for a path under `<repo>/.worktrees/`
+    or `<repo>/.claude/worktrees/`; the first such marker, else None."""
+    hits = [(i, m) for m in _WORKTREES if (i := path.find(m)) >= 0]
+    if not hits:
+        return None
+    i, marker = min(hits)
+    return path[:i], marker, path[i + len(marker) :].split("/")
 
 
 def _strip_worktree(path: str) -> str:
     """`<repo>/.worktrees/<branch>/<rel>` as `<repo>/<rel>`: a worktree's copy of a
-    file is the same file. The branch ends at the first folder holding a `.git`
-    entry, or else after one folder (two after a prefix such as `feat/`)."""
-    i = path.find(_WORKTREES)
-    if i < 0:
+    file is the same file. The branch name may hold slashes. It ends at the first
+    folder holding a `.git` entry, or else before the first memory file name or
+    `.claude` folder, or else after one folder."""
+    split = _split_worktree(path)
+    if split is None:
         return path
-    root, rest = path[:i], path[i + len(_WORKTREES) :]
-    parts = rest.split("/")
+    root, marker, parts = split
     if len(parts) < 2:
         return path
     cut = 0
     for n in range(1, len(parts)):
         try:
-            if (Path(root, ".worktrees", *parts[:n]) / ".git").exists():
+            if (Path(root + marker, *parts[:n]) / ".git").exists():
                 cut = n
                 break
         except OSError:
             break
     if not cut:
-        cut = 2 if parts[0] in _BRANCH_PREFIXES and len(parts) > 2 else 1
+        cut = next((n for n, x in enumerate(parts) if n and x in _ANCHORS), 1)
     return "/".join([root, *parts[cut:]])
 
 
@@ -1231,7 +1249,7 @@ def subagent_resumed_late(facts: Facts) -> list[Finding]:
         title="Subagents resumed after their cache expired",
         what="when their parent resumed them past the cache lifetime",
         advice=(
-            "A subagent left waiting longer than its 5-minute cache lifetime rewrites its "
+            "A subagent left waiting longer than its cache lifetime rewrites its "
             "whole context when the parent resumes it. Have it report and finish, and "
             "start a fresh agent for the next step instead of resuming the old one."
         ),
