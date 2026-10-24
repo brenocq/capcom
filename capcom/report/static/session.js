@@ -16,6 +16,8 @@ const OPEN_NOTE = 'Click to open its timeline';
 
 // agent types whose lanes are open, kept across redraws (a theme switch, another session)
 const expandedTypes = new Set();
+// expanded types showing every agent, not only those in the time in view
+const allTypes = new Set();
 
 export async function renderSession(main, r) {
   const d = await api('session/' + encodeURIComponent(r.arg || ''));
@@ -346,6 +348,24 @@ export function sliceWindow(ts, px, a, b) {
     return lo;
   };
   return [Math.max(0, first((v) => v >= a) - 1), Math.min(ts.length, first((v) => v > b) + 1)];
+}
+
+// An expanded agent type lists the agents that worked in the time in view, [t0, t1]
+// (each from its first to its last request), and keeps the rest behind a button.
+export function agentsInView(list, t0, t1) {
+  const inView = [], outside = [];
+  for (const a of list) (a.last >= t0 && a.first <= t1 ? inView : outside).push(a);
+  return { inView, outside };
+}
+
+// The words around an agent type's lane: the muted note beside "coder ×47" (none
+// when all of them are in view), and the button that shows or hides the rest.
+export function laneWords(total, inView, all) {
+  const out = total - inView;
+  if (out <= 0) return { note: null, button: null };
+  const note = inView ? `${inView} in view` : 'none in view';
+  if (all) return { note, button: { text: `Hide ${out}`, sub: 'not in view' } };
+  return { note, button: inView ? { text: `Show ${out} more`, sub: 'not in view' } : { text: `Show all ${total}`, sub: 'none in view' } };
 }
 
 // The scroll position that keeps the time `offset` pixels into the scroller (past
@@ -699,6 +719,15 @@ function unfolded(d, r) {
   }
   const byType = new Map();
   d.agents.forEach((a) => { if (!byType.has(a.agent_type)) byType.set(a.agent_type, []); byType.get(a.agent_type).push(a); });
+  const typeViews = [];
+  // a change to the rows below the plot keeps the page still when they are above the
+  // screen (unless the browser's scroll anchoring already did)
+  const keepPage = (change) => {
+    const before = grid.getBoundingClientRect();
+    change();
+    const after = grid.getBoundingClientRect();
+    if (before.bottom < 0 && after.top === before.top && after.height !== before.height) window.scrollBy(0, after.height - before.height);
+  };
   const types = [...byType.entries()].sort((a, b) => b[1].reduce((s1, z) => s1 + z.usd, 0) - a[1].reduce((s1, z) => s1 + z.usd, 0));
   types.forEach(([type, list]) => {
     const color = entityColor(type, 'agent');
@@ -716,21 +745,51 @@ function unfolded(d, r) {
       h('div.lane', null, bar(a)));
       return;
     }
-    // several of one type share a lane; the toggle adds a row per agent, by its spawn description
-    const shown = expandedTypes.has(type);
-    const rows = list.flatMap((a, i) => {
+    // several of one type share a lane; the toggle adds a row per agent, by its spawn
+    // description: those that worked in the time in view, then a button for the rest
+    const rows = list.map((a, i) => {
       const name = a.description || `${type} ${i + 1}`;
-      return [h('div.lab.sub', { hidden: !shown }, h('span.what', { text: name, title: name })),
-        h('div.lane.sub', { hidden: !shown }, bar(a))];
+      return { a, els: [h('div.lab.sub', { hidden: true }, h('span.what', { text: name, title: name })), h('div.lane.sub', { hidden: true }, bar(a))] };
     });
-    const toggle = h('button.lanetoggle', { type: 'button', 'aria-expanded': String(shown), title: `Show each ${type} agent`, onclick: () => {
+    let inView = new Set(list);
+    const note = h('span.what.lanenote', { hidden: true });
+    const moreText = h('b'), moreSub = h('span');
+    const more = h('button.lanemore', { type: 'button', onclick: () => {
+      if (allTypes.has(type)) allTypes.delete(type); else allTypes.add(type);
+      keepPage(show);
+    } }, moreText, moreSub);
+    const moreRow = [h('div.lab.sub.morelab', { hidden: true }, more), h('div.lane.sub', { hidden: true })];
+    const show = () => {
+      const open = expandedTypes.has(type), all = allTypes.has(type);
+      const words = laneWords(list.length, inView.size, all);
+      note.hidden = !words.note;
+      note.textContent = words.note || '';
+      for (const r of rows) for (const el of r.els) el.hidden = !open || !(all || !words.button || inView.has(r.a));
+      for (const el of moreRow) el.hidden = !open || !words.button;
+      if (words.button) {
+        moreText.textContent = words.button.text;
+        moreSub.textContent = words.button.sub;
+        more.setAttribute('aria-expanded', String(all));
+        more.title = all ? `Hide the ${type} agents that did not work in the time in view` : `Show the ${type} agents that did not work in the time in view`;
+      }
+    };
+    const toggle = h('button.lanetoggle', { type: 'button', 'aria-expanded': String(expandedTypes.has(type)), title: `Show each ${type} agent`, onclick: () => {
       const open = !expandedTypes.has(type);
-      if (open) expandedTypes.add(type); else expandedTypes.delete(type);
+      if (open) expandedTypes.add(type); else { expandedTypes.delete(type); allTypes.delete(type); }
       toggle.setAttribute('aria-expanded', String(open));
-      for (const el of rows) el.hidden = !open;
+      show();
     } }, s('svg', { width: 10, height: 10, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 2.6, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' }, s('path', { d: 'M9 5l7 7-7 7' })),
     h('span', null, h('b', { text: type }), ` ×${list.length}`));
-    lanes.push(h('div.lab', null, toggle), h('div.lane', null, list.map(bar)), ...rows);
+    // called once the time in view settles: [t0, t1], or all of it before the plot is laid out
+    typeViews.push((t0, t1) => {
+      const next = new Set(agentsInView(list, t0, t1).inView);
+      if (next.size === inView.size && [...next].every((a) => inView.has(a))) return false;
+      inView = next;
+      show();
+      return true;
+    });
+    show();
+    lanes.push(h('div.lab', null, toggle, note), h('div.lane', null, list.map(bar)), ...rows.flatMap((r) => r.els), ...moreRow);
   });
 
   // x labels: the start, each resume after a squeezed pause, clock times, the end,
@@ -809,6 +868,7 @@ function unfolded(d, r) {
   const zoomButtons = ZOOMS.map(([z, label]) => h('button', { type: 'button', text: label, 'aria-pressed': 'false', onclick: (e) => {
     if (e.currentTarget.getAttribute('aria-disabled') === 'true') return;
     setZoom(z, ctxLab.offsetWidth + room() / 2);
+    inViewNow();
   } }));
   const zoomBar = h('div.seg.tlzoom', { role: 'group', 'aria-label': 'Zoom: active time per screen' }, zoomButtons);
   const markZoom = () => {
@@ -836,6 +896,7 @@ function unfolded(d, r) {
     redraw(true);
     hold();
     markZoom();
+    settle();
     clearTimeout(urlTimer);
     urlTimer = setTimeout(() => {
       if (!scroller.isConnected) return;
@@ -876,6 +937,17 @@ function unfolded(d, r) {
   scroller.addEventListener('touchend', () => { pinch = null; });
   card.append(zoomBar, scroller);
 
+  // the agents of an expanded type listed are those in the time in view, worked out
+  // again once a scroll or a zoom settles, so rows never come and go while it moves
+  let settleTimer = 0;
+  const inViewNow = () => {
+    clearTimeout(settleTimer);
+    if (!scroller.isConnected || !typeViews.length) return;
+    const sl = Math.max(0, Math.min(scroller.scrollLeft, PW)), t0 = ax.time(sl, PW), t1 = ax.time(Math.min(PW, sl + room()), PW);
+    keepPage(() => { for (const f of typeViews) f(t0, t1); });
+  };
+  const settle = () => { clearTimeout(settleTimer); settleTimer = setTimeout(inViewNow, 200); };
+
   // an x label or a pause pill partly under the sticky lane names is hidden, at every
   // scroll position, so none shows cut in half
   let frame = 0;
@@ -900,6 +972,7 @@ function unfolded(d, r) {
       seenWidth = scroller.clientWidth;
       placeChips(pauses.clientWidth);
       redraw(moved || !opened);
+      if (moved && opened) settle();
       const scrolls = scroller.scrollWidth > scroller.clientWidth + 1;
       scroller.classList.toggle('scrolls', scrolls);
       card.querySelector('.split .note').textContent = NOTE + (scrolls ? ' Scroll sideways for the rest; ctrl+scroll or pinch to zoom; hover for values.' : ' Ctrl+scroll or pinch to zoom; hover for values.');
@@ -912,12 +985,13 @@ function unfolded(d, r) {
       hold();
       redraw(false);
       uncut();
+      inViewNow();
     });
     watch.observe(scroller);
     watch.observe(pauses);
     scroller.addEventListener('scroll', () => {
       if (frame) return;
-      frame = requestAnimationFrame(() => { frame = 0; hold(); redraw(false); uncut(); });
+      frame = requestAnimationFrame(() => { frame = 0; hold(); redraw(false); uncut(); settle(); });
     }, { passive: true });
   } else {
     placeChips(W);

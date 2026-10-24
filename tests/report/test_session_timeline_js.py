@@ -314,3 +314,45 @@ def test_a_window_slices_the_points_in_it_and_one_past_each_edge() -> None:
         [2, 4],  # no point inside: the two around it, so the line still crosses
         [0, 0],
     ]
+
+
+AGENTS = "const list = [{ id: 'a', first: 0, last: 10 }, { id: 'b', first: 20, last: 30 },"
+AGENTS += " { id: 'c', first: 5, last: 50 }, { id: 'd', first: 60, last: 60 }];"
+
+
+@pytest.mark.parametrize(
+    ("t0", "t1", "shown"),
+    [
+        (0, 100, "abcd"),  # all of the session in view
+        (12, 18, "c"),  # between a and b: only c, which spans it
+        (10, 20, "abc"),  # touching an end counts
+        (55, 70, "d"),  # an agent of one request
+        (70, 80, ""),  # nobody worked then
+    ],
+)
+def test_an_expanded_type_lists_the_agents_that_worked_in_view(
+    t0: int, t1: int, shown: str
+) -> None:
+    got = _run(
+        AGENTS + f"const v = m.agentsInView(list, {t0}, {t1});"
+        "console.log(JSON.stringify([v.inView.map((a) => a.id).join(''),"
+        " v.outside.map((a) => a.id).join('')]))"
+    )
+    assert got == [shown, "".join(c for c in "abcd" if c not in shown)]
+
+
+def test_the_lane_words_tell_how_many_are_in_view() -> None:
+    got = _run(
+        "console.log(JSON.stringify([m.laneWords(47, 47, false), m.laneWords(47, 6, false),"
+        " m.laneWords(47, 6, true), m.laneWords(47, 0, false), m.laneWords(1, 1, false)]))"
+    )
+    assert isinstance(got, list)
+    every, some, all_shown, none, one = got
+    assert every == {"note": None, "button": None}  # all in view: no note, no button
+    assert some["note"] == "6 in view"
+    assert some["button"] == {"text": "Show 41 more", "sub": "not in view"}
+    assert all_shown["note"] == "6 in view"
+    assert all_shown["button"]["text"] == "Hide 41"
+    assert none["note"] == "none in view"
+    assert none["button"]["text"] == "Show all 47"
+    assert one == {"note": None, "button": None}

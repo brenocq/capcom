@@ -354,6 +354,11 @@ table.calparts tr.sum td { border-top: 1px solid var(--l25); border-bottom: 0; f
 .lanetoggle { display: flex; align-items: center; gap: 4px; padding: 0; border: 0; background: none; text-align: left; cursor: pointer; }
 .lanetoggle svg { flex: none; }
 .lanetoggle[aria-expanded="true"] svg { transform: rotate(90deg); }
+.tl .lab .lanenote { padding-left: 14px; font-size: 11px; }
+.tl .lab.morelab { padding-top: 2px; padding-bottom: 4px; }
+.lanemore { display: flex; flex-direction: column; align-items: flex-start; gap: 0; padding: 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: 11px; line-height: 1.3; text-align: left; cursor: pointer; }
+.tl .lab .lanemore b { color: var(--text); font-weight: 500; }
+.lanemore:hover b, .lanemore:focus-visible b { text-decoration: underline; }
 .pausechip { position: absolute; top: 2px; transform: translateX(-50%); padding: 2px 7px; border-radius: 999px; font-size: 11px; white-space: nowrap; background: var(--subtle); color: var(--ink); }
 .pausechip.row2 { top: 24px; }
 .pausechip.warn { background: var(--warn-bg); color: var(--warn-text); }
