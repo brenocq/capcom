@@ -111,6 +111,7 @@ LEFT_OUT = (
     "agent names",
     "evidence rows",
     "tool details",
+    "reply text",
     "your notes",
     "pasted config",
 )

@@ -1,13 +1,17 @@
-"""One tool call's input and result, read from its log file when the page asks.
+"""One tool call's input and result, or one request's reply text and thinking
+summary, read from its log file when the page asks.
 
 The agent page's fold on a tool step shows the call in full: the command, the file
-and the change, the pattern, and what came back. That text is the logs' own, so
-it is read only here, only for `capcom serve`'s `GET /api/tool/<session>` (on a
-click), and never kept: not in the index, not in the API cache, not in a file.
+and the change, the pattern, and what came back; on a thinking step, what that
+request wrote and the thinking summary the log kept, if any. That text is the
+logs' own, so it is read only here, only for `capcom serve`'s
+`GET /api/tool/<session>` and `GET /api/reply/<session>` (on a click), and never
+kept: not in the index, not in the API cache, not in a file.
 
-The call is found by its tool_use id, which must belong to a request of the asked
-thread in the index; the files read are the index's files of that thread, and only
-those under the configured log roots. Nothing the client sends is opened as a path.
+The call is found by its tool_use id and the request by its message id, which must
+belong to a request of the asked thread in the index; the files read are the
+index's files of that thread, and only those under the configured log roots.
+Nothing the client sends is opened as a path.
 
 A log may be a gigabyte. The scan starts near the request's time: a binary search
 over the file's byte offsets by the records' timestamps (the logs are appended in
@@ -25,7 +29,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, cast
 
 ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
 MAX_OUTPUT = 200_000  # bytes of a result's text sent at most
@@ -122,13 +126,19 @@ def seek_near(f: BinaryIO, size: int, when: datetime) -> int:
     return max(0, best - BACK_OFF)
 
 
-def _lines_with(f: BinaryIO, needle: bytes, start: int, stop: int | None) -> Iterable[bytes]:
-    """The whole lines from `start` (to `stop`, or the end) holding `needle`."""
+def _lines_with(
+    f: BinaryIO, needle: bytes, start: int, stop: int | None, quiet: int | None = None
+) -> Iterable[bytes]:
+    """The whole lines from `start` (to `stop`, or the end) holding `needle`; with
+    `quiet`, it stops once that many bytes went by without one after the first."""
     f.seek(start)
     carry = b""
     skipping = False  # inside a line longer than MAX_LINE
     pos = start
+    seen: int | None = None  # where the last line with `needle` was
     while stop is None or pos < stop:
+        if quiet is not None and seen is not None and pos - seen > quiet:
+            return
         chunk = f.read(CHUNK)
         if not chunk:
             return  # what is left in carry has no newline yet: a partial last line
@@ -147,6 +157,7 @@ def _lines_with(f: BinaryIO, needle: bytes, start: int, stop: int | None) -> Ite
         while i >= 0:
             a = whole.rfind(b"\n", 0, i) + 1
             b = whole.find(b"\n", i)
+            seen = pos
             yield whole[a:b]
             i = whole.find(needle, b)
         if len(carry) > MAX_LINE:
@@ -327,12 +338,114 @@ def detail(paths: Sequence[Path], tool_use_id: str, when: datetime | None) -> di
     return None
 
 
+# ------------------------------------------------------------------ a request's text
+
+QUIET = 16 << 20  # bytes past a reply's last record after which its search stops
+REPLY_KINDS = ("text", "thinking", "redacted_thinking")
+
+
+def _reply_blocks(
+    path: Path, message_id: str, when: datetime | None
+) -> list[dict[str, Any]] | None:
+    """The text, thinking and redacted_thinking blocks of the reply `message_id`, in
+    order, each once (None when the file has no record of it). Claude Code writes a
+    reply several times while it streams, a block per record or the blocks so far:
+    a block seen before is skipped, and one that extends an earlier one replaces it."""
+    needle = f'"{message_id}"'.encode()
+    found = False
+    out: list[dict[str, Any]] = []
+    with open(path, "rb") as f:  # read-only
+        size = f.seek(0, 2)
+        begin = seek_near(f, size, when) if when is not None else 0
+        spans = [(begin, None)] + ([(0, begin)] if begin > 0 else [])
+        for start, stop in spans:
+            for line in _lines_with(f, needle, start, stop, QUIET):
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                msg = rec.get("message") if isinstance(rec, dict) else None
+                if not isinstance(msg, Mapping) or msg.get("id") != message_id:
+                    continue
+                if rec.get("type") not in (None, "assistant"):
+                    continue
+                found = True
+                for b in _blocks(rec):
+                    if isinstance(b, dict) and b.get("type") in REPLY_KINDS:
+                        _merge(out, b)
+            if found:
+                break
+    return out if found else None
+
+
+def _merge(out: list[dict[str, Any]], b: Mapping[str, Any]) -> None:
+    kind = b.get("type")
+    key = "text" if kind == "text" else "thinking"
+    raw = b.get(key)
+    text = raw if isinstance(raw, str) else ""
+    new = {"type": kind, "text": text, "signature": b.get("signature"), "data": b.get("data")}
+    for n, old in enumerate(out):
+        if old["type"] != kind:
+            continue
+        if old == new:
+            return
+        if kind != "redacted_thinking" and old["text"] and text.startswith(old["text"]):
+            out[n] = new  # a block streamed further
+            return
+    out.append(new)
+
+
+def _prose(text: str) -> dict[str, Any]:
+    shown, cut = _cut(text, MAX_OUTPUT)
+    return {"text": shown, "lines": _lines(text), "bytes": len(text.encode()), "cut": cut}
+
+
+def reply(paths: Sequence[Path], message_id: str, when: datetime | None) -> dict[str, Any] | None:
+    """What one request wrote: its text blocks (`text`, joined, or None) and its
+    thinking (`thinking`: how many blocks, and their text when the log kept it,
+    which newer Claude Code versions mostly do not: a short summary at most).
+    None when no file holds the request any more."""
+    for path in paths:
+        try:
+            blocks = _reply_blocks(path, message_id, when)
+        except OSError:
+            continue
+        if blocks is None:
+            continue
+        texts = [b["text"] for b in blocks if b["type"] == "text" and b["text"].strip()]
+        thinking = [b for b in blocks if b["type"] != "text"]
+        summary = [b["text"] for b in thinking if b["type"] == "thinking" and b["text"].strip()]
+        return {
+            "id": message_id,
+            "text": _prose("\n\n".join(texts)) if texts else None,
+            "thinking": {
+                "blocks": len(thinking),
+                "saved": len(summary),
+                "summary": _prose("\n\n".join(summary)) if summary else None,
+            },
+        }
+    return None
+
+
 class NotFound(Exception):
     """No such call in the index, or no log file holds it any more (`gone`)."""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code, self.message = code, message
+
+
+def _request_time(
+    index: Any, session_id: str, aid: str | None, match: Any, hint: datetime | None
+) -> datetime | None:
+    """The time of the thread's request for which `match(request)` holds, or None.
+    `hint`, the request's time as the page knows it, only narrows where to look."""
+    windows = [(hint - timedelta(seconds=2), hint + timedelta(seconds=2))] if hint else []
+    for since, until in [*windows, (None, None)]:
+        for r in index.requests(since=since, until=until, session_id=session_id):
+            if r.agent_id == aid and match(r):
+                return cast(datetime, r.timestamp)
+    return None
 
 
 def lookup(
@@ -349,22 +462,43 @@ def lookup(
     if not (valid_id(session_id) and valid_id(agent) and valid_id(tool_use_id)):
         raise ValueError("bad id")
     aid = None if agent == "main" else agent
-    when = None
-    # `hint`, the request's time as the page knows it, only narrows where to look
-    windows = [(hint - timedelta(seconds=2), hint + timedelta(seconds=2))] if hint else []
-    for since, until in [*windows, (None, None)]:
-        for r in index.requests(since=since, until=until, session_id=session_id):
-            if r.agent_id == aid and any(c.tool_use_id == tool_use_id for c in r.tool_calls):
-                when = r.timestamp
-                break
-        if when is not None:
-            break
+    when = _request_time(
+        index,
+        session_id,
+        aid,
+        lambda r: any(c.tool_use_id == tool_use_id for c in r.tool_calls),
+        hint,
+    )
     if when is None:
         raise NotFound("not_found", "No such tool call in this thread.")
     paths = allowed(index.thread_files(session_id, aid), roots)
     found = detail(paths, tool_use_id, when) if paths else None
     if found is None:
         raise NotFound("gone", "The log that held this call is gone or was rewritten.")
+    return found
+
+
+def reply_lookup(
+    index: Any,
+    session_id: str,
+    agent: str,
+    message_id: str,
+    roots: Sequence[Path],
+    hint: datetime | None = None,
+) -> dict[str, Any]:
+    """`GET /api/reply/<session>?agent=&id=`: what the request `message_id` of the
+    thread `agent` wrote (`reply`), from the thread's own log files. Raises as
+    `lookup` does."""
+    if not (valid_id(session_id) and valid_id(agent) and valid_id(message_id)):
+        raise ValueError("bad id")
+    aid = None if agent == "main" else agent
+    when = _request_time(index, session_id, aid, lambda r: r.message_id == message_id, hint)
+    if when is None:
+        raise NotFound("not_found", "No such request in this thread.")
+    paths = allowed(index.thread_files(session_id, aid), roots)
+    found = reply(paths, message_id, when) if paths else None
+    if found is None:
+        raise NotFound("gone", "The log that held this request is gone or was rewritten.")
     return found
 
 
