@@ -270,8 +270,11 @@ export function dayBars(days, members, todayIso, href = '') {
     const last = i === days.length - 1 ? ';display:flex;justify-content:flex-end' : '';
     return h('span', { class: today ? 'today' : null, text, style: step > 1 ? 'overflow:visible' + last : null });
   })));
-  // a few days keep bars wide enough to tap, scrolling inside the card when narrow
-  return h('div.daychart', { style: many ? null : `--days:${days.length}` }, bars, labs);
+  // a few days keep bars wide enough to tap, scrolling inside the card when narrow,
+  // opened on the latest day
+  const chart = h('div.daychart', { style: many ? null : `--days:${days.length}` }, bars, labs);
+  openAt(chart, 1);
+  return chart;
 }
 
 // A day's spend per local clock hour, or an hour's per 5 minutes, in the per-day
@@ -327,13 +330,19 @@ export function hourBars(hours, members, now, opts = {}) {
   const n = opts.href ? (rows.length * 24.5 / 30).toFixed(2) : Math.ceil(rows.length / 2);
   const chart = h('div.daychart', { style: `--days:${n}` }, bars, labs);
   // a chart that scrolls (a phone) opens on the slot holding now
-  if (cur >= 0 && typeof requestAnimationFrame === 'function') {
-    requestAnimationFrame(() => {
-      if (!chart.isConnected || chart.scrollWidth <= chart.clientWidth) return;
-      chart.scrollLeft = ((cur + 0.5) / rows.length) * chart.scrollWidth - chart.clientWidth / 2;
-    });
-  }
+  if (cur >= 0) openAt(chart, (cur + 0.5) / rows.length);
   return chart;
+}
+
+// A chart that scrolls sideways opens with the point `frac` (0 to 1 of its width)
+// centered, once it is on the page; a redraw that carried a scroll position over
+// (morph.js) keeps it.
+function openAt(chart, frac) {
+  if (typeof requestAnimationFrame !== 'function') return;
+  requestAnimationFrame(() => {
+    if (!chart.isConnected || chart.scrollLeft || chart.scrollWidth <= chart.clientWidth) return;
+    chart.scrollLeft = frac * chart.scrollWidth - chart.clientWidth / 2;
+  });
 }
 
 // Choose how the per-day amounts show for the bars' width now: "flat" (level),

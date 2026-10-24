@@ -325,13 +325,14 @@ function contextCard(buckets) {
 }
 
 // The context card's pairs of bars, each with its count or dollars on top: level
-// when the widest label fits a bar, upright when it does not (bars from 11 px wide).
-// A label is about 6 px a character at 10 px.
+// when the widest label fits a bar, upright when it does not (bars from 11 px wide),
+// so no label reaches past its bar, nor the last one past the plot. A label is
+// about 6 px a character at 10 px.
 function pairBars(pairs) {
   const el = h('div.pairs.hl.flat', null, pairs);
   if (typeof ResizeObserver === 'undefined') return el;
   const fit = () => {
-    const bar = el.querySelector('div > div');
+    const bar = el.querySelector(':scope > div > div');
     if (!bar || !bar.clientWidth) return;
     const need = Math.max(0, ...[...el.querySelectorAll('.amt')].map((a) => a.textContent.length)) * 6 + 2;
     el.classList.toggle('rot', bar.clientWidth < need);
