@@ -28,7 +28,11 @@ pytestmark = pytest.mark.skipif(
 
 NOTICE = (
     "Ask Claude sends the numbers and labels on this part of the page, or the text you "
-    "select, to Claude through your own claude CLI. No text from your logs is sent."
+    "select, to Claude through your own claude CLI, with capcom"
+    "\N{RIGHT SINGLE QUOTATION MARK}s totals behind them: "
+    "spend by project, model, agent type and day, session ids and the paths of the files "
+    "that define your agents. Claude may look up more of these totals. No text from your "
+    "logs is sent, not even session titles."
 )
 
 

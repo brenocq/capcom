@@ -13,6 +13,10 @@
 // earlier turns of this chat and the question. A selection sends its text without
 // the private pieces it crosses (PRIVATE below: only what kind they were), where it
 // sits and its card's text as partText builds it. Never a session's text.
+// With the part goes its reference (refOf: a finding's kind and scope, a session
+// id, a marked change's id, a day, the page's range), from which capcom serve adds
+// what stands behind it (capcom/report/askfacts.py); Claude may look up more with
+// capcom's own tools, which the chat shows as "Looking up ..." while they run.
 
 import { h, s } from './lib.js';
 import { freshToken } from './marks.js';
@@ -29,7 +33,7 @@ const MAX_QUESTION = 600;
 // the question an Explain mark asks (capcom/report/ask.py, EXPLAIN, adds how to answer it)
 const EXPLAIN = 'What does this show, and what stands out?';
 const EXPLAIN_SELECTION = 'Explain the text I selected, very shortly and simply.';
-export const NOTICE = 'Ask Claude sends the numbers and labels on this part of the page, or the text you select, to Claude through your own claude CLI. No text from your logs is sent.';
+export const NOTICE = 'Ask Claude sends the numbers and labels on this part of the page, or the text you select, to Claude through your own claude CLI, with capcom’s totals behind them: spend by project, model, agent type and day, session ids and the paths of the files that define your agents. Claude may look up more of these totals. No text from your logs is sent, not even session titles.';
 // The mascot's name ("Roger that", on the radio): the greeting, the panel's
 // title, the opt-in's heading and the round button's label say it. The opt-in
 // notice's text and the sidebar say Claude, since Claude is what answers.
@@ -56,6 +60,28 @@ function route() {
   return { name: parts[0] || 'overview', arg: parts[1] || null };
 }
 const pageName = () => PAGE_NAMES[route().name] || 'Overview';
+
+// What a part is about, for the facts capcom serve adds to a question (ask.py,
+// parse_ref, checks each field): a finding on Checks, a spike's session, else the
+// page's own subject (a session, a marked change, a day) or its range of days.
+export function pageRef() {
+  const r = route();
+  if (r.name === 'session' && r.arg) return { kind: 'session', id: r.arg };
+  if (r.name === 'changes' && r.arg && /^\d+$/.test(r.arg)) return { kind: 'mark', id: Number(r.arg) };
+  if (r.name === 'day' && r.arg && /^\d{4}-\d\d-\d\d$/.test(r.arg)) return { kind: 'day', date: r.arg };
+  const days = Number(new URLSearchParams(location.search).get('days'));
+  return days > 0 ? { kind: 'view', days } : { kind: 'view' };
+}
+export function refOf(el) {
+  const f = el && el.closest('[data-ask-finding]');
+  if (f) {
+    const days = Number(new URLSearchParams(location.search).get('days'));
+    return { kind: 'finding', finding: f.dataset.askFinding, scope: f.dataset.askScope || 'all', ...(days > 0 ? { days } : {}) };
+  }
+  const sp = el && el.closest('[data-ask-session]');
+  if (sp) return { kind: 'session', id: sp.dataset.askSession };
+  return pageRef();
+}
 
 // ------------------------------------------------------------------ the mascot
 
@@ -276,7 +302,7 @@ function pageContext() {
     if (t) lines.push(t.replace(/\n/g, ': '));
   }
   const text = lines.join('\n').slice(0, 1500);
-  return text ? { label: `${pageName()} page`, text } : null;
+  return text ? { label: `${pageName()} page`, text, ref: pageRef() } : null;
 }
 
 // ------------------------------------------------------------------ state
@@ -293,7 +319,7 @@ let ui = null;
 let token = null;
 
 function explain(el, p, label) {
-  const topic = { page: pageName(), label, text: partText(el, p.extra ? p.extra(el) : []) };
+  const topic = { page: pageName(), label, text: partText(el, p.extra ? p.extra(el) : []), ref: refOf(el) };
   openPanel();
   ask(EXPLAIN, topic);
 }
@@ -444,14 +470,27 @@ function message(m, last) {
       h('span', { text: m.text })));
   }
   const body = h('div', { class: m.error ? 'askmsg bot err' : 'askmsg bot' });
-  if (m.text) body.textContent = tidy(m.text);
-  else if (!m.done) body.append(typing());
+  paint(body, m);
   if (m.error) body.append(m.text ? h('br') : null, h('span', { text: m.error }));
   const row = h('div.askrow.bot', null, avatar(), body);
   m.el = body;
   if (!last || !m.done) return row;
   const next = m.error ? [m.retry ? 'Try again' : null].filter(Boolean) : (m.suggestions || []);
   return next.length ? h('div', null, row, suggestions(next, false, m)) : row;
+}
+
+// A reply's bubble: the lookups Claude made (the one running, with dots, until
+// the answer goes on), then the answer so far, or the dots while it starts.
+function paint(body, m) {
+  const looks = m.lookups || [];
+  const running = !m.done && m.looking;
+  const done = running ? looks.slice(0, -1) : looks;
+  const kids = [];
+  if (done.length) kids.push(h('span.asklooked', { text: `${listed(done.map((l, i) => (i ? l.done[0].toLowerCase() + l.done.slice(1) : l.done)))}.` }));
+  if (m.text) kids.push(h('span.asktext', { text: tidy(m.text) }));
+  if (running) kids.push(h('span.asklooking', { role: 'status' }, typing(), h('span', { text: m.looking.label })));
+  else if (!m.text && !m.done) kids.push(typing());
+  body.replaceChildren(...kids);
 }
 
 const listed = (xs) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
@@ -512,7 +551,7 @@ export async function ask(question, topic = null, again = false) {
   state.ctrl = ctrl;
   draw();
   const t = state.topic || pageContext();
-  const body = { page: (state.topic && state.topic.page) || pageName(), part: t ? { label: t.label, text: t.text } : null, history: again ? history.slice(0, -1) : history, question };
+  const body = { page: (state.topic && state.topic.page) || pageName(), part: t ? { label: t.label, text: t.text, ref: t.ref || null } : null, history: again ? history.slice(0, -1) : history, question };
   if (t && t.selection != null) Object.assign(body, { selection: t.selection, where: t.where, left_out: t.leftOut });
   const fail = (msg) => { reply.error = msg; reply.retry = { question, topic }; };
   try {
@@ -553,12 +592,16 @@ async function read(r, reply) {
 }
 
 function handle(ev, reply) {
-  if (ev.type === 'text') {
-    reply.text += ev.text;
+  if (ev.type === 'text' || ev.type === 'tool') {
+    if (ev.type === 'text') { reply.text += ev.text; reply.looking = null; } else {
+      const look = { label: String(ev.label || 'Looking up something…').slice(0, 80), done: String(ev.done || 'Looked up something').slice(0, 80) };
+      reply.lookups = [...(reply.lookups || []), look];
+      reply.looking = look;
+    }
     if (reply.el && reply.el.isConnected) {
       const log = ui.log;
       const near = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
-      reply.el.textContent = tidy(reply.text);
+      paint(reply.el, reply);
       if (near) log.scrollTop = log.scrollHeight;
     }
   } else if (ev.type === 'done') {
@@ -660,7 +703,7 @@ function contextOf(el) {
   const card = el && main && main.contains(el) && el !== main ? el.closest(CARD) : null;
   if (card && main.contains(card)) {
     const label = headings(card).join(' › ').slice(0, 150);
-    return { label: label || `${pageName()} page`, text: partText(card) };
+    return { label: label || `${pageName()} page`, text: partText(card), ref: refOf(card) };
   }
   return pageContext();
 }
@@ -670,7 +713,7 @@ export function selectionTopic(range) {
   const picked = pickedText(range);
   const ctx = contextOf(el);
   return {
-    page: pageName(), label: ctx ? ctx.label : `${pageName()} page`, text: ctx ? ctx.text : '',
+    page: pageName(), label: ctx ? ctx.label : `${pageName()} page`, text: ctx ? ctx.text : '', ref: ctx ? ctx.ref : pageRef(),
     selection: picked.text, where: whereOf(el), leftOut: picked.leftOut,
   };
 }

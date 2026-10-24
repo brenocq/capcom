@@ -35,13 +35,20 @@ modules. Never add or commit anything under `docs/`.
 - **No network.** capcom makes no network requests at run time. The one
   exception is Ask Claude (`capcom/report/ask.py`): when the user asks in a
   page of `capcom serve` (after turning it on there once), capcom starts the
-  user's own `claude` CLI headless (Haiku; every tool, MCP server, slash
-  command and setting source off; no session saved), which makes the request.
-  It sends only the page's name, the asked-about part's numbers and labels in
-  capcom's own wording, the text the user selected (its private pieces, such as
-  session titles and evidence rows, left out), the chat's earlier turns and the
-  question: never text from the logs beyond tool names, file paths and short
-  labels. `--no-ask` turns it off. Never read `~/.claude/.credentials.json`,
+  user's own `claude` CLI headless (Haiku; every built-in tool, other MCP
+  server, slash command and setting source off; no session saved), which makes
+  the request. It sends only the page's name, the asked-about part's numbers and
+  labels in capcom's own wording, the text the user selected (its private
+  pieces, such as session titles and evidence rows, left out), the chat's
+  earlier turns, the question, and capcom's totals behind the part
+  (`capcom/report/askfacts.py`: spend and requests by project, model, agent
+  type and day, session ids, project folders and the paths of the files that
+  define an agent, skill or command). The only tools allowed are capcom's own
+  read-only lookups of those same totals (`spend`, `session`, `findings`,
+  `where_defined`), served by `python -m capcom.report.asktools` over stdio for
+  that one question, at most 4 lookups and 6 turns. Never session titles, file
+  contents, tool inputs or other text from the logs beyond tool names, file
+  paths and short labels. `--no-ask` turns it off. Never read `~/.claude/.credentials.json`,
   `~/.openclaw/credentials/`, auth profiles or any token. The one read of account data: `oauthAccount.emailAddress` and
   `oauthAccount.accountUuid` from `~/.claude.json`, only those two keys, to tell
   accounts apart in the limits (`capcom/limits/`); nothing else in that file.

@@ -13,8 +13,10 @@ server, a JSON body of at most 4 KB, and a body that passes `didit.write`'s sche
 `--read-only` turns it off (405). `POST /api/ask` (`ask.py`) streams an answer from
 the user's own `claude` CLI about a part of a page, behind the same checks with a
 body of at most 20 KB, two at a time, with a timeout, its child killed by PID when
-the page goes away; `--no-ask` turns it off (405). It writes nothing, so it stays on
-under `--read-only`.
+the page goes away; `--no-ask` turns it off (405). The prompt carries what stands
+behind the part (`askfacts.py`), and the CLI may look up more through capcom's own
+read-only MCP server (`asktools.py`). It writes nothing, so it stays on under
+`--read-only`.
 
 API replies are cached per index generation (`ApiCache`): the key holds the index
 files' sizes and modification times and the index's `PRAGMA data_version` on a held
@@ -67,7 +69,7 @@ from capcom.cost.prices import load_prices
 from capcom.limits.cli import adopt_samples
 from capcom.limits.model import samples_path
 from capcom.limits.record import ACCOUNTS_FILE, SESSIONS_FILE
-from capcom.report import api, ask, didit
+from capcom.report import api, ask, askfacts, asktools, didit
 from capcom.report.analysis import Analysis, Unavailable, default_analysis
 from capcom.report.jobs import Job, Jobs, Result, computing_body
 from capcom.report.limit_window import limit_window
@@ -397,6 +399,7 @@ class Site:
         default_factory=lambda: threading.BoundedSemaphore(ask.SLOTS)
     )
     ask_timeout: float = ask.TIMEOUT  # seconds one answer may take
+    ask_tools: bool = True  # False: no facts and no lookups, only what the page sends
 
 
 class Scanner:
@@ -844,7 +847,7 @@ class Handler(BaseHTTPRequestHandler):
         if body is _REFUSED:
             return
         try:
-            prompt = ask.build_prompt(ask.parse(body))
+            question = ask.parse(body)
         except ask.AskError as err:
             self._error(err.status, err.code, err.message)
             return
@@ -866,8 +869,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         child = None
         try:
+            now = site.clock()
+            prompt = ask.build_prompt(question, self._ask_facts(question, now))
+            tools = None
+            if site.ask_tools:
+                args = asktools.arguments(site.index_path, now, site.tz, site.changes_path)
+                tools = asktools.mcp_config(args)
             try:
-                child = ask.start(claude, prompt)
+                child = ask.start(claude, prompt, tools)
             except OSError:
                 self._error(
                     HTTPStatus.SERVICE_UNAVAILABLE, "no_claude", "The claude command did not start."
@@ -889,6 +898,23 @@ class Handler(BaseHTTPRequestHandler):
             if child is not None:
                 child.close()  # killed by its PID if it still runs: the page went away
             site.ask_slots.release()
+
+    def _ask_facts(self, question: ask.Question, now: datetime) -> str:
+        """What stands behind the asked-about part, from the index (askfacts), or
+        "" when the part has no reference or the index cannot say."""
+        ref = question.ref
+        if ref is None or not self.site.ask_tools:
+            return ""
+        try:
+            index = _open(self.site)
+        except IndexMissing:
+            return ""
+        try:
+            return askfacts.Facts(self._context(index, now)).context(ref)
+        except Exception:  # the facts are a help, never a reason not to answer
+            return ""
+        finally:
+            index.close()
 
     def _known(self, now: datetime) -> Callable[[int], list[didit.Known] | None]:
         """The findings of a Checks window from its cached reply, if there is one."""
