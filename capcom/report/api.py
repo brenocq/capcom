@@ -517,15 +517,127 @@ def overview_regroup(
     return {**base, "cumulative_today": chart, "group": group.value, "unavailable": unavailable}
 
 
-def spend(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
+@dataclass(slots=True, frozen=True)
+class _Scope:
+    """The window a Spend reply covers: a range of whole days ending today
+    (`days`), one local day, or one local clock hour."""
+
+    scale: str  # "range", "day" or "hour"
+    since: datetime
+    end: datetime  # the window's end, maybe still to come
+    days: int | None = None
+    day: date | None = None
+
+
+SPEND_SCALES = ("days", "day", "hour")
+HOUR_KEY = re.compile(r"^(\d{4}-\d\d-\d\d)T(\d\d)(?::00(?::00)?)?([+-]\d\d:?\d\d|Z)?$")
+MINUTE_BARS = timedelta(minutes=5)  # an hour's bars
+HOUR_STEP = timedelta(minutes=1)  # an hour's cumulative chart
+
+
+def _parse_day(ctx: Context, raw: str) -> date:
+    try:
+        when = date.fromisoformat(raw)
+    except ValueError:
+        raise ApiError(400, "bad_query", "day must be YYYY-MM-DD") from None
+    if when > ctx.today():
+        raise ApiError(404, "not_found", "that day has not come yet")
+    return when
+
+
+def _parse_hour(ctx: Context, raw: str) -> datetime:
+    """A local clock hour from its key: `2026-10-24T08` (a local wall time; the first
+    of two on the night the clocks fall back), or with an offset to pick either."""
+    raw = _OFFSET_SPACE.sub(r"+\1", raw.strip())  # a "+" left unescaped reads as a space
+    m = HOUR_KEY.match(raw)
+    bad = "hour must be a local hour, e.g. 2026-10-24T08 (or 2026-10-25T01+01:00)"
+    if not m:
+        raise ApiError(400, "bad_query", bad)
+    try:
+        wall = datetime.fromisoformat(f"{m[1]}T{m[2]}:00:00{m[3] or ''}")
+    except ValueError:
+        raise ApiError(400, "bad_query", bad) from None
+    if wall.tzinfo is not None:
+        start = wall
+    elif ctx.tz is not None:
+        start = wall.replace(tzinfo=ctx.tz)
+    else:
+        start = wall.astimezone()  # naive: the machine's zone
+    if _hour_ms(ctx, start) != ms(start):
+        raise ApiError(400, "bad_query", "hour must be the start of a local hour")
+    if start > ctx.now:
+        raise ApiError(404, "not_found", "that hour has not come yet")
+    return ctx.local(start)
+
+
+def _hour_key(ctx: Context, start: datetime) -> str:
+    """The key `_parse_hour` reads back as `start`: the local wall hour, with the UTC
+    offset only when the wall time alone means another hour (clocks falling back)."""
+    local = ctx.local(start)
+    key = local.strftime("%Y-%m-%dT%H")
+    wall = local.replace(tzinfo=None, fold=0)
+    back = wall.replace(tzinfo=ctx.tz) if ctx.tz is not None else wall.astimezone()
+    if ms(back) == ms(start):
+        return key
+    off = local.strftime("%z")
+    return f"{key}{off[:3]}:{off[3:]}"
+
+
+def _spend_scope(ctx: Context, query: Mapping[str, str]) -> _Scope:
+    day_raw, hour_raw = query.get("day") or "", query.get("hour") or ""
+    if day_raw and hour_raw:
+        raise ApiError(400, "bad_query", "give a day or an hour, not both")
+    if hour_raw:
+        start = _parse_hour(ctx, hour_raw)
+        return _Scope("hour", start, start + HOUR, day=start.date())
+    if day_raw:
+        when = _parse_day(ctx, day_raw)
+        return _Scope(
+            "day", ctx.at_midnight(when), ctx.at_midnight(when + timedelta(days=1)), day=when
+        )
     days = _int(query, "days", 14, 1, 366)
     if days not in SPEND_DAYS:
         raise ApiError(400, "bad_query", f"days must be one of {', '.join(map(str, SPEND_DAYS))}")
+    return _Scope("range", ctx.midnight(days - 1), ctx.now, days=days)
+
+
+def _scope_json(ctx: Context, sc: _Scope, until: datetime) -> dict[str, Any]:
+    """The window part of a Spend reply: its bounds and, for a day or an hour, its
+    neighbors' keys (`next` null when that day or hour has not come yet)."""
+    out: dict[str, Any] = {
+        "scale": sc.scale,
+        "days": sc.days,
+        "since": iso(sc.since, ctx.tz),
+        "until": iso(until, ctx.tz),
+        "end": iso(sc.end, ctx.tz),
+        "day": sc.day.isoformat() if sc.day else None,
+        "hour": None,
+        "current": sc.since <= ctx.now < sc.end or sc.scale == "range",  # holds now
+        "prev": None,
+        "next": None,
+    }
+    if sc.scale == "day" and sc.day is not None:
+        out["prev"] = (sc.day - timedelta(days=1)).isoformat()
+        nxt = sc.day + timedelta(days=1)
+        out["next"] = nxt.isoformat() if nxt <= ctx.today() else None
+    elif sc.scale == "hour":
+        out["hour"] = _hour_key(ctx, sc.since)
+        out["prev"] = _hour_key(ctx, sc.since - HOUR)
+        out["next"] = _hour_key(ctx, sc.end) if sc.end <= ctx.now else None
+    return out
+
+
+def spend(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
+    """Spend over a range of days ending today (`days`), one local day (`day`) or
+    one local clock hour (`hour`), split by `group`."""
+    sc = _spend_scope(ctx, query)
     group = _group(query)
-    since = ctx.midnight(days - 1)
+    since = sc.since
+    until = min(sc.end, ctx.now)
+    days = sc.days
     w = _window(ctx)
     hour_projects: dict[int, dict[str, float]] = {}  # local hour start (ms) -> project -> usd
-    for req in ctx.index.requests(since=since):
+    for req in ctx.index.requests(since=since, until=None if days else until):
         cost = w.add(req)
         if cost is not None and cost.total:
             per = hour_projects.setdefault(_hour_ms(ctx, req.timestamp), {})
@@ -534,63 +646,63 @@ def spend(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     ctx.progress(0.15)
 
     unavailable: list[str] = []
-    step = _STEPS[days]
+    step = _STEPS[days] if days else _STEPS[1] if sc.scale == "day" else HOUR_STEP
+    bar = MINUTE_BARS if sc.scale == "hour" else timedelta(hours=1)
     cum = _try(
         lambda: ctx.analysis.cumulative(
-            ctx.index, ctx.table, since, ctx.now, group, step, top=TOP_MEMBERS
+            ctx.index, ctx.table, since, until, group, step, top=TOP_MEMBERS
         ),
         unavailable,
     )
     ctx.progress(0.3)
-    hourly = _try(
+    steps = _try(
         lambda: ctx.analysis.per_step(
-            ctx.index, ctx.table, since, ctx.now, group, timedelta(hours=1), top=TOP_MEMBERS
+            ctx.index, ctx.table, since, until, group, bar, top=TOP_MEMBERS
         ),
         unavailable,
     )
     ctx.progress(0.45)
     if cum is not None:
         cum = _tidy(cum, group, w.names)
-    if hourly is not None:
-        hourly = _tidy(hourly, group, w.names)
-    cum_json = None if cum is None else _cumulative_json(cum, step, ctx.now)
-    daily_json = heat_json = hours_json = None
-    if hourly is not None:
+    if steps is not None:
+        steps = _tidy(steps, group, w.names)
+    cum_json = None if cum is None else _cumulative_json(cum, step, until)
+    daily_json = heat_json = hours_json = minutes_json = None
+    if steps is not None:
         keep = [m["key"] for m in cum_json["members"] if m["key"] != OTHER] if cum_json else []
         if not keep:
-            keep = [s.key for s in hourly if s.key != OTHER]
-        elif {s.key for s in hourly if s.key != OTHER} != set(keep):
+            keep = [s.key for s in steps if s.key != OTHER]
+        elif {s.key for s in steps if s.key != OTHER} != set(keep):
             # a near tie ranked the members differently: fold the full series instead
             full = _try(
-                lambda: ctx.analysis.per_step(
-                    ctx.index, ctx.table, since, ctx.now, group, timedelta(hours=1)
-                ),
+                lambda: ctx.analysis.per_step(ctx.index, ctx.table, since, until, group, bar),
                 unavailable,
             )
-            hourly = _tidy(full or [], group, w.names)
-        daily_json, heat_json = _daily_and_heat(ctx, hourly, keep, days)
-        heat_json |= _heat_hours(ctx, hourly, hour_projects, w.names)
-        if days == 1:
-            hours_json = _today_hours(ctx, hourly, keep)
-    marks = _spike_marks(ctx, since, ctx.now, w.infos, w.names, unavailable)
+            steps = _tidy(full or [], group, w.names)
+        if days:
+            daily_json, heat_json = _daily_and_heat(ctx, steps, keep, days)
+            heat_json |= _heat_hours(ctx, steps, hour_projects, w.names)
+        if sc.scale == "hour":
+            starts = [since + MINUTE_BARS * i for i in range(12)]
+            minutes_json = _slot_bars(ctx, steps, keep, starts, lambda t: _slot_ms(t, since))
+        elif days == 1 or sc.scale == "day":
+            hours_json = _day_hours(ctx, steps, keep, sc.day or ctx.today())
+    marks = _spike_marks(ctx, since, until, w.infos, w.names, unavailable)
 
     rows = w.session_rows(ctx.tz)
     temporary = [r for r in rows if r["temporary"]]
+    regime = _regime(ctx, ctx.local(since).date(), unavailable) if days else None
     return {
-        "window": {
-            "days": days,
-            "since": iso(since, ctx.tz),
-            "until": iso(ctx.now, ctx.tz),
-            "group": group.value,
-        },
+        "window": _scope_json(ctx, sc, until) | {"group": group.value},
         "totals": w.total.to_json(),
         "sessions_count": len(rows) - len(temporary),
         "temporary_sessions": len(temporary),
         "cumulative": cum_json,
         "spikes": marks,
-        "regime": _regime(ctx, ctx.local(since).date(), unavailable),
+        "regime": regime,
         "daily": daily_json,
         "hourly": hours_json,
+        "minutes": minutes_json,
         "heatmap": heat_json,
         "context_buckets": w.context_json(),
         "sessions": rows[:10],
@@ -763,33 +875,91 @@ def _daily_and_heat(
     return daily, heat
 
 
-def _today_hours(ctx: Context, hourly: Sequence[Series], keep: Sequence[str]) -> dict[str, Any]:
-    """Today's hourly steps as one bar per local clock hour, from midnight to the
-    next one (23 or 25 hours on a daylight-saving day), the hours to come at zero."""
-    members = _fold(hourly, keep)
-    start, end = ctx.midnight(), ctx.at_midnight(ctx.today() + timedelta(days=1))
+def _day_starts(ctx: Context, day: date) -> list[datetime]:
+    """The starts of a local day's clock hours, from its midnight to the next one
+    (23 or 25 of them on a daylight-saving day)."""
+    start, end = ctx.at_midnight(day), ctx.at_midnight(day + timedelta(days=1))
     starts = []
     t = start
     while t < end:
         starts.append(t)
         t = (t.astimezone(UTC) + timedelta(hours=1)).astimezone(start.tzinfo)
+    return starts
+
+
+def _day_hours(
+    ctx: Context, hourly: Sequence[Series], keep: Sequence[str], day: date
+) -> dict[str, Any]:
+    """A day's hourly steps as one bar per local clock hour, the hours to come at zero."""
+    return _slot_bars(ctx, hourly, keep, _day_starts(ctx, day), lambda t: _hour_ms(ctx, t))
+
+
+def _slot_ms(t: datetime, since: datetime) -> int:
+    """The start (ms) of the 5-minute bar from `since` that holds `t`."""
+    size = int(MINUTE_BARS.total_seconds() * 1000)
+    return ms(t) - (ms(t) - ms(since)) % size
+
+
+def _slot_bars(
+    ctx: Context,
+    steps: Sequence[Series],
+    keep: Sequence[str],
+    starts: Sequence[datetime],
+    slot: Callable[[datetime], int],
+) -> dict[str, Any]:
+    """Steps summed into bars that start at `starts` (`slot` gives the bar start, in
+    ms, of a step's time), folded into the members in `keep` and "other"."""
+    members = _fold(steps, keep)
     pos = {ms(t): i for i, t in enumerate(starts)}
-    per_hour = [[0.0] * len(members) for _ in starts]
-    for i, t in enumerate(hourly[0].times if hourly else ()):
-        k = pos.get(_hour_ms(ctx, t))
+    per = [[0.0] * len(members) for _ in starts]
+    for i, t in enumerate(steps[0].times if steps else ()):
+        k = pos.get(slot(t))
         if k is None:
             continue
         for j, (_, _, values) in enumerate(members):
-            per_hour[k][j] += values[i]
+            per[k][j] += values[i]
     return {
         "members": [{"key": k, "label": label} for k, label, _ in members],
         "hours": [
             {
                 "start": iso(t, ctx.tz),
-                "values": [round(v, 6) for v in per_hour[i]],
-                "total": round(sum(per_hour[i]), 6),
+                "values": [round(v, 6) for v in per[i]],
+                "total": round(sum(per[i]), 6),
             }
             for i, t in enumerate(starts)
+        ],
+    }
+
+
+TYPICAL_HOUR_DAYS = 28  # a typical hour: the mean of that clock hour over the days before
+
+
+def typical_hours(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
+    """The mean spend of each local clock hour over the TYPICAL_HOUR_DAYS days before
+    `day` (that day left out), laid on the day's own hours. Only the days since the
+    first request count, so a short history is not pulled toward zero by days
+    before capcom had any log; a day with no spend among them counts as zero."""
+    when = _parse_day(ctx, query.get("day") or "")
+    first_day = when - timedelta(days=TYPICAL_HOUR_DAYS)
+    reqs = iter(ctx.index.requests())
+    first = next(reqs, None)
+    getattr(reqs, "close", lambda: None)()  # release the cursor
+    if first is not None:
+        first_day = max(first_day, ctx.local(first.timestamp).date())
+    n = max((when - first_day).days, 0) if first is not None else 0
+    by_hour = [0.0] * 24
+    if n:
+        since, until = ctx.at_midnight(first_day), ctx.at_midnight(when)
+        for req in ctx.index.requests(since=since, until=until):
+            if not is_placeholder(req.model):
+                by_hour[ctx.local(req.timestamp).hour] += price(req, ctx.table).total
+    return {
+        "day": when.isoformat(),
+        "of_days": TYPICAL_HOUR_DAYS,
+        "days": n,
+        "hours": [
+            {"start": iso(t, ctx.tz), "usd": round(by_hour[t.hour] / n, 6) if n else 0.0}
+            for t in _day_starts(ctx, when)
         ],
     }
 

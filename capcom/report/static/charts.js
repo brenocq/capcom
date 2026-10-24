@@ -237,8 +237,10 @@ function clearOfMarks(plot, lab, fx, fy, axis) {
 // ------------------------------------------------------------------ per-day bars
 
 // days: [{date (Date), iso, values, total}], members: [{label, color}]; each day
-// links to its own page, with `query` (the split the bars show) after its path
-export function dayBars(days, members, todayIso, query = '') {
+// links to `href(day)`, by default its Day page, or its own page with `href` (a
+// string) as the query after its path
+export function dayBars(days, members, todayIso, href = '') {
+  const hrefOf = typeof href === 'function' ? href : (d) => `/day/${d.iso}${href}`;
   const max = Math.max(...days.map((d) => d.total), 1e-9);
   const many = days.length > 31;
   // every day's amount sits above its bar: level when it fits the bar's width,
@@ -251,7 +253,7 @@ export function dayBars(days, members, todayIso, query = '') {
       d.values.map((v, j) => (v > 0 ? h('div', { style: `flex:${v} 1 0px;background:${members[j].color}` }) : null)));
     const key = i === top || i === days.length - 1;
     const amt = d.total > 0 ? h('span.amt' + (key ? '.key' : ''), { text: usdShort(d.total), 'aria-hidden': 'true' }) : null;
-    const col = h('a.day', { href: `/day/${d.iso}${query}`, style: f }, amt, bar);
+    const col = h('a.day', { href: hrefOf(d), style: f }, amt, bar);
     const rows = () => members
       .map((m, j) => ({ label: m.label, value: usd(d.values[j]), color: m.color }))
       .filter((r, j) => d.values[j] > 0).reverse();
@@ -268,42 +270,79 @@ export function dayBars(days, members, todayIso, query = '') {
     const last = i === days.length - 1 ? ';display:flex;justify-content:flex-end' : '';
     return h('span', { class: today ? 'today' : null, text, style: step > 1 ? 'overflow:visible' + last : null });
   })));
-  // a few days keep bars wide enough to tap, scrolling inside the card when narrow
-  return h('div.daychart', { style: many ? null : `--days:${days.length}` }, bars, labs);
+  // a few days keep bars wide enough to tap, scrolling inside the card when narrow,
+  // opened on the latest day
+  const chart = h('div.daychart', { style: many ? null : `--days:${days.length}` }, bars, labs);
+  openAt(chart, 1);
+  return chart;
 }
 
-// Today's spend per local clock hour, in the per-day bars' style: `hours` is
-// /api/spend's hourly.hours ([{start: ISO, values, total}]), `now` in ms. The
-// hours to come are empty; the hour holding `now` is marked like today. Every bar
-// opens `href` (today's Day page).
-export function hourBars(hours, members, now, href) {
-  const rows = hours.map((x) => ({ ...x, t: Date.parse(x.start) }));
-  const max = Math.max(...rows.map((x) => x.total), 1e-9);
-  const cur = rows.findIndex((x, i) => x.t <= now && (i === rows.length - 1 || now < rows[i + 1].t));
+// A day's spend per local clock hour, or an hour's per 5 minutes, in the per-day
+// bars' style: `hours` is /api/spend's hourly.hours or minutes.hours ([{start: ISO,
+// values, total}]), `now` in ms. The slots to come are empty; the one holding `now`
+// is marked like today. Options: `href(slot)` the page a bar opens (none: bars are
+// not links), `typical` one amount per slot drawn as a gray bar behind the colored
+// one (the y-scale fits both), `typicalLabel` its name in the tooltip, and `slot`
+// the slot's length in ms (an hour by default).
+export function hourBars(hours, members, now, opts = {}) {
+  if (typeof opts === 'string') { const href = opts; opts = { href: () => href }; }
+  const slot = opts.slot || 3600e3;
+  const typical = opts.typical || null;
+  const rows = hours.map((x, i) => ({ ...x, t: Date.parse(x.start), typ: typical ? typical[i] || 0 : 0 }));
+  const max = Math.max(...rows.map((x) => Math.max(x.total, x.typ)), 1e-9);
+  // the slot holding now; none once the last one has ended (a past day or hour)
+  const cur = rows.findIndex((x, i) => x.t <= now && now < (i === rows.length - 1 ? x.t + slot : rows[i + 1].t));
   const top = rows.reduce((a, x, i) => (x.total > rows[a].total ? i : a), 0);
-  const span = (x) => `${hm(new Date(x.t))} to ${hm(new Date(x.t + 3600e3))}`;
-  const bars = h('div.days.hl.flat', { style: 'gap:3px' }, rows.map((x, i) => {
+  const span = (x) => `${hm(new Date(x.t))} to ${hm(new Date(x.t + slot))}`;
+  const what = slot >= 3600e3 ? 'hour' : 'minutes';
+  const typRow = (x) => (typical ? [{ label: opts.typicalLabel || 'Typical', value: usd(x.typ), color: 'var(--gray)' }] : []);
+  // linked bars touch, each column wide enough to tap (24 px), the gap drawn inside it
+  const gap = opts.href ? 'gap:0' : 'gap:3px';
+  const bars = h('div.days.hl.flat' + (typical ? '.vs' : '') + (opts.href ? '.tight' : ''), { style: gap }, rows.map((x, i) => {
     const bar = h('div.bar', null,
       x.values.map((v, j) => (v > 0 ? h('div', { style: `flex:${v} 1 0px;background:${members[j].color}` }) : null)));
+    const typ = typical ? h('div.typ', { 'aria-hidden': 'true' }) : null;
     const amt = x.total > 0 ? h('span.amt' + (i === top || i === cur ? '.key' : ''), { text: usdShort(x.total), 'aria-hidden': 'true' }) : null;
-    const col = h('a.day', { href, style: `--f:${(x.total / max).toFixed(4)}` }, amt, bar);
-    if (cur >= 0 && i > cur) return tipOn(col, span(x), [{ label: 'Not yet', value: '' }], { native: true, aria: `${span(x)}: not yet` });
+    const style = `--f:${(x.total / max).toFixed(4)}` + (typical ? `;--t:${(x.typ / max).toFixed(4)}` : '');
+    const href = opts.href ? opts.href(x) : null;
+    const col = h(href ? 'a.day' : 'div.day', { href, style }, typ, amt, bar);
+    const vs = typical ? `, typically ${usd(x.typ)}` : '';
+    const open = href ? `, open the ${what}` : '';
+    if (cur >= 0 && i > cur) return tipOn(col, span(x), [{ label: 'Not yet', value: '' }, ...typRow(x)], { native: true, aria: `${span(x)}: not yet${vs}${open}` });
     const so = i === cur ? ' so far' : '';
-    const parts = () => members
+    const parts = () => [...members
       .map((m, j) => ({ label: m.label, value: usd(x.values[j]), color: m.color }))
-      .filter((r, j) => x.values[j] > 0).reverse();
-    return tipOn(col, `${span(x)}: ${usd(x.total)}${so}`, parts, { native: true, aria: `${span(x)}: ${usd(x.total)}${so}, open the day` });
+      .filter((r, j) => x.values[j] > 0).reverse(), ...typRow(x)];
+    return tipOn(col, `${span(x)}: ${usd(x.total)}${so}`, parts, { native: true, aria: `${span(x)}: ${usd(x.total)}${so}${vs}${open}` });
   }));
   fitAmounts(bars, rows.map((x) => (x.total > 0 ? usdShort(x.total).length : 0)));
-  const labs = h('div.daylabs', { style: 'gap:3px' }, rows.map((x, i) => {
-    const hour = new Date(x.t).getHours();
+  const labs = h('div.daylabs', { style: gap }, rows.map((x, i) => {
+    const d = new Date(x.t);
     const now = i === cur;
-    // every third hour, and the current one when it does not crowd a neighbor
-    const shown = now || (hour % 3 === 0 && !(cur >= 0 && Math.abs(i - cur) < 2));
-    return h('span', { class: now ? 'today' : null, text: shown ? two(hour) : '', style: 'overflow:visible' });
+    // every third hour (or quarter hour), and the current one when it does not crowd a neighbor
+    const third = slot >= 3600e3 ? d.getHours() % 3 === 0 : d.getMinutes() % 15 === 0;
+    const shown = now || (third && !(cur >= 0 && Math.abs(i - cur) < 2));
+    const text = slot >= 3600e3 ? two(d.getHours()) : hm(d);
+    return h('span', { class: now ? 'today' : null, text: shown ? text : '', style: 'overflow:visible' });
   }));
-  // half a day's width per hour: the day fits a card, and scrolls only on a phone
-  return h('div.daychart', { style: `--days:${Math.ceil(rows.length / 2)}` }, bars, labs);
+  // half a day's width per hour (24.5 px when the bars are links): the day fits a
+  // card, and scrolls only on a phone
+  const n = opts.href ? (rows.length * 24.5 / 30).toFixed(2) : Math.ceil(rows.length / 2);
+  const chart = h('div.daychart', { style: `--days:${n}` }, bars, labs);
+  // a chart that scrolls (a phone) opens on the slot holding now
+  if (cur >= 0) openAt(chart, (cur + 0.5) / rows.length);
+  return chart;
+}
+
+// A chart that scrolls sideways opens with the point `frac` (0 to 1 of its width)
+// centered, once it is on the page; a redraw that carried a scroll position over
+// (morph.js) keeps it.
+function openAt(chart, frac) {
+  if (typeof requestAnimationFrame !== 'function') return;
+  requestAnimationFrame(() => {
+    if (!chart.isConnected || chart.scrollLeft || chart.scrollWidth <= chart.clientWidth) return;
+    chart.scrollLeft = frac * chart.scrollWidth - chart.clientWidth / 2;
+  });
 }
 
 // Choose how the per-day amounts show for the bars' width now: "flat" (level),

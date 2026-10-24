@@ -195,8 +195,58 @@ export function overviewPath(query) {
   const group = pickedGroup(query);
   return group === 'category' ? 'overview' : `overview?group=${group}`;
 }
+// Spend's window from a page query: a range of days ending today (`days`), one local
+// day (`day=2026-10-23`) or one local clock hour (`hour=2026-10-24T08`, with the UTC
+// offset only for the second 01:00 of a night the clocks fall back). A drilled-in
+// day or hour keeps `days`, the range it was opened from, for the way back up.
+export const SPEND_DAYS = [1, 7, 14, 30, 90];
+export function spendScope(query) {
+  const back = SPEND_DAYS.includes(Number(query.get('days'))) ? Number(query.get('days')) : 14;
+  const hour = query.get('hour'), day = query.get('day');
+  if (hour) return { scale: 'hour', hour, day: hour.slice(0, 10), days: back };
+  if (day) return { scale: 'day', day, days: back };
+  return { scale: 'range', days: Number(query.get('days')) || 14 };
+}
 export function spendPath(query) {
-  return `spend?days=${Number(query.get('days')) || 14}&group=${pickedGroup(query)}`;
+  const sc = spendScope(query), group = pickedGroup(query);
+  if (sc.scale === 'hour') return `spend?hour=${encodeURIComponent(sc.hour)}&group=${group}`;
+  if (sc.scale === 'day') return `spend?day=${encodeURIComponent(sc.day)}&group=${group}`;
+  return `spend?days=${sc.days}&group=${group}`;
+}
+// A local date as YYYY-MM-DD, and a local clock hour (its start, ms) as Spend's
+// `hour` key: the wall hour, with the UTC offset only when the wall time alone
+// reads as another hour (the second 01:00 of a night the clocks fall back; a
+// local time that happens twice reads as the first).
+export const isoDay = (d) => `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`;
+export function hourKey(t) {
+  const d = new Date(t);
+  const key = `${isoDay(d)}T${two(d.getHours())}`;
+  if (new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours()).getTime() === t) return key;
+  const off = -d.getTimezoneOffset(), a = Math.abs(off);
+  return `${key}${off >= 0 ? '+' : '-'}${two(Math.floor(a / 60))}:${two(a % 60)}`;
+}
+// The per-hour chart's gray "typical day" bars: on or off, from the URL's
+// ?typical=1|0 first, then the viewer's last choice (kept in localStorage).
+export function pickedTypical(query) {
+  const q = query.get('typical');
+  if (q === '1' || q === '0') return q === '1';
+  try { return localStorage.getItem('capcom-typical') === '1'; } catch (e) { return false; }
+}
+export function rememberTypical(on) {
+  try { localStorage.setItem('capcom-typical', on ? '1' : '0'); } catch (e) { /* storage off */ }
+}
+// A link to Spend for a range (`{days}`), a day (`{day}`) or an hour (`{hour}`): the
+// split (unless by category, the default) and, drilled in, the range it came from
+// (unless 14 days, the default) ride along.
+export function spendHref(to, group, back = 14) {
+  const q = new URLSearchParams();
+  if (to.hour) q.set('hour', to.hour);
+  else if (to.day) q.set('day', to.day);
+  const drilled = Boolean(to.hour || to.day);
+  if (!drilled) q.set('days', to.days);
+  else if (back !== 14) q.set('days', back);
+  if (group && group !== 'category') q.set('group', group);
+  return '/spend?' + q.toString().replace(/%3A/g, ':');
 }
 export const LIMIT_DAYS = [7, 14, 30, 90];
 export function limitsPath(query) {
@@ -616,7 +666,7 @@ export function sessionColor(color) {
 // range (`days`, Overview's `range`) is its own step in the history, so Back goes
 // 30 -> 14 -> 7 days before it leaves the page; other changes (a sort, a filter,
 // a picked spike) replace the current step.
-const RANGE_KEYS = ['days', 'range'];
+const RANGE_KEYS = ['days', 'range', 'day', 'hour'];
 
 export function setQuery(params) {
   const q = new URLSearchParams(location.search);

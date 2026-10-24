@@ -352,7 +352,8 @@ SAMPLED = frozenset({"limits", "overview", "limit-window"})
 # the query parameters each endpoint reads: the cache key holds only these
 PARAMS: dict[str, tuple[str, ...]] = {
     "overview": ("group",),
-    "spend": ("days", "group"),
+    "spend": ("days", "group", "day", "hour"),
+    "typical-hours": ("day",),
     "sessions": ("days", "limit", "sort", "q"),
     "session": (),
     "day": ("group",),
@@ -1274,6 +1275,7 @@ ENDPOINTS: dict[str, Endpoint] = {
     "session": lambda c, sid, q: api.session(c, sid),
     "day": lambda c, d, q: api.day(c, d, q),
     "hour": lambda c, _, q: api.hour(c, q),
+    "typical-hours": lambda c, _, q: api.typical_hours(c, q),
     "live": lambda c, _, q: api.live(c),
     "spikes": lambda c, _, q: api.spikes(c, q),
     "checks": lambda c, _, q: api.checks(c, q),
