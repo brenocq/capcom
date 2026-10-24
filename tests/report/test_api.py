@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC
 
 import pytest
 
@@ -127,6 +128,28 @@ def test_spend_groups(client: Client, group: str) -> None:
     assert sum(map(sum, heat["cells"])) == pytest.approx(total, abs=1e-5)
     # today (Wednesday) at 09:00 UTC holds the morning of s1
     assert heat["cells"][2][9] > 0
+
+
+@pytest.mark.parametrize("group", ["category", "project"])
+def test_spend_today(client: Client, group: str) -> None:
+    status, data, _ = client.get(f"/api/spend?days=1&group={group}")
+    assert status == 200
+    assert data["window"]["days"] == 1
+    assert data["window"]["since"].startswith("2026-10-21T00:00")
+    assert close(data["totals"]["usd"], usd(TODAY))
+    assert data["cumulative"]["step_s"] == 300
+    assert len(data["daily"]["days"]) == 1
+    hourly = data["hourly"]
+    assert len(hourly["hours"]) == 24
+    assert hourly["hours"][0]["start"].startswith("2026-10-21T00:00")
+    assert sum(x["total"] for x in hourly["hours"]) == pytest.approx(usd(TODAY), abs=1e-5)
+    assert all(len(x["values"]) == len(hourly["members"]) for x in hourly["hours"])
+    # the morning of s1, at 09:00 UTC; nothing after now
+    assert hourly["hours"][9]["total"] > 0
+    now_hour = NOW.astimezone(UTC).hour
+    assert all(x["total"] == 0 for x in hourly["hours"][now_hour + 1 :])
+    # the longer windows send no hourly bars
+    assert client.get("/api/spend?days=7")[1]["hourly"] is None
 
 
 def test_spend_sessions_and_buckets(client: Client) -> None:

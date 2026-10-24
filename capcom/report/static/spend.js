@@ -6,12 +6,12 @@ import {
   outputUsd, estimateNote, lowerMark, OTHER_COLOR, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor,
   spikeText, spikeHref, projectChip, storyLine, segBar, tableToggle, tipOn, entityColor, GROUPS, pickedGroup, rememberGroup, spendPath, groupQuery, sessionDot,
 } from './lib.js';
-import { bandChart, dayBars } from './charts.js';
+import { bandChart, dayBars, hourBars } from './charts.js';
 import { heatCard } from './heatmap.js';
 import { sessionsTable } from './sessions.js';
 
-const RANGES = [[7, '7 days'], [14, '14 days'], [30, '30 days'], [90, '90 days']];
-const TITLES = { 7: 'One week, adding up', 14: 'Two weeks, adding up', 30: 'Thirty days, adding up', 90: 'Ninety days, adding up' };
+const RANGES = [[1, 'Today'], [7, '7 days'], [14, '14 days'], [30, '30 days'], [90, '90 days']];
+const TITLES = { 1: 'Today, adding up', 7: 'One week, adding up', 14: 'Two weeks, adding up', 30: 'Thirty days, adding up', 90: 'Ninety days, adding up' };
 
 export function memberColor(m, group) {
   if (m.key === '(other)') return OTHER_COLOR;
@@ -134,9 +134,15 @@ export async function renderSpend(main, r) {
   cum.append(h('p.note', { style: 'margin:0' }, spikeNote, note ? note + '.' : ''));
   main.append(cum);
 
-  // per day + tokens vs dollars
+  // per day (per hour today) + tokens vs dollars
   const perDay = h('section.card.grow3');
-  if (d.daily) {
+  if (days === 1 && d.hourly) {
+    const members = withColors(d.hourly.members, group);
+    const dayHref = `/day/${d.window.since.slice(0, 10)}${groupQuery(group)}`;  // since: local midnight today
+    perDay.append(h('div.split', null, h('h2.small', { text: 'Per hour' }),
+      h('a.link', { href: dayHref, text: 'Today against a typical day' })));
+    perDay.append(hourBars(d.hourly.hours, members, until.getTime(), dayHref));
+  } else if (d.daily) {
     const members = withColors(d.daily.members, group);
     const rows = d.daily.days.map((x) => ({ ...x, iso: x.date, date: localDate(x.date) }));
     const best = rows.reduce((a, b) => (b.total > a.total ? b : a), rows[0]);
@@ -144,13 +150,15 @@ export async function renderSpend(main, r) {
       best && best.total > 0 ? h('span.note', { text: `Highest: ${dayName(best.date)} ${monthDay(best.date)}, ${usd(best.total, 0)}` }) : null));
     perDay.append(dayBars(rows, members, rows[rows.length - 1].iso, groupQuery(group)));
   } else {
-    perDay.append(h('h2.small', { text: 'Per day' }), timelineMissing('The per-day chart'));
+    perDay.append(h('h2.small', { text: days === 1 ? 'Per hour' : 'Per day' }), timelineMissing(days === 1 ? 'The per-hour chart' : 'The per-day chart'));
   }
   main.append(h('div.row-wrap', null, perDay, tokensVsDollars(t)));
 
-  // heatmap + context
-  const heat = d.heatmap ? heatCard(d.heatmap, until.getTime(), heatSentence)
-    : h('section.card.grow3', null, h('h2.small', { text: 'When you spend' }), timelineMissing('The heatmap'));
+  // heatmap + context; today has no week to lay out, so its spikes take the heatmap's place
+  const heat = days === 1
+    ? h('section.card.grow3', null, h('h2.small', { text: 'Spikes today' }), ...spikeList(picked || sp, days))
+    : d.heatmap ? heatCard(d.heatmap, until.getTime(), heatSentence)
+      : h('section.card.grow3', null, h('h2.small', { text: 'When you spend' }), timelineMissing('The heatmap'));
   main.append(h('div.row-wrap', null, heat, contextCard(d.context_buckets)));
 
   // sessions

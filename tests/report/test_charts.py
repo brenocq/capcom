@@ -341,3 +341,28 @@ console.log(JSON.stringify({{ legend: spans(leg).map(pick), bars: spans(bars).ma
     assert got["bars"] == [{"text": short, "title": deep}]
     assert got["chip"] == {"text": short, "title": f"Project {deep}"}
     assert got["plain"] == "short"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_hour_bars_mark_the_current_hour_and_leave_the_rest_empty() -> None:
+    got = _node("""
+const m = await import('./charts.js');
+const hours = Array.from({ length: 24 }, (_, i) => ({
+  start: new Date(2026, 9, 21, i).toISOString(),
+  values: [i < 10 ? i : 0], total: i < 10 ? i : 0 }));
+const now = new Date(2026, 9, 21, 9, 30).getTime();
+const el = m.hourBars(hours, [{ label: 'a', color: 'red' }], now, '/day/2026-10-21');
+const [bars, labs] = el.children;
+console.log(JSON.stringify({
+  links: [...new Set(bars.children.map((c) => c.attrs.href))],
+  amounts: bars.children.map((c) => c.children.filter((x) => x && x.tag === 'span').length),
+  labels: labs.children.map((c) => [c.textContent || '', c.attrs.class || null]),
+}));
+""")
+    assert got["links"] == ["/day/2026-10-21"]
+    # an amount over every hour with spend (1 to 9), none from now on
+    assert got["amounts"] == [0] + [1] * 9 + [0] * 14
+    # every third hour labeled, the current hour (09) highlighted, its neighbors clear
+    assert got["labels"][0] == ["00", None] and got["labels"][3] == ["03", None]
+    assert got["labels"][9] == ["09", "today"]
+    assert got["labels"][12] == ["12", None] and got["labels"][10] == ["", None]
