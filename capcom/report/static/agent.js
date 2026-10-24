@@ -15,7 +15,7 @@ const WAIT_NOTE = "The log has one start and one end for a command: it can't tel
 const ROWS_MAX = 3000; // steps listed at most in "All steps"
 
 // the view's state, kept across redraws of one thread (a theme switch, a partial reply)
-const view = { key: null, zoom: 'all', sel: null, all: false, scroll: 0 };
+const view = { key: null, zoom: 'all', sel: null, all: false, scroll: 0, folds: new Map(), sid: '', aid: 'main' };
 
 // "19 min 42 s", "8 s", "1 h 04"
 function took(sec) {
@@ -67,7 +67,7 @@ export async function renderAgent(main, r) {
   const aid = r.rest[2] || 'main';
   const d = await api(`agent/${encodeURIComponent(sid)}?agent=${encodeURIComponent(aid)}`);
   const key = sid + '/' + aid;
-  if (view.key !== key) Object.assign(view, { key, zoom: 'all', sel: null, all: false, scroll: 0 });
+  if (view.key !== key) Object.assign(view, { key, zoom: 'all', sel: null, all: false, scroll: 0, folds: new Map(), sid, aid });
   const T = d.thread, st = d.steps, R = d.requests;
   const n = st.start.length;
   multiDay = !sameDay(T.first, T.last);
@@ -407,12 +407,22 @@ function phasesCard(d, draw) {
     if (!on) continue;
     for (let i = p.first; i <= p.last; i++) {
       if (st.phase[i] !== p.n - 1) continue;
-      body.append(h('tr.agsrow', null, h('td'),
-        h('td.stepname', null, h('span.agstep', { title: st.label[i] }, h('i', { style: `background:${KIND_COLOR[st.kind[i]]}` }), h('span.agname', { text: st.label[i] }))),
+      const open = view.folds.has(i);
+      const chev = h('button.agchev', { type: 'button', 'aria-expanded': String(open), 'aria-controls': `agfold-${i}`,
+        'aria-label': `${open ? 'Hide' : 'Show'} the details of ${st.label[i]}`, title: open ? 'Hide details' : 'Show details',
+        onclick: (e) => { e.stopPropagation(); toggleFold(d, i, draw, true); },
+        onkeydown: (e) => { if (e.key === 'Escape' && open) { e.preventDefault(); toggleFold(d, i, draw, true); } } });
+      body.append(h('tr', { class: 'agsrow' + (open ? ' open' : ''), onclick: () => toggleFold(d, i, draw, false) }, h('td'),
+        h('td.stepname', null, h('span.agstep', { title: st.label[i] }, chev, h('i', { style: `background:${KIND_COLOR[st.kind[i]]}` }), h('span.agname', { text: st.label[i] }))),
         h('td.when', { text: at(st.start[i]) }),
         h('td.num', { text: took((st.end[i] - st.start[i]) / 1000) }),
         h('td'),
         costCell(st, i)));
+      if (open) {
+        body.append(h('tr.agfoldrow', null, h('td'), h('td', { colspan: '5' },
+          h('div.agfold', { id: `agfold-${i}`, onkeydown: (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); toggleFold(d, i, draw, true); } } },
+            foldBody(d, i)))));
+      }
     }
   }
   return h('section.card.agcard', null,
@@ -422,6 +432,152 @@ function phasesCard(d, draw) {
       h('thead', null, h('tr', null, ['', 'Phase', 'When', 'Took', 'Doing', 'Cost'].map((c, i) =>
         h('th', { scope: 'col', class: i === 3 || i === 5 ? 'num' : null, style: i === 0 ? 'width:28px' : i === 4 ? 'width:160px' : null, text: c })))),
       body)));
+}
+
+// ------------------------------------------------------------------ a step's fold
+
+// A step's fold: a thinking step's request token by token with its cost (numbers
+// from the index); a tool step's calls in full. Their text (the command, the file's
+// change, the output) is the logs' own: asked of `capcom serve` (/api/tool) only when
+// the fold opens, kept only while it is open, and marked .tooltext so Ask Roger
+// leaves it out. A page without the server's tool-details meta shows the numbers only.
+const SHOWN_LINES = 40;
+const KEY_NAMES = { command: 'Command', description: 'Description', file_path: 'File', notebook_path: 'Notebook',
+  pattern: 'Pattern', path: 'Path', glob: 'Glob', offset: 'Offset', limit: 'Limit', timeout: 'Timeout',
+  run_in_background: 'In background', replace_all: 'Replace all', output_mode: 'Output mode', type: 'Type' };
+const MONO_KEYS = new Set(['command', 'pattern', 'glob']);
+const toolDetailsOn = () => !!document.querySelector('meta[name="capcom-tool-details"][content="on"]');
+const writeToken = () => (document.querySelector('meta[name="capcom-token"]') || {}).content || '';
+
+function toggleFold(d, i, draw, fromButton) {
+  if (view.folds.has(i)) view.folds.delete(i);
+  else {
+    const calls = new Map();
+    if (d.steps.calls[i] && toolDetailsOn()) for (const [id] of d.steps.tools[i]) calls.set(id, { state: 'loading', all: false });
+    view.folds.set(i, calls);
+    for (const id of calls.keys()) loadCall(i, id, d.steps.start[i]);
+  }
+  draw();
+  if (fromButton) { const b = document.querySelector(`[aria-controls="agfold-${i}"]`); if (b) b.focus(); }
+}
+
+async function loadCall(i, id, t) {
+  const url = `/api/tool/${encodeURIComponent(view.sid)}?agent=${encodeURIComponent(view.aid)}&id=${encodeURIComponent(id)}&t=${Math.round(t)}`;
+  let next;
+  try {
+    const res = await fetch(url, { headers: { Accept: 'application/json', 'X-Capcom-Token': writeToken() }, cache: 'no-store' });
+    const body = await res.json().catch(() => ({}));
+    next = res.ok ? { state: 'ok', data: body } : { state: res.status === 404 ? 'gone' : 'error', message: body.message || '' };
+  } catch {
+    next = { state: 'error', message: '' };
+  }
+  const calls = view.folds.get(i);
+  if (!calls || !calls.has(id)) return; // closed meanwhile: the text is dropped
+  Object.assign(calls.get(id), next);
+  const box = document.getElementById(`agfold-${i}`);
+  if (box) box.replaceChildren(...foldBody({ steps: currentSteps, requests: currentRequests }, i));
+}
+// the thread the open folds belong to (set by foldBody, for a fold that fills in later)
+let currentSteps = null, currentRequests = null;
+
+function foldBody(d, i) {
+  currentSteps = d.steps; currentRequests = d.requests;
+  const st = d.steps;
+  if (!st.calls[i]) return [thinkFold(d.requests, st.request[i], st.moved && st.moved[i] ? movedNote(st, i) : null)];
+  const calls = view.folds.get(i) || new Map();
+  return st.tools[i].map(([id, name, label, end]) => callFold(i, id, name, label, end != null ? (end - st.start[i]) / 1000 : null, calls.get(id)));
+}
+
+// where a dash row's cost went: the tool step whose result its request read, which is
+// most often the row right above it
+function movedNote(st, i) {
+  const k = st.next.findIndex((n, m) => n === st.request[i] && st.calls[m]);
+  if (k < 0) return 'Its cost is counted on the step whose result it read.';
+  return k === i - 1 ? `Counted on the row above, ${st.label[k]}, whose result this request read.`
+    : `Counted on the ${st.label[k]} row, whose result this request read.`;
+}
+
+function thinkFold(R, j, note) {
+  if (j == null || R.t[j] == null) return h('p.note', { text: 'No request for this step.' });
+  const p = R.parts[j] || {};
+  const row = (label, n, cost, sub) => h('tr', null, h('th', { scope: 'row', text: label }),
+    h('td.num', { text: n == null ? '' : n.toLocaleString('en-US') }),
+    h('td.num', { text: cost == null ? '' : usd(cost) }), sub ? h('td.agsub', { text: sub }) : h('td'));
+  const rows = [
+    row('Input', R.input[j], p.input),
+    row('Cache read', R.cache_read[j], p.cache_read),
+    row('Cache write, 5 min', R.cache_write_5m[j], p.cache_write_5m),
+    row('Cache write, 1 hour', R.cache_write_1h[j], p.cache_write_1h),
+    row('Output', R.output[j], p.output, R.estimated[j] ? 'estimated, a lower bound' : null),
+    row('of it thinking', R.thinking[j], null, R.thinking[j] ? null : 'not logged'),
+  ];
+  if (p.web) rows.push(row('Web searches and fetches', null, p.web));
+  return h('div.agthink', null,
+    h('table.agtok', { 'aria-label': 'Tokens and cost of this request' },
+      h('thead', null, h('tr', null, h('th', { scope: 'col', text: modelName(R.model[j]) }), h('th.num', { scope: 'col', text: 'Tokens' }), h('th.num', { scope: 'col', text: 'Cost' }), h('th'))),
+      h('tbody', null, rows),
+      h('tfoot', null, h('tr', null, h('th', { scope: 'row', text: 'Total' }), h('td'), h('td.num', { text: usd(R.usd[j]) }), h('td')))),
+    note ? h('p.agmoved', { text: note }) : null);
+}
+
+function status(r, name) {
+  if (r.interrupted) return 'interrupted';
+  if (r.error) return r.exit != null ? `exit ${r.exit}` : 'error';
+  return name === 'Bash' ? 'exit 0' : 'ok';
+}
+
+function callFold(i, id, name, label, seconds, entry) {
+  const head = (meta) => h('div.agcallhead', null, h('b', { text: name }), h('span.agcallmeta', { text: meta.filter(Boolean).join(' · ') }));
+  const tookText = seconds != null ? took(seconds) : 'no result';
+  if (!entry) return h('div.agcall', null, head([label !== name ? label : null, tookText]));
+  if (entry.state === 'loading') return h('div.agcall', { 'aria-busy': 'true' }, head([tookText]), h('p.note.agloading', { text: 'Reading the log…' }));
+  if (entry.state !== 'ok') {
+    const msg = entry.state === 'gone' ? 'This call is no longer in the logs (the file was moved, rewritten or deleted).' : 'The details could not be read.';
+    return h('div.agcall', null, head([tookText]), h('p.note', { text: msg }));
+  }
+  const x = entry.data, r = x.result;
+  const meta = r ? [status(r, x.name), r.seconds != null ? took(r.seconds) : tookText] : ['no result in the log'];
+  const box = h('div.agcall.tooltext', null, head(meta));
+  const kv = h('dl.agkv');
+  for (const f of x.input.fields) {
+    const v = f.value + (f.cut ? ' …' : '');
+    kv.append(h('dt', { text: KEY_NAMES[f.key] || f.key }),
+      h('dd', null, MONO_KEYS.has(f.key) || v.includes('\n') ? h('pre.agpre', { text: v }) : h('span', { class: f.key.endsWith('path') ? 'mono' : null, text: v })));
+  }
+  if (x.input.write) kv.append(h('dt', { text: 'Size' }), h('dd', { text: `${x.input.write.lines.toLocaleString('en-US')} lines, ${kb(x.input.write.bytes)}` }));
+  if (kv.children.length) box.append(kv);
+  if (x.input.edit) box.append(diff(x.input.edit));
+  if (r) box.append(output(r, entry, i));
+  return box;
+}
+
+const kb = (n) => (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB` : `${(n / 1048576).toFixed(1)} MB`);
+
+function diff(e) {
+  const pre = h('pre.agpre.agdiff');
+  for (const hk of e.hunks) {
+    if (pre.childNodes.length) pre.append(h('span.agsep', { text: '⋯\n' }));
+    for (const l of hk.old ? hk.old.split('\n') : []) pre.append(h('span.del', { text: `- ${l}\n` }));
+    for (const l of hk.new ? hk.new.split('\n') : []) pre.append(h('span.add', { text: `+ ${l}\n` }));
+  }
+  return h('div.agblock', null,
+    h('div.agblockhead', null, h('span', { text: 'Change' }), h('span.agcallmeta', { text: `−${e.removed.toLocaleString('en-US')} +${e.added.toLocaleString('en-US')} lines${e.cut ? ', cut' : ''}` })),
+    pre);
+}
+
+function output(r, entry, i) {
+  const lines = r.text ? r.text.replace(/\n$/, '').split('\n') : [];
+  const many = lines.length > SHOWN_LINES;
+  const shown = entry.all || !many ? lines : lines.slice(0, SHOWN_LINES);
+  const block = h('div.agblock', null,
+    h('div.agblockhead', null, h('span', { text: 'Output' }), h('span.agcallmeta', { text: r.text ? `${r.lines.toLocaleString('en-US')} line${r.lines === 1 ? '' : 's'}, ${kb(r.bytes)}` : 'empty' })));
+  if (r.text) block.append(h('pre.agpre.agout', { tabindex: '0', text: shown.join('\n') }));
+  if (many && !entry.all) {
+    block.append(h('button.link.agall', { type: 'button', text: r.cut ? `Show all ${lines.length.toLocaleString('en-US')} lines sent` : `Show all ${r.lines.toLocaleString('en-US')} lines`,
+      onclick: (e) => { e.stopPropagation(); entry.all = true; const box = document.getElementById(`agfold-${i}`); if (box) box.replaceChildren(...foldBody({ steps: currentSteps, requests: currentRequests }, i)); } }));
+  }
+  if (r.cut) block.append(h('p.note', { text: `The output is ${kb(r.bytes)}: only its first 200 KB are shown.` }));
+  return block;
 }
 
 // ------------------------------------------------------------------ where the time went

@@ -110,6 +110,7 @@ LEFT_OUT = (
     "session names",
     "agent names",
     "evidence rows",
+    "tool details",
     "your notes",
     "pasted config",
 )

@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from capcom.config import load_config
 from capcom.cost.model import price
-from capcom.cost.prices import canonical, is_placeholder
+from capcom.cost.prices import canonical, is_placeholder, lookup, price_at
 from capcom.cost.top import MAIN_THREAD, project_label
 from capcom.report import agent as thread
 from capcom.report.analysis import Analysis, Unavailable
@@ -56,6 +56,7 @@ from capcom.timeline.groups import (
 from capcom.types import (
     AgentInfo,
     CauseKind,
+    CostBreakdown,
     EventKind,
     Evidence,
     Explanation,
@@ -1415,7 +1416,8 @@ def agent(ctx: Context, session_id: str, query: Mapping[str, str]) -> dict[str, 
     if aid not in order:
         raise ApiError(404, "not_found", "no such agent in this session")
     reqs = [r for r in counted if r.agent_id == aid]
-    costs = [price(r, ctx.table).total for r in reqs]
+    breakdowns = [price(r, ctx.table) for r in reqs]
+    costs = [b.total for b in breakdowns]
     spawns = {c.tool_use_id: r for r in counted for c in r.tool_calls}
     ai = agent_infos.get(aid) if aid else None
     parent = _spawn(ai, spawns, reqs[0].timestamp)
@@ -1475,7 +1477,35 @@ def agent(ctx: Context, session_id: str, query: Mapping[str, str]) -> dict[str, 
             "prev": ref(order[pos - 1]) if pos > 0 else None,
             "next": ref(order[pos + 1]) if pos + 1 < len(order) else None,
         },
-    } | thread.timeline_json(reqs, costs, steps, idle, phases)
+    } | thread.timeline_json(
+        reqs,
+        costs,
+        steps,
+        idle,
+        phases,
+        [_cost_parts(r, b, ctx.table) for r, b in zip(reqs, breakdowns, strict=True)],
+    )
+
+
+def _cost_parts(r: Request, b: CostBreakdown, table: PriceTable) -> dict[str, float]:
+    """A request's cost by token kind, its cache writes split by lifetime at their
+    two rates (the breakdown keeps them as one sum)."""
+    w5, w1 = r.usage.cache_write_5m, r.usage.cache_write_1h
+    p = price_at(table, lookup(table, r.model)[0], r.timestamp)
+    lc = p.long_context
+    rates = (p.cache_write_5m, p.cache_write_1h)
+    if lc is not None and r.usage.context > lc.threshold_tokens:
+        rates = (lc.cache_write_5m, lc.cache_write_1h)
+    weight = w5 * rates[0] + w1 * rates[1]
+    share = w5 * rates[0] / weight if weight > 0 else (1.0 if w5 else 0.0)
+    return {
+        "input": b.input,
+        "cache_read": b.cache_read,
+        "cache_write_5m": b.cache_write * share,
+        "cache_write_1h": b.cache_write * (1 - share),
+        "output": b.output,
+        "web": b.web,
+    }
 
 
 @dataclass(slots=True)

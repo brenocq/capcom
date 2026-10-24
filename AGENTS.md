@@ -31,7 +31,16 @@ modules. Never add or commit anything under `docs/`.
   and sometimes secrets. Never commit them, anything derived from their text,
   or a report built from them. Test fixtures are synthetic, written by hand or
   by a generator in `tests/`. In chat and reports, quote no conversation text
-  beyond a tool name, a file path or a short label.
+  beyond a tool name, a file path or a short label. The one exception is the
+  agent page's step fold (`capcom/report/tooldetail.py`): when the user opens it
+  in a page of `capcom serve`, the server reads that one tool call (its input,
+  such as the command or an edit's old and new text, and its result's first
+  200 KB) from the thread's own log file, read-only, and sends it to that page
+  only. It reads only files the index lists for that thread, under the log
+  roots, never a path from the page; it needs the launch's token. The text is
+  never stored (not in the index, the API cache or any file), never in a
+  thinking step's fold (numbers only), and never sent to Ask Roger (a selection
+  over an open fold leaves it out as "tool details").
 - **No network.** capcom makes no network requests at run time. The one
   exception is Ask Roger (`capcom/report/ask.py`): when the user asks in a
   page of `capcom serve` (after turning it on there once), capcom starts the
