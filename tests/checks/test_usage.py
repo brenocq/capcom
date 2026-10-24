@@ -13,6 +13,7 @@ import pytest
 from capcom.checks import run_checks
 from capcom.checks.agents import find_definitions, read_tools
 from capcom.checks.cli import run_checks_view
+from capcom.checks.facts import collect
 from capcom.config import Config
 from capcom.types import EventKind, Finding, ToolCall
 from tests.checks.helpers import (
@@ -174,7 +175,8 @@ def test_the_checks_view_marks_overlapping_findings_and_totals_the_rest(tmp_path
         run_checks_view(config, 7, 10, index=idx, out=out, now=at(60 * 24))
         return out.getvalue()
 
-    reqs = run(40, cache_read=200_000) + run(1, start=71, cache_read=0, cache_write_5m=200_000)
+    # a pause past an hour: no cache lifetime would have kept it, so no lifetime finding
+    reqs = run(40, cache_read=200_000) + run(1, start=101, cache_read=0, cache_write_5m=200_000)
     text = view(index(reqs))
     assert "Long-running agents" in text and "Cache rewrites after idling" in text
     assert "* overlaps" not in text and "Overlapping" not in text
@@ -217,8 +219,10 @@ def test_a_subagent_cache_expiring_during_a_tool_call_is_its_own_finding() -> No
     reqs, evs, agents = _tool_wait(12)
     found = _checks(index(reqs, evs, agents))
     f = only(found, "subagent_cache_expiry")
-    assert f.saving_usd_per_week == pytest.approx(100_000 * (5 - 0.2) / 1e6)
-    assert f.change is None  # no setting changes a subagent's cache lifetime
+    plans = collect(index(reqs, evs, agents), TABLE, SINCE, UNTIL).cache_plans["subagent"]
+    # its saving: the 5-minute cache in use above the same with a check every 4 minutes
+    assert f.saving_usd_per_week == pytest.approx(plans.five_min - plans.pinged)
+    assert f.metrics["subagent_cheapest"] == "ping" and f.change is None
     assert "background" in f.advice and "every 4 minutes" in f.advice
     assert "approve the command sooner" in f.advice  # a permission wait looks the same
     assert "Bash (1)" in f.summary and "12 min" in f.summary
@@ -243,10 +247,19 @@ def test_each_pause_has_one_of_three_causes(
     reqs, evs, agents = _tool_wait(ran, then, agent_id)
     found = _checks(index(reqs, evs, agents))
     causes = {"subagent_cache_expiry", "subagent_resumed_late", "idle_cache_rewrites"}
-    assert [k for k in kinds(found) if k in causes] == [kind]
+    # the cache-lifetime finding may come with any wait; it counts only tool waits
+    rewrote = [k for k in kinds(found) if k in causes and _rewrites(found, k)]
+    assert rewrote == [kind]
     f = only(found, kind)
     assert f.metrics["cause"] in ("tool_wait_expiry", "late_resume_expiry", "idle_expiry")
-    assert f.saving_usd_per_week == pytest.approx(100_000 * (5 - 0.2) / 1e6)
+    if kind != "subagent_cache_expiry":
+        assert f.saving_usd_per_week == pytest.approx(100_000 * (5 - 0.2) / 1e6)
+
+
+def _rewrites(found: list[Finding], kind: str) -> int:
+    rewrites = only(found, kind).metrics["rewrites"]
+    assert isinstance(rewrites, int)
+    return rewrites
 
 
 def _resume(message_at: float):  # type: ignore[no-untyped-def]
@@ -287,7 +300,10 @@ def test_a_main_thread_waiting_on_its_subagents_is_a_tool_wait() -> None:
 def test_a_question_to_the_user_is_not_a_tool_wait() -> None:
     reqs, evs, agents = _tool_wait(12, agent_id=None, tool="AskUserQuestion")
     found = _checks(index(reqs, evs, agents))
-    assert "subagent_cache_expiry" not in kinds(found) and "idle_cache_rewrites" in kinds(found)
+    assert "idle_cache_rewrites" in kinds(found)
+    assert "subagent_cache_expiry" not in kinds(found) or not _rewrites(
+        found, "subagent_cache_expiry"
+    )
 
 
 def test_an_away_summary_confirms_the_user_was_away() -> None:

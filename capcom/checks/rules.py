@@ -43,6 +43,7 @@ from capcom.checks.facts import (
     Thread,
     heartbeat,
 )
+from capcom.checks.lifetimes import MAIN, SUBAGENT
 from capcom.checks.rollup import AGENT_KINDS
 from capcom.cost.top import TEMPORARY, project_label
 from capcom.explain.shared import (
@@ -1243,52 +1244,148 @@ def subagent_resumed_late(facts: Facts) -> list[Finding]:
     return out
 
 
+# The three ways to run the cache (capcom.checks.lifetimes), as the advice names them.
+PLAN_NAMES = {
+    "5m": "the 5-minute cache",
+    "1h": "the 1-hour cache",
+    "ping": "the 5-minute cache with a check every 4 minutes through tool waits",
+}
+THREAD_KINDS = ((MAIN, "Main threads"), (SUBAGENT, "Subagents"))
+SUBAGENT_TTL_KEY = "subagentPromptCacheTtl"
+
+
 def subagent_cache_expiry(facts: Facts) -> list[Finding]:
-    """Requests that rewrote at least half their prompt because a tool call ran past
-    the cache lifetime (5 minutes for subagents): the last result of the previous
-    request's calls came back after the lifetime (facts.expiry_kind, explain's
-    rule). Mostly subagents; a main thread's long call counts here too. Saving:
-    each rewrite's cost above reading the same tokens. These rewrites are left out
-    of the other two pause causes. No setting is known to change a subagent's
-    lifetime, so there is no change to paste."""
-    out = _rewrites(
-        facts,
-        facts.tool_waits,
-        kind="subagent_cache_expiry",
-        title="Caches expired during long tool calls",
-        what="after a tool call ran past the cache lifetime",
-        advice=(
-            "A subagent's cache lasts 5 idle minutes. Run a command that may take longer "
-            "(a build, a test suite, a wait for a lock) in the background and check its "
-            "output at least every 4 minutes, or do other work meanwhile: each check "
-            "keeps the cache warm for about a twelfth of what rewriting it costs. A "
-            "command waiting on a permission prompt looks the same here (the logs record "
-            "no run time): allow it in the agent's settings, or approve the command sooner."
-        ),
-    )
-    grouped = _by_group(facts.tool_waits)
-    for i, f in enumerate(out):
-        rws = grouped[f.scope]
+    """Which way to run the prompt cache costs least, per thread kind (main threads,
+    subagents), on the window's own requests: the 5-minute cache, the 1-hour cache,
+    or the 5-minute cache with a check every 4 minutes through each wait the agent
+    can ping through (capcom.checks.lifetimes prices all three). Saving: per kind,
+    the cost under the lifetime in use (the window's last write) above the cheapest
+    of the three; nothing when the one in use already is the cheapest, and the
+    finding then says so with no saving. Its evidence: requests that rewrote at
+    least half their prompt because a tool call ran past the lifetime their thread
+    used (facts.expiry_kind, explain's rule), left out of the other pause causes."""
+    plans = {k: p for k, p in facts.cache_plans.items() if p.requests}
+    if not plans:
+        return []
+    rws = list(facts.tool_waits.values())
+    count = sum(r.count for r in rws)
+    parts: list[str] = []
+    if count:
+        days: set[str] = set().union(*(r.days for r in rws))
+        tokens = sum(r.tokens for r in rws)
+        excess = sum(r.excess_usd for r in rws)
         causes: dict[str, int] = defaultdict(int)
         for rw in rws:
             for name, n in rw.causes.items():
                 causes[name] += n
         top = sorted(causes.items(), key=lambda kv: (-kv[1], kv[0]))
         longest = max(rw.longest for rw in rws).total_seconds() / 60
-        out[i] = replace(
-            f,
-            summary=(
-                f"{f.summary} The calls waited on: "
-                f"{', '.join(f'{n} ({c})' for n, c in top[:4])}; the longest ran "
-                f"{longest:.0f} min."
-            ),
+        parts.append(
+            f"{count} request(s) on {len(days)} day(s) rewrote {_k(tokens)} tokens to the "
+            f"cache after a tool call ran past the lifetime their thread used, "
+            f"{_usd(excess)} above reading them; the calls waited on "
+            f"{', '.join(f'{n} ({c})' for n, c in top[:4])}, the longest {longest:.0f} min."
+        )
+    else:
+        top, longest = [], 0.0
+    saving = 0.0
+    advice: list[str] = []
+    change: str | None = None
+    metrics: dict[str, AttrValue] = {}
+    for kind, label in THREAD_KINDS:
+        p = plans.get(kind)
+        if p is None:
+            continue
+        current, best = p.current, p.cheapest()
+        others = [x for x in ("5m", "1h", "ping") if x not in (current, best)]
+        rest = "; ".join(f"{PLAN_NAMES[x]} {_usd(p.cost(x))}" for x in others)
+        if best == current:
+            parts.append(
+                f"{label} use {PLAN_NAMES[current]}, already the cheapest here: "
+                f"{_usd(p.cost(current))} of cache reads and writes ({rest})."
+            )
+        else:
+            diff = p.cost(current) - p.cost(best)
+            saving += diff
+            parts.append(
+                f"{label} use {PLAN_NAMES[current]} ({_usd(p.cost(current))} of cache reads "
+                f"and writes); {PLAN_NAMES[best]} would have cost {_usd(p.cost(best))}, "
+                f"{_usd(diff)} less ({rest})."
+            )
+            text, snippet = _plan_advice(kind, label, current, best)
+            advice.append(text)
+            change = snippet or change
+        metrics.update(
+            {
+                f"{kind}_current": current,
+                f"{kind}_cheapest": best,
+                f"{kind}_5m_usd": round(p.five_min, 2),
+                f"{kind}_1h_usd": round(p.one_hour, 2),
+                f"{kind}_ping_usd": round(p.pinged, 2),
+                f"{kind}_recorded_usd": round(p.recorded, 2),
+                f"{kind}_pingable_waits": p.gaps[0] + p.long_gaps[0],
+                f"{kind}_unpingable_waits": p.gaps[1] + p.long_gaps[1],
+            }
+        )
+    if not saving and not count:
+        return []
+    if not advice:
+        advice.append("Keep the lifetimes in use: each is the cheapest for its threads here.")
+    advice.append(
+        "The check-in figure counts only waits after a tool call: a wait after the agent "
+        "ended its turn (the user's next message, a lead resuming a subagent) cannot be "
+        "pinged. A command waiting on a permission prompt looks the same as a long one "
+        "here (the logs record no run time): allow it in the agent's settings, or approve "
+        "the command sooner."
+    )
+    evs = sorted((e for r in rws for e in r.evidence), key=lambda q: -q[0])
+    return [
+        Finding(
+            kind="subagent_cache_expiry",
+            title="Cache lifetime and long waits",
+            scope="all",
+            summary=" ".join(parts),
+            saving_usd_per_week=facts.per_week(saving),
+            advice=" ".join(advice),
+            change=change,
+            evidence=tuple(e for _, e in evs[:EVIDENCE_PER_FINDING]),
             metrics={
-                **f.metrics,
+                "rewrites": count,
+                "cause": TOOL_WAIT_EXPIRY,
                 "tools": tuple(n for n, _ in top),
                 "longest_wait_minutes": round(longest, 1),
+                **metrics,
             },
         )
-    return out
+    ]
+
+
+def _plan_advice(kind: str, label: str, current: str, best: str) -> tuple[str, str | None]:
+    """What `label`'s threads need to move from lifetime `current` to plan `best`,
+    and the settings to paste, if any."""
+    ping = (
+        "run a command that may take longer than 4 minutes (a build, a test suite, a wait "
+        "for a lock) in the background and check its output at least every 4 minutes, or "
+        "do other work meanwhile: each check keeps the cache warm for about a twelfth of "
+        "what rewriting it costs, and the saving holds only if every such wait is pinged"
+    )
+    if kind == SUBAGENT:
+        if best == "1h":
+            return (
+                f'{label}: set {SUBAGENT_TTL_KEY} to "1h" in ~/.claude/settings.json.',
+                _settings_change({SUBAGENT_TTL_KEY: "1h"}),
+            )
+        back = f"remove {SUBAGENT_TTL_KEY} from ~/.claude/settings.json" if current == "1h" else ""
+        if best == "ping":
+            lead = f"{back}, and " if back else ""
+            return f"{label}: {lead}{ping}.", None
+        return f"{label}: {back or 'keep the 5-minute cache'}.", None
+    if best == "1h":
+        return f"{label}: turn on the 1-hour cache lifetime for the main thread.", None
+    if best == "ping":
+        lead = "go back to the 5-minute cache, and " if current == "1h" else ""
+        return f"{label}: {lead}{ping}.", None
+    return f"{label}: go back to the 5-minute cache.", None
 
 
 def _by_group(data: Mapping[str, Rewrite]) -> dict[str, list[Rewrite]]:
@@ -1492,6 +1589,11 @@ _OVERLAP_PAIRS: frozenset[frozenset[str]] = frozenset(
     {frozenset({a, b}) for a in _REREADS for b in _REREADS if a != b}
     | {frozenset({a, b}) for a in _PREFIX for b in _REWRITES}
     | {frozenset({a, b}) for a in _TAIL for b in _CONTEXT}
+    # a lifetime change for a thread kind reprices its idle and late-resume waits too
+    | {
+        frozenset({"subagent_cache_expiry", b})
+        for b in ("idle_cache_rewrites", "subagent_resumed_late")
+    }
     # an agent's unused tools include the MCP tools, connectors and skills it was
     # given: the same prefix tokens, counted by both
     | {frozenset({"agent_tools_unused", b}) for b in _PREFIX[:3]}

@@ -41,7 +41,8 @@ def test_mark_a_row_then_list_detail_and_unmark(tmp_path: Path) -> None:
     assert "Marked #1" in text and "Tool-wait rewrites per 1,000 requests" in text
     assert "A verdict is due from 2026-10-08" in text
     [m] = load(p)
-    assert (m.kind, m.scope, m.applied_on) == ("subagent_cache_expiry", PROJECT, A)
+    # the cache-lifetime finding covers every project: the lifetime is one setting
+    assert (m.kind, m.scope, m.applied_on) == ("subagent_cache_expiry", "all", A)
     assert m.expected_usd_per_week is not None
 
     out = _out()

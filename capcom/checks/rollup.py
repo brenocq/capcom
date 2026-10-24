@@ -33,7 +33,7 @@ KIND_TITLES = {
     "late_compactions": "Compactions that ran too late",
     "idle_cache_rewrites": "Cache rewrites after idling",
     "subagent_resumed_late": "Subagents resumed after their cache expired",
-    "subagent_cache_expiry": "Caches expired during long tool calls",
+    "subagent_cache_expiry": "Cache lifetime and long waits",
     "model_switches": "Model switches mid-session",
     "images_in_tool_results": "Screenshots and images in tool results",
     "session_never_ended": "Sessions that never ended",
@@ -69,7 +69,10 @@ class Rollup:
         """'Long-running agents: up to $160.87/week across 9 projects'."""
         n = len(self.scopes)
         noun = self.scope_noun if n == 1 else self.scope_noun + "s"
-        return f"{self.title}: up to ${self.saving_usd_per_week:,.2f}/week across {n} {noun}"
+        where = f"{n} {noun}"
+        if n == 1 and self.scopes[0].scope == "all":
+            where = f"all {self.scope_noun}s"
+        return f"{self.title}: up to ${self.saving_usd_per_week:,.2f}/week across {where}"
 
 
 def _overlaps(f: Finding) -> tuple[str, ...]:
