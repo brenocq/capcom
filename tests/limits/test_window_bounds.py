@@ -176,3 +176,22 @@ def _hm(ms: float) -> str:
     from datetime import UTC, datetime
 
     return datetime.fromtimestamp(ms / 1000, UTC).strftime("%H:%M")
+
+
+def test_the_run_out_label_stays_inside_the_plot() -> None:
+    got = _run(
+        """
+console.log(JSON.stringify({
+  right: m.runoutLeft(50, 100, 300, 'right'),
+  flip: m.runoutLeft(250, 100, 300, 'right'),
+  left: m.runoutLeft(250, 100, 300, 'left'),
+  narrow: m.runoutLeft(140, 200, 269, 'right'),
+}));
+"""
+    )
+    assert got["right"] == {"left": 60, "side": "right", "moved": False}
+    # no room right of the guide: left of it
+    assert got["flip"] == {"left": 140, "side": "left", "moved": False}
+    assert got["left"] == {"left": 140, "side": "left", "moved": False}
+    # no room on either side: pushed in from the right edge, backed
+    assert got["narrow"] == {"left": 69, "side": "right", "moved": True}

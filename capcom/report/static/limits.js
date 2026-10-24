@@ -381,12 +381,14 @@ export function limitChart(opts) {
     const y100 = yp(100), fx = (f) => (f * 100).toFixed(2) + '%';
     // the plot's width is not known until it is laid out: a narrow one (the
     // label spans more of it) is the cautious guess, as the forecast rises
-    const lab = runoutLabel(runout.f, fan, { x0, x1, w: PLOT_GUESS, h: H, ymax }, LABEL_BOX,
-      hover.map((p) => [p.t, p.v]));
+    const reads = hover.map((p) => [p.t, p.v]);
+    const place = (w, box) => runoutLabel(runout.f, fan, { x0, x1, w, h: H, ymax }, box, reads);
+    const lab = place(PLOT_GUESS, LABEL_BOX);
+    const runlab = h(`div.runlab.${lab.side}${lab.clear ? '' : '.backed'}`, { style: `left:${fx(runout.f)};top:${lab.top.toFixed(1)}px` },
+      h('span.v', { text: runout.title }), runout.sub ? h('span.r', { text: runout.sub }) : null);
     plot.append(h('div.runguide', { style: `left:${fx(runout.f)};top:${y100}` }),
-      h('span.rundot', { style: `left:${fx(runout.f)};top:${y100}`, title: runout.title }),
-      h(`div.runlab.${lab.side}${lab.clear ? '' : '.backed'}`, { style: `left:${fx(runout.f)};top:${lab.top.toFixed(1)}px` },
-        h('span.v', { text: runout.title }), runout.sub ? h('span.r', { text: runout.sub }) : null));
+      h('span.rundot', { style: `left:${fx(runout.f)};top:${y100}`, title: runout.title }), runlab);
+    fitRunout(plot, runlab, runout.f, place);
   }
   const label = (t) => `${opts.weekly ? monthDay(new Date(t)) + ' ' : ''}${hm(new Date(t))}`;
   plot.addEventListener('mousemove', (e) => {
@@ -427,7 +429,6 @@ const LAB_TOP = [-18, -32, -46], LINE_TOP = [-4, -18, -32], ROW_TOP = [12, 20, 3
 // with no room left is hidden, and `note` says how many and where to find them (on
 // hover), so none goes missing silently.
 function fitLabels(plot, bounds, note) {
-  if (typeof requestAnimationFrame !== 'function') return;
   const fit = () => {
     const W = plot.getBoundingClientRect().width;
     if (!W) return;
@@ -456,11 +457,52 @@ function fitLabels(plot, bounds, note) {
     note.hidden = !hidden;
     note.textContent = hidden ? `${hidden} of ${bounds.length} window start and reset times have no room for a label at this width; hover the chart at a line for its time.` : '';
   };
+  afterLayout(plot, fit);
+}
+
+// Run `fit` once the plot is laid out, again on every resize, and again once a page
+// swapped in over an older one has tweened its inline styles to the drawn ones
+// (morph.js), over the placement made here.
+function afterLayout(plot, fit) {
+  if (typeof requestAnimationFrame !== 'function') return;
   requestAnimationFrame(fit);
-  // a page swapped in over an older one tweens its inline styles to the drawn ones
-  // (morph.js), over the placement made here: place them again once that is done
   setTimeout(fit, TWEEN_MS + 80);
   if (typeof ResizeObserver === 'function') new ResizeObserver(fit).observe(plot);
+}
+
+// Where the run-out label goes across a plot `width` px wide, once its width `w` is
+// measured: beside the guide at `x` on its `side` if it fits, else on the other side,
+// else pushed inside the plot's edge (`moved`: it then may cover the forecast, so it
+// gets a backing). Pure; returns {left (px), side, moved}.
+export function runoutLeft(x, w, width, side, gap = LABEL_GAP) {
+  const at = { right: x + gap, left: x - gap - w };
+  const fits = (sd) => at[sd] >= 0 && at[sd] + w <= width;
+  if (fits(side)) return { left: at[side], side, moved: false };
+  const other = side === 'right' ? 'left' : 'right';
+  if (fits(other)) return { left: at[other], side: other, moved: false };
+  return { left: Math.max(0, Math.min(width - w, at[side])), side, moved: true };
+}
+
+// Place the run-out label again at the plot's laid-out width and the label's measured
+// size (`place(width, box)`: runoutLabel there), kept inside the plot (runoutLeft); a
+// label wider than the plot wraps.
+function fitRunout(plot, el, f, place) {
+  const fit = () => {
+    const W = plot.getBoundingClientRect().width;
+    if (!W) return;
+    el.style.maxWidth = `${W}px`;
+    el.style.whiteSpace = el.scrollWidth > W ? 'normal' : '';
+    const box = { w: el.offsetWidth, h: el.offsetHeight };
+    const lab = place(W, box);
+    const pl = runoutLeft(f * W, box.w, W, lab.side);
+    el.style.left = `${pl.left.toFixed(1)}px`;
+    el.style.top = `${lab.top.toFixed(1)}px`;
+    el.style.transform = 'none';
+    el.classList.toggle('left', pl.side === 'left');
+    el.classList.toggle('right', pl.side === 'right');
+    el.classList.toggle('backed', !lab.clear || pl.moved || pl.side !== lab.side);
+  };
+  afterLayout(plot, fit);
 }
 
 // ------------------------------------------------------------------ overview cards

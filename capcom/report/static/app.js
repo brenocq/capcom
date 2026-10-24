@@ -37,6 +37,14 @@ const NAV = [
   ['limits', '/limits', 'Limits'],
 ];
 
+// The sidebar's links from Limits carry its range (`days`) to the pages that take the
+// same value: Spend has every range Limits has, Sessions all but 90 days.
+const SAME_DAYS = { spend: [1, 7, 14, 30, 90], sessions: [1, 7, 14, 30] };
+function navHref(id, href, r) {
+  const days = Number(r.query.get('days'));
+  return r.name === 'limits' && (SAME_DAYS[id] || []).includes(days) ? `${href}?days=${days}` : href;
+}
+
 function icon(d, size = 16) {
   return s('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.8, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' }, s('path', { d }));
 }
@@ -91,7 +99,7 @@ function drawSidebar() {
   const fresh = h('nav', { id: 'sidebar', class: 'sidebar', 'aria-label': 'capcom' },
     h('a.brand', { href: '/' }, mark(), h('span', { text: 'capcom' })),
     form,
-    h('div.nav', null, NAV.map(([id, href, label, soon]) => h('a', { href, 'aria-current': id === active ? 'page' : null },
+    h('div.nav', null, NAV.map(([id, href, label, soon]) => h('a', { href: navHref(id, href, r), 'aria-current': id === active ? 'page' : null },
       icon(ICON[id]), h('span', { text: label }), soon ? h('span.soon', { text: soon, title: `Coming in milestone ${soon.slice(1)}` }) : null,
       id === 'changes' && statusData && statusData.changes ? h('span.soon', { text: String(statusData.changes), title: `${statusData.changes} change${statusData.changes === 1 ? '' : 's'} marked as applied` }) : null))),
     liveList(),
@@ -318,7 +326,19 @@ async function watchData() {
   }
 }
 
-function tickLive() { if (!document.hidden) { refreshLive(); watchData(); } }
+// A page left open past midnight: every kept reply counted its days up to the old
+// date ("Today", the ranges' first day; the server keys its cache by the date too),
+// so drop them and fetch the page again for the new day.
+const localDay = () => new Date().toDateString();
+let day = localDay();
+function watchDay() {
+  if (localDay() === day) return;
+  day = localDay();
+  forget();
+  refreshView();
+}
+
+function tickLive() { if (!document.hidden) { watchDay(); refreshLive(); watchData(); } }
 
 refreshStatus();
 refreshColors();
