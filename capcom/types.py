@@ -246,6 +246,10 @@ class SessionInfo:
     # The `agent-color` record: the color the user gave it (`/color`), a lowercase
     # name such as "purple"; "" when reset. The latest one wins.
     color: str | None = None
+    # Read back from the store: whether the session's prompts (EventKind.PROMPT) are
+    # counted, i.e. its Claude Code main log was read by a capcom that records them.
+    # False when that log was gone by then (the count is unknown), None from a source.
+    prompts_counted: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)

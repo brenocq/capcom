@@ -264,7 +264,11 @@ class Window:
         out = [session_json(r, self.infos.get(r.session_id), self.names, tz) for r in rows]
         if self.prompts is not None:
             for row in out:
-                row["prompts"] = self.prompts.get(row["session_id"], 0)
+                info = self.infos.get(row["session_id"])
+                # null, not 0, when the session's main log was gone before capcom
+                # counted prompts: its count is unknown
+                gone = info is not None and info.prompts_counted is False
+                row["prompts"] = None if gone else self.prompts.get(row["session_id"], 0)
         return out
 
 

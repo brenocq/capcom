@@ -211,7 +211,11 @@ def test_sessions_list(client: Client) -> None:
 def test_sessions_prompts_and_cost_per_active_hour(client: Client) -> None:
     rows = client.get("/api/sessions?days=0&sort=prompts")[1]["sessions"]
     assert (rows[0]["session_id"], rows[0]["prompts"]) == ("s1", 2)
-    assert all(r["prompts"] == 0 for r in rows[1:])
+    # s4's log is gone (never reread since prompts were recorded): unknown, not 0
+    assert {r["session_id"]: r["prompts"] for r in rows[1:]} == {"s2": 0, "s3": 0, "s4": None}
+    for d in ("asc", "desc"):
+        got = client.get(f"/api/sessions?days=0&sort=prompts&dir={d}")[1]["sessions"]
+        assert got[-1]["session_id"] == "s4"  # unknown sorts last either way
     for r in rows:
         rate = r["usd_per_active_hour"]
         if r["active_seconds"] < 300:

@@ -685,6 +685,16 @@ class SqliteIndex:
         )
         n = len(_SESSION_FIELDS)
         merged = _merge_parts(rows, n)
+        # A main log read since schema 9 has its prompts; one queued then (pos 0) and
+        # never read again is gone from disk, so its count is unknown.
+        counted = {
+            sid
+            for sid, file, pos in self._con.execute(
+                "SELECT p.session_id, p.file, f.pos FROM session_parts p "
+                "JOIN files f ON f.path = p.file"
+            )
+            if pos > 0 and _is_main_log(file)
+        }
         out = sorted(merged.items(), key=lambda kv: (kv[1][0][n] is None, kv[1][0][n] or 0, kv[0]))
         for sid, (v, _) in out:
             f = dict(zip(_SESSION_FIELDS, v, strict=False))
@@ -703,6 +713,7 @@ class SqliteIndex:
                 _dt_opt(v[n + 1]),
                 custom,
                 f["color"] or None,
+                prompts_counted=sid in counted,
             )
 
     def agents(self, session_id: str | None = None) -> Iterator[AgentInfo]:
@@ -997,21 +1008,23 @@ def _migrate_7_to_8(con: sqlite3.Connection) -> None:
     con.execute("COMMIT")
 
 
+def _is_main_log(path: str) -> bool:
+    """Whether an indexed file is a Claude Code main session log (not a subagent's
+    log nor OpenClaw's database)."""
+    return path.endswith(".jsonl") and Path(path).parent.name != "subagents"
+
+
 def _migrate_8_to_9(con: sqlite3.Connection) -> None:
     """No new table or column: version 9 adds the prompt events (a message the user
-    sent), so every Claude Code main session log (`projects/<dir>/<id>.jsonl`, the
-    only place prompts are written) is queued for a reread. Events are keyed by file
+    sent), so every Claude Code main session log (the only place prompts are
+    written) is queued for a reread. Events are keyed by file
     and record, so a reread adds the new ones and rewrites the rest in place; logs
     Claude Code has since deleted keep their rows, without prompts. One transaction."""
     con.execute("BEGIN IMMEDIATE")
     try:
         if con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 8:
             paths = [r[0] for r in con.execute("SELECT path FROM files")]
-            queued = [
-                p
-                for p in paths
-                if p.endswith(".jsonl") and Path(p).parent.parent.name == "projects"
-            ]
+            queued = [p for p in paths if _is_main_log(p)]
             con.executemany("UPDATE files SET pos = 0 WHERE path = ?", [(p,) for p in queued])
             con.execute("DELETE FROM schema_version")
             con.execute("INSERT INTO schema_version (version) VALUES (9)")

@@ -382,7 +382,7 @@ def test_v8_index_rereads_every_main_session_log_for_prompts(config: Config) -> 
     project = config.projects_dir / "-home-u-p"
     main = project / "s1.jsonl"
     sub = project / "s1" / "subagents" / "agent-a1.jsonl"
-    other = config.index_path.parent / "elsewhere" / "log.jsonl"  # not under projects/
+    other = config.index_path.parent / "openclaw-agent.sqlite"  # not a session log
     for f in (main, sub, other):
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text('{"type":"user","uuid":"u1","timestamp":"2026-10-20T09:00:00Z"}\n')

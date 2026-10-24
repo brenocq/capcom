@@ -140,7 +140,9 @@ usd_per_active_hour, prompts, requests, estimated_output`. `usd_per_active_hour`
 `usd` over the active time, null for a session active under 5 minutes. `prompts`
 counts the messages the user sent in the window on the main thread (typed, queued or
 headless prompts and slash commands; not tool results, subagent prompts or task
-notifications), null where an endpoint does not count them. `temporary` is true for a folder under a temporary root (/tmp; on macOS also /private/tmp and $TMPDIR under /var/folders). Active time sums the gaps under 5 minutes between consecutive
+notifications), null where an endpoint does not count them or where the count is
+unknown: the session's main log was gone before capcom recorded prompts (an index
+from before schema 9), or it has none (OpenClaw's own database). `temporary` is true for a folder under a temporary root (/tmp; on macOS also /private/tmp and $TMPDIR under /var/folders). Active time sums the gaps under 5 minutes between consecutive
 requests of the session.
 
 **Cumulative**: `{step_s, times: [ms], members: [{key, label, final}], values:

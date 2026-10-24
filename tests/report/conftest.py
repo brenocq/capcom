@@ -118,8 +118,8 @@ def _log(project: str, session: str, agent: str | None = None) -> LogFile:
     return LogFile(Path(f"/logs/{project}/{session}.jsonl"), LogKind.SESSION, project, session)
 
 
-def _put(ix: SqliteIndex, log: LogFile, records: Sequence[Record]) -> None:
-    ix.apply(log, Batch(list(records), 100), FileState(log.path, 1, 100, 1, 100))
+def _put(ix: SqliteIndex, log: LogFile, records: Sequence[Record], pos: int = 100) -> None:
+    ix.apply(log, Batch(list(records), pos), FileState(log.path, 1, 100, 1, pos))
 
 
 def model_usage(reqs: Sequence[Request]) -> dict[str, ModelUsage]:
@@ -164,7 +164,9 @@ def build_index(path: Path) -> Path:
     _put(ix, _log(TMP, "s2"), [s2, *S2])
     s3 = SessionInfo("s3", BETA, cwd="/home/user/beta", title="Beta fixes")
     _put(ix, _log(BETA, "s3"), [s3, *S3])
-    _put(ix, _log(BETA, "s4"), [SessionInfo("s4", BETA, cwd="/home/user/beta"), *S4])
+    # s4's log was queued for a reread (pos 0) and never read again: gone from disk,
+    # so its prompts are unknown
+    _put(ix, _log(BETA, "s4"), [SessionInfo("s4", BETA, cwd="/home/user/beta"), *S4], pos=0)
     ix.close()
     return path
 
