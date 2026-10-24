@@ -376,6 +376,8 @@ counts every matching session, temporary folders included (`temporary` of them).
            peak_context, finished}],   # time order; description null when not logged
  agent_types: [{agent_type, spawns, tool_calls, median_tool_calls, average_peak_context,
                 usd, share}],   # main: spawns and median_tool_calls null (one thread)
+ cost_series: {t: [ms], cache_read: [usd], cache_write: [usd], output: [usd], input: [usd]},
+                        # the cost so far after request t[i], per category (web in output)
  pauses: [{start, end, minutes, next_usd, next_cache_write}],    # gaps of 5 minutes or more
  compactions: [{t, agent_id, trigger, pre_tokens, post_tokens}],
  spikes: {count, excess_usd, explained, items: [Spike item]} | null}
@@ -394,7 +396,10 @@ smallest context; the other requests get the rest the same way, in the shortest 
 that fit, a thread with at least a run's worth of requests in runs of its own (the
 main thread keeps its line) and the smaller threads' requests together. The
 session's first and last request stay. Totals, `main`, `agents` and
-`pauses` count every request. `reason_labels` are the `reasons` in words (the ids
+`pauses` count every request, and so does `cost_series`, the cost adding up for
+the session's cost card: about 300 requests evenly spread, the first and last, and
+the two requests around every pause of 30 minutes or more (the charts squeeze those),
+so its last point is `totals`. `reason_labels` are the `reasons` in words (the ids
 come from `capcom.cost.calibrate`). Claude Code's cost-state counts the processes
 that wrote one, step by step (a resumed process carries the totals on, and the growth
 of `totalDuration` dates its step): `part` is the stretch of the session they compare,

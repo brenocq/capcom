@@ -188,6 +188,40 @@ console.log(JSON.stringify({ free, hit, inside, stuck }));
     assert set(got["stuck"]) == {"dx", "dy"}
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_band_chart_on_a_squeezed_axis_with_kept_ticks_and_no_end_label() -> None:
+    # the session's cost card: a 6-hour pause takes a twentieth of the width, the
+    # start and end labels are kept, and the total's amount is left to the page
+    got = _node("""
+const m = await import('./charts.js');
+const H = 3600e3;
+const axis = m.activeAxis(0, 10 * H, [{ start: 2 * H, end: 8 * H }], 30 * 60e3, 0.05);
+const el = m.bandChart({
+  times: [H, 2 * H, 8 * H, 10 * H], start: 0, end: 10 * H, axis, endLabel: false,
+  ticks: [
+    { t: 0, label: 'a', keep: true }, { t: 8 * H, label: 'b' },
+    { t: 10 * H, label: 'c', keep: true },
+  ],
+  members: [{ label: 'x', values: [1, 2, 2, 3], color: 'red' }], total: [1, 2, 2, 3],
+});
+const nodes = walk(el, []);
+const cls = (n) => n.className || n.attrs.class || '';
+const xaxis = nodes.find((n) => cls(n).includes('xaxis'));
+console.log(JSON.stringify({
+  endlab: nodes.some((n) => cls(n).includes('endlab')),
+  enddot: nodes.some((n) => cls(n).includes('enddot')),
+  labels: xaxis.children.map((s) =>
+    [s.textContent, s.attrs.class === 'keep', s.attrs.style.split(';')[0]]),
+}));
+""")
+    assert not got["endlab"] and got["enddot"]
+    assert got["labels"] == [
+        ["a", True, "left:0.00%"],
+        ["b", False, "left:52.50%"],  # 2 of 4 active hours at 95% of the width, plus the pause
+        ["c", True, "left:100.00%"],
+    ]
+
+
 COLORS = {
     "general": 2,
     "palette": [["#111111", "#eeeeee"], ["#222222", "#dddddd"], ["#C8601A", "#F0904A"]],

@@ -242,6 +242,19 @@ def test_session_detail(client: Client) -> None:
     cal = data["calibration"]
     assert cal["claude_code_usd"] == pytest.approx(usd(TODAY), abs=1e-5)
     assert cal["capcom_usd"] == pytest.approx(usd(TODAY), abs=1e-5)
+    # the cost adding up per category: it ends at the totals, never goes down, and
+    # keeps both sides of the 327-minute pause (a squeezed one) and the last request
+    series = data["cost_series"]
+    assert series["t"][-1] == cols["t"][-1] and series["t"] == sorted(series["t"])
+    for key, cat in data["totals"]["categories"].items():
+        if key in series:
+            assert series[key][-1] == pytest.approx(cat["usd"], abs=1e-5)
+            assert series[key] == sorted(series[key])
+    assert sum(series[k][-1] for k in ("cache_read", "cache_write", "output", "input")) == (
+        pytest.approx(usd(TODAY), abs=1e-5)
+    )
+    gap = next(i for i in range(1, len(cols["t"])) if cols["t"][i] - cols["t"][i - 1] > 3600e3)
+    assert {cols["t"][gap - 1], cols["t"][gap]} <= set(series["t"])
 
 
 def test_day_against_the_days_with_spend_before_it(client: Client) -> None:

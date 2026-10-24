@@ -76,6 +76,9 @@ SPEND_DAYS = (1, 7, 14, 30, 90)
 OTHER = "(other)"
 MAX_MARKERS = 12  # spike markers on a cumulative chart: the largest by excess
 MAX_POINTS = 4000  # per-request columns of a session above this are thinned
+COST_POINTS = 300  # points of a session's cost adding up (plus two per long pause)
+SQUEEZED_SECONDS = 30 * 60  # pauses this long are squeezed on the session's charts
+COST_KEYS = ("cache_read", "cache_write", "output", "input")  # web counts as output
 MAX_SESSION_SPIKES = 8  # spikes listed on a session's page: the largest by excess
 
 # Cumulative-chart step per window length, so a chart has a few hundred points.
@@ -979,11 +982,18 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
     spans: dict[str, _Span] = {}
     counted: list[Request] = []
     message_ids: list[str] = []
+    run = [0.0, 0.0, 0.0, 0.0]  # cost so far, per COST_KEYS
+    sums: list[tuple[float, ...]] = []
     for req in reqs:
         cost = w.add(req)
         if cost is None:
             continue
         counted.append(req)
+        run[0] += cost.cache_read
+        run[1] += cost.cache_write
+        run[2] += cost.output + cost.web
+        run[3] += cost.input
+        sums.append(tuple(run))
         message_ids.append(req.message_id)
         aid = req.agent_id
         if aid is None:
@@ -1065,6 +1075,7 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
         since, until = counted[0].timestamp, counted[-1].timestamp + timedelta(seconds=1)
         with contextlib.suppress(Unavailable):
             found = ctx.analysis.find_spikes(ctx.index, ctx.table, since, until, session_id)
+    cost_series = _cost_series([ms(r.timestamp) for r in counted], sums)
     thinned = None
     if len(counted) > MAX_POINTS:
         ids = _thin_keep_ids(found or ())
@@ -1102,6 +1113,7 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
         "totals": w.total.to_json(),
         "active_seconds": round(row.active_seconds) if row else 0,  # None: placeholders only
         "calibration": calibration,
+        "cost_series": cost_series,
         "requests": cols,
         "thinned": thinned,
         "main": main.to_json(ctx.tz) if main.requests else None,
@@ -1111,6 +1123,24 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
         "compactions": compactions,
         "spikes": _session_spikes(ctx, found, info, names),
     }
+
+
+def _cost_series(times: Sequence[int], sums: Sequence[tuple[float, ...]]) -> dict[str, Any]:
+    """The session's cost adding up per category, for its cost card: about
+    COST_POINTS requests evenly spread (the first and last kept), plus the requests
+    on each side of a squeezed pause so the line stays flat across it. Point i is
+    the cost up to and including request t[i]; every request counts."""
+    n = len(times)
+    step = max(1, math.ceil(n / COST_POINTS))
+    keep = set(range(0, n, step)) | ({n - 1} if n else set())
+    for i in range(1, n):
+        if times[i] - times[i - 1] >= SQUEEZED_SECONDS * 1000:
+            keep.update((i - 1, i))
+    idx = sorted(keep)
+    out: dict[str, Any] = {"t": [times[i] for i in idx]}
+    for k, key in enumerate(COST_KEYS):
+        out[key] = [round(sums[i][k], 6) for i in idx]
+    return out
 
 
 @dataclass(slots=True)

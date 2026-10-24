@@ -7,7 +7,7 @@ import {
   outputUsd, lowerMark, LOWER_TITLE, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor, entityColor, maxOf,
   spikeText, spikeHref, sessionDot,
 } from './lib.js';
-import { niceTicks, activeAxis, xAxis } from './charts.js';
+import { niceTicks, activeAxis, xAxis, bandChart } from './charts.js';
 import { timelineMissing } from './spend.js';
 
 // agent types whose lanes are open, kept across redraws (a theme switch, another session)
@@ -15,10 +15,12 @@ const expandedTypes = new Set();
 
 export async function renderSession(main, r) {
   const d = await api('session/' + encodeURIComponent(r.arg || ''));
-  // the API's times are ISO; the charts below place them in epoch ms
-  for (const p of d.pauses) { p.start = Date.parse(p.start); p.end = Date.parse(p.end); }
-  for (const c of d.compactions) c.t = Date.parse(c.t);
-  for (const a of [d.main, ...d.agents]) if (a) { a.first = a.first && Date.parse(a.first); a.last = a.last && Date.parse(a.last); }
+  // the API's times are ISO; the charts below place them in epoch ms. The page may
+  // draw the same reply twice, so a time already in ms stays as it is.
+  const ms = (v) => (typeof v === 'string' ? Date.parse(v) : v);
+  for (const p of d.pauses) { p.start = ms(p.start); p.end = ms(p.end); }
+  for (const c of d.compactions) c.t = ms(c.t);
+  for (const a of [d.main, ...d.agents]) if (a) { a.first = a.first && ms(a.first); a.last = a.last && ms(a.last); }
   const sn = d.session, t = d.totals;
   const first = sn.first_seen ? new Date(sn.first_seen) : null, last = sn.last_seen ? new Date(sn.last_seen) : null;
 
@@ -36,11 +38,9 @@ export async function renderSession(main, r) {
       h('div.titles', { style: 'gap:8px' }, h(sn.color ? 'h1.sname' : 'h1', null, sessionDot(sn.color), h('span', null, sn.title || 'Untitled session ' + sn.session_id.slice(0, 8))),
         sn.title ? h('p.note', { style: 'margin:0', text: sn.title_custom ? 'Your name for it (/rename)' : 'Title by Claude Code',
           title: (sn.title_custom ? 'The name you gave the session in Claude Code (/rename)' : 'The title Claude Code wrote from the conversation (its ai-title)') + '. capcom shows it as a label and keeps nothing else of the conversation.' }) : null,
-        h('div.chips', null, chips)),
-      h('div.costbig', null, h('span.label', { text: 'API-equivalent cost' }),
-        h('span.v', { text: lowerMark(t) + usd(t.usd), title: t.estimated_output.requests ? LOWER_TITLE : null }),
-        t.estimated_output.requests ? h('span.note', { text: 'a lower bound: output partly estimated' }) : null,
-        d.calibration ? calLine(d.calibration) : null))));
+        h('div.chips', null, chips)))));
+
+  main.append(costCard(d));
 
   main.append(h('div.grid', { style: '--min:180px' }, CATEGORY_ORDER.map((k) => {
     const c = t.categories[k];
@@ -63,6 +63,50 @@ export async function renderSession(main, r) {
   main.append(agentsTable(d));
 
   if (d.calibration) main.append(calFold(d.calibration, t));
+}
+
+// ---------------------------------------------------------------- cost card
+// The API-equivalent cost: on the left the cost adding up per category on an
+// active-time axis (pauses of 30 minutes or more squeezed, all of them together to
+// at most a tenth of the width, as the line is flat there), drawn like Spend's
+// chart; on the right the number with its notes and the cost check's quiet line.
+// On a phone the number comes first.
+
+function costCard(d) {
+  const t = d.totals;
+  const side = h('div.costside', null, h('span.label', { text: 'API-equivalent cost' }),
+    h('span.v', { text: lowerMark(t) + usd(t.usd), title: t.estimated_output.requests ? LOWER_TITLE : null }),
+    t.estimated_output.requests ? h('span.note', { text: 'a lower bound: output partly estimated' }) : null,
+    d.calibration ? calLine(d.calibration) : null);
+  const c = d.cost_series;
+  if (!c || !c.t.length) return h('section.card.costcard.alone', null, side);
+  const start = c.t[0], end = Math.max(c.t[c.t.length - 1], start + 60e3);
+  const long = d.pauses.filter((p) => p.end - p.start >= 30 * 60e3).length;
+  const axis = activeAxis(start, end, d.pauses, 30 * 60e3, Math.min(0.012, 0.1 / Math.max(long, 1)));
+  const members = CATEGORY_ORDER.filter((k) => c[k] && c[k][c[k].length - 1] > 0)
+    .map((k) => ({ key: k, label: CATEGORY_LABELS[k], color: categoryColor(k), values: c[k] }))
+    .sort((a, b) => b.values[b.values.length - 1] - a.values[a.values.length - 1]);
+  const total = c.t.map((_, i) => members.reduce((a, m) => a + m.values[i], 0));
+  // x labels: the start, the end, and between them the resumes after a squeezed
+  // pause nearest a quarter, half and three quarters of the width (the start and
+  // end always show, the others hide where they would touch); a session with no
+  // such pause gets its hours
+  const ticks = [{ t: start, label: stamp(new Date(start)), keep: true }];
+  if (axis.gaps.length) {
+    const picked = new Set();
+    for (const q of [0.25, 0.5, 0.75]) {
+      let best = null;
+      for (const g of axis.gaps) if (!best || Math.abs(axis(g.end) - q) < Math.abs(axis(best.end) - q)) best = g;
+      if (Math.abs(axis(best.end) - q) < 0.125) picked.add(best);
+    }
+    ticks.push(...[...picked].sort((a, b) => a.end - b.end).map((g) => ({ t: g.end, label: stamp(new Date(g.end)) })));
+  } else for (let k = 1; k < 4; k++) ticks.push({ t: start + (end - start) * k / 4, label: hm(new Date(start + (end - start) * k / 4)) });
+  ticks.push({ t: end, label: stamp(new Date(end)), keep: true });
+  const chart = bandChart({ times: c.t, members, total, start, end, axis, ticks, height: 150, left: 48, endLabel: false });
+  return h('section.card.costcard', null,
+    h('div.costplot', null, h('span.label', null, 'How it added up',
+      axis.gaps.length ? h('span.note', { text: ' · long pauses squeezed', title: 'Active time: each pause of 30 minutes or more takes almost no width.' }) : null), chart),
+    side);
 }
 
 // The session's spikes, largest first, each with its main cause when capcom.explain
@@ -116,20 +160,26 @@ const CAL_SAME = 0.005; // amounts below half a cent are nothing
 // match: within 2 %. known: further apart, and the parts explain it, or the
 // session has calls the log cannot show (side calls, summaries), which the rest
 // may be. problem: nothing like that, and still more than 2 % unexplained.
+// short: the same for the quiet line under the cost, which names no estimate first.
 function calVerdict(c) {
-  if (c.spread === null) return { kind: 'known', text: 'Claude Code counted nothing.' };
+  if (c.spread === null) return { kind: 'known', text: 'Claude Code counted nothing.', short: "Claude Code's own estimate counted nothing." };
   const d = Math.abs(c.spread);
-  if (d <= CAL_TARGET) return { kind: 'match', text: d >= 0.001 ? `It matches capcom's (${pct(d, 1)} apart).` : "It matches capcom's." };
-  const by = `capcom's is ${pct(d)} ${c.spread < 0 ? 'lower' : 'higher'}`;
+  if (d <= CAL_TARGET) return { kind: 'match', text: d >= 0.001 ? `It matches capcom's (${pct(d, 1)} apart).` : "It matches capcom's.", short: "This matches Claude Code's own estimate." };
+  const dir = `${pct(d)} ${c.spread < 0 ? 'lower' : 'higher'}`;
+  const by = `capcom's is ${dir}`, shortBy = `capcom's estimate is ${dir}`;
   const rest = Math.abs(c.rest_usd) >= Math.max(CAL_SAME, CAL_TARGET * c.claude_code_usd) ? usd(Math.abs(c.rest_usd), 2) : null;
-  if (!rest) return { kind: 'known', text: `${by}, for known reasons.` };
-  if (!c.comparable) return { kind: 'known', text: `${by}, partly for known reasons (${rest} unexplained).` };
-  return { kind: 'problem', text: `${by}, and capcom cannot explain ${rest} of it.` };
+  const why = !rest ? ', for known reasons.' : !c.comparable ? `, partly for known reasons (${rest} unexplained).` : `, and capcom cannot explain ${rest} of it.`;
+  return { kind: rest && c.comparable ? 'problem' : 'known', text: by + why, short: shortBy + why };
 }
 
-// "23 of 26 processes", "one process"
-function procWords(p) {
-  return p.processes > 1 ? `${p.process || 0} of ${p.processes} processes` : 'one process';
+// Claude Code writes its estimate (a cost-state) once per process, that is per run
+// of the claude CLI on the session: each start or resume. part.process counts the
+// runs that wrote one, part.processes adds one per stretch of requests outside them.
+function runsLead(p, span) {
+  const n = p.process || 0, all = p.processes || n;
+  if (p.whole_session && all <= 1) return 'Here it covers the whole session.';
+  if (p.whole_session) return `This session had ${all} runs and it saved one in each, so it covers the whole session.`;
+  return `This session had ${all} runs and it saved one in ${n} of them, so capcom compares only those ${n}${span ? ` (${span})` : ''}.`;
 }
 
 function openCalFold() {
@@ -140,13 +190,12 @@ function openCalFold() {
   fold.querySelector('summary').focus({ preventScroll: true });
 }
 
+// One small line: how capcom's count compares with Claude Code's own estimate
+// (which runs it covers is in the fold).
 function calLine(c) {
   const v = calVerdict(c);
-  const part = c.part && !c.part.whole_session ? ` for ${procWords(c.part)}` : '';
-  return h('span.calline', null,
-    h('span', { text: `Claude Code's own estimate: ${usd(c.claude_code_usd)}${part}.` }),
-    h('span', null, h('span', { class: v.kind === 'problem' ? 'bad' : null, text: v.text }), ' ',
-      h('button.linkbtn', { type: 'button', onclick: openCalFold, text: v.kind === 'match' ? 'Details' : 'Why?' })));
+  return h('span.calline', null, h('span', { class: v.kind === 'problem' ? 'bad' : null, text: v.short }), ' ',
+    h('button.linkbtn', { type: 'button', onclick: openCalFold, text: v.kind === 'match' ? 'Details' : 'Why?' }));
 }
 
 const signed = (x) => (x < 0 ? '− ' : '+ ') + usd(Math.abs(x), 2);
@@ -166,16 +215,14 @@ function calFold(c, t) {
   rows.push(row("Claude Code's estimate", null, usd(c.claude_code_usd, 2), 'sum'));
 
   const span = p.text ? p.text.split(', ')[0] : '';
-  const lead = 'Claude Code keeps its own estimate of what a session costs. ' + (p.whole_session
-    ? `It covers the whole session. ${v.text}`
-    : `Here it covers ${procWords(p)} (${span}), and capcom counts the same part. ${v.text}`);
+  const lead = `Claude Code saves its own estimate of what a session costs, once per run (each time claude starts or resumes the session). ${runsLead(p, span)} ${v.text}`;
   const shown = new Set(['estimated output', 'calls not in the log']);
   const causes = (c.reasons || []).map((r, i) => [r, (c.reason_labels || c.reasons)[i]]).filter(([r]) => !shown.has(r) || (r === 'estimated output' && c.output_above_usd < CAL_SAME));
   const outside = (c.session_usd ?? c.capcom_usd) - c.capcom_usd;
   const others = (p.processes || 0) - (p.process || 0);
   const est = t.estimated_output;
   const notes = [
-    outside >= CAL_SAME ? `Not in this check: ${usd(outside, 2)} in ${others > 1 ? `${others} processes` : 'a process'} that have not written an estimate. capcom's whole session: ${usd(c.session_usd, 2)}.` : null,
+    outside >= CAL_SAME ? `Not in this check: ${usd(outside, 2)} in ${others > 1 ? `${others} runs` : 'a run'} with no estimate saved (a run that is still going saves it later). capcom's whole session: ${usd(c.session_usd, 2)}.` : null,
     est.requests ? `capcom estimates ${pct(est.share, est.share < 0.1 ? 1 : 0)} of output tokens from text length (${est.requests.toLocaleString('en-US')} requests), so its counts are lower bounds (≥).` : null,
     c.unlogged_usd >= CAL_SAME || c.output_above_usd >= CAL_SAME || c.logged_more_usd >= CAL_SAME ? 'The middle rows compare token counts and price the difference.' : null,
   ].filter(Boolean);
