@@ -212,23 +212,26 @@ export function plotFloor(width, room) {
 }
 
 // Where the pause pills go on a plot `width` pixels wide, none over another: the
-// longest pause first, each centered on its pause (kept inside the plot), with its
-// whole length or else a short one, and left out when neither fits. `pills` are
-// {mid (0 to 1), minutes, full, short}; `textWidth(text)` is a label's width in pixels.
-// Returns, in the order given, {text, left} or null.
-export function placePills(pills, width, textWidth, pad = 16, space = 4) {
-  const placed = [];
+// longest pause first, each centered on its pause (kept inside the plot), on the first
+// row with its whole length or else a short one, then on a second row the same way,
+// and left out only when neither row has room. `pills` are {mid (0 to 1), minutes,
+// full, short}; `textWidth(text)` is a label's width in pixels. Returns, in the order
+// given, {text, left, row} (row 0 or 1) or null.
+export function placePills(pills, width, textWidth, pad = 16, space = 4, rows = 2) {
+  const placed = Array.from({ length: rows }, () => []);
   const out = pills.map(() => null);
   const order = pills.map((_, i) => i).sort((a, b) => pills[b].minutes - pills[a].minutes);
   for (const i of order) {
     const p = pills[i];
-    for (const text of [p.full, p.short]) {
-      const w = textWidth(text) + pad;
-      const l = Math.min(Math.max(p.mid * width - w / 2, 0), Math.max(width - w, 0));
-      if (placed.every(([a, b]) => l + w + space <= a || b + space <= l)) {
-        placed.push([l, l + w]);
-        out[i] = { text, left: l };
-        break;
+    fit: for (let row = 0; row < rows; row++) {
+      for (const text of [p.full, p.short]) {
+        const w = textWidth(text) + pad;
+        const l = Math.min(Math.max(p.mid * width - w / 2, 0), Math.max(width - w, 0));
+        if (placed[row].every(([a, b]) => l + w + space <= a || b + space <= l)) {
+          placed[row].push([l, l + w]);
+          out[i] = { text, left: l, row };
+          break fit;
+        }
       }
     }
   }
@@ -475,14 +478,18 @@ function unfolded(d, r) {
       const cs = chips.length ? getComputedStyle(chips[0].el) : null;
       measure.font = `${cs ? cs.fontSize : '11px'} ${cs ? cs.fontFamily : 'sans-serif'}`;
     }
-    placePills(chips, width, (text) => measure.measureText(text).width).forEach((at, k) => {
+    const at = placePills(chips, width, (text) => measure.measureText(text).width);
+    at.forEach((a, k) => {
       const el = chips[k].el;
-      el.hidden = !at;
-      if (!at) return;
-      el.textContent = at.text;
-      el.style.left = `${at.left.toFixed(1)}px`;
+      el.hidden = !a;
+      if (!a) return;
+      el.textContent = a.text;
+      el.style.left = `${a.left.toFixed(1)}px`;
       el.style.transform = 'none';
+      el.classList.toggle('row2', a.row === 1);
     });
+    // a second line of pills only when one is on it
+    pauses.classList.toggle('two', at.some((a) => a && a.row === 1));
   };
 
   // lanes: main thread, then one lane per agent type

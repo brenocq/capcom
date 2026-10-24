@@ -66,9 +66,11 @@ def test_pause_pills_never_overlap_and_stay_inside(width: int) -> None:
     shown = [p for p in got if p]
     assert shown, "at least the longest pause gets a pill"
     assert any(p["i"] == 4 for p in shown)  # the longest is placed first
-    spans = sorted((p["left"], p["left"] + p["w"]) for p in shown)
-    for (_, b), (c, _) in pairwise(spans):
-        assert c >= b, spans
+    for row in (0, 1):
+        spans = sorted((p["left"], p["left"] + p["w"]) for p in shown if p["row"] == row)
+        for (_, b), (c, _) in pairwise(spans):
+            assert c >= b, spans
+    spans = [(p["left"], p["left"] + p["w"]) for p in shown]
     assert all(a >= 0 and b <= width + 1e-6 for a, b in spans)
 
 
@@ -81,9 +83,34 @@ def test_a_crowded_pill_is_shortened_before_it_is_dropped() -> None:
         " 1000, (t) => t.length * 6)))"
     )
     assert isinstance(got, list)
-    assert got[0] == {"text": "1 h 30", "left": 500 - (36 + 16) / 2}
-    assert got[1] is not None and got[1]["text"] == "45m"  # its whole label did not fit
-    assert got[2] is None  # no room left at all
+    assert got[0] == {"text": "1 h 30", "left": 500 - (36 + 16) / 2, "row": 0}
+    # its whole label did not fit on the first line, its short one did
+    assert got[1] is not None and got[1]["text"] == "45m" and got[1]["row"] == 0
+    assert got[2] is not None and got[2]["row"] == 1  # no room left: the second line
+
+
+def test_two_long_pauses_a_few_pixels_apart_both_show_their_length() -> None:
+    got = _run(
+        "const pills = [{ mid: 0.400, minutes: 131, full: '2 h 11', short: '2 h' },"
+        " { mid: 0.404, minutes: 95, full: '1 h 35', short: '2 h' }];"
+        "const tw = (t) => t.length * 6;"
+        "console.log(JSON.stringify([1000, 16000].map((w) => m.placePills(pills, w, tw))))"
+    )
+    assert isinstance(got, list)
+    near, zoomed = got
+    assert [p["row"] for p in near] == [0, 1]  # the shorter pause goes under it
+    assert [p["text"] for p in near] == ["2 h 11", "1 h 35"]
+    assert [p["row"] for p in zoomed] == [0, 0]  # zoomed in, both fit on one line
+
+
+def test_a_pill_is_dropped_only_when_neither_line_has_room() -> None:
+    got = _run(
+        "const pills = [0, 1, 2].map((k) => ({ mid: 0.5 + k / 1000, minutes: 90 - k,"
+        " full: `${k} h 30`, short: `${k} h` }));"
+        "console.log(JSON.stringify(m.placePills(pills, 1000, (t) => t.length * 6)))"
+    )
+    assert isinstance(got, list)
+    assert [p and p["row"] for p in got] == [0, 1, None]
 
 
 def test_a_plot_slightly_wider_than_its_room_is_squeezed_in_a_longer_one_scrolls() -> None:
