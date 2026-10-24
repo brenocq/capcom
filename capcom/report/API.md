@@ -474,7 +474,9 @@ The subscription's 5-hour and weekly windows from `capcom.limits`: the samples
 `capcom record-limits` appends to `limits.jsonl` in the state folder
 (`$XDG_STATE_HOME/capcom`, else `~/.local/state/capcom`: no scan rebuilds them, so they
 stay out of the cache), and the seed from the index's rate-limit errors. `days` is one
-of 7, 14, 30, 90 and bounds `segments`. `group` (default `category`; also accepted as
+of 1, 7, 14, 30, 90, in calendar days as `/api/spend` counts them (1 is today), and
+bounds `segments` to the windows that end after `since` (local midnight `days` - 1
+days back); the weekly window keeps at least its newest segment. `group` (default `category`; also accepted as
 `agent_type` for `agent`) is one of `category`, `project`, `model`, `agent` and splits
 each segment's spend (`by`); a split by session is a 400, as is an unknown group.
 The reply's cache key also holds the size and modification time of `limits.jsonl`
@@ -482,7 +484,7 @@ The reply's cache key also holds the size and modification time of `limits.jsonl
 without a scan.
 
 ```
-Limits = {available, recording, message, install, samples, last_sample, recording_since, days, group,
+Limits = {available, recording, message, install, samples, last_sample, recording_since, days, since, group,
           windows: {five_hour: Window | null, seven_day: Window | null},  # the current account's
           accounts: [Account],          # the current one first; absent without samples
           combined: Combined | null}    # null with fewer than two accounts

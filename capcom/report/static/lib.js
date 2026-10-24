@@ -198,7 +198,14 @@ export function overviewPath(query) {
 export function spendPath(query) {
   return `spend?days=${Number(query.get('days')) || 14}&group=${pickedGroup(query)}`;
 }
-export const LIMIT_DAYS = [7, 14, 30, 90];
+// The range picker Spend and Limits share: the same ranges, the same `days` in the
+// URL (1 is today, from local midnight), so a link carries the range between them.
+// `off(days)`: why a range is off (shown disabled with it as tooltip), or null.
+export const RANGES = [[1, 'Today'], [7, '7 days'], [14, '14 days'], [30, '30 days'], [90, '90 days']];
+export function rangeTabs(days, off = () => null) {
+  return seg('Range', RANGES.map(([v, text]) => [v, text, off(v)]), days, (v) => setQuery({ days: v }));
+}
+export const LIMIT_DAYS = RANGES.map((r) => r[0]);
 export function limitsPath(query) {
   const days = LIMIT_DAYS.includes(Number(query.get('days'))) ? Number(query.get('days')) : 14;
   return `limits?days=${days}&group=${pickedGroup(query)}`;

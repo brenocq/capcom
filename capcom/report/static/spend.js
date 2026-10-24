@@ -4,13 +4,12 @@
 import {
   h, api, usd, tokens, pct, seg, legend, empty, errorBox, setQuery, monthDay, localDate, dayName, hm,
   outputUsd, estimateNote, lowerMark, OTHER_COLOR, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor,
-  spikeText, spikeHref, projectChip, storyLine, segBar, tableToggle, tipOn, entityColor, GROUPS, pickedGroup, rememberGroup, spendPath, groupQuery, sessionDot,
+  spikeText, spikeHref, projectChip, storyLine, segBar, tableToggle, tipOn, entityColor, GROUPS, pickedGroup, rememberGroup, spendPath, groupQuery, sessionDot, rangeTabs,
 } from './lib.js';
 import { bandChart, dayBars, hourBars } from './charts.js';
 import { heatCard } from './heatmap.js';
 import { sessionsTable } from './sessions.js';
 
-const RANGES = [[1, 'Today'], [7, '7 days'], [14, '14 days'], [30, '30 days'], [90, '90 days']];
 const TITLES = { 1: 'Today, adding up', 7: 'One week, adding up', 14: 'Two weeks, adding up', 30: 'Thirty days, adding up', 90: 'Ninety days, adding up' };
 
 export function memberColor(m, group) {
@@ -106,7 +105,7 @@ export async function renderSpend(main, r) {
   main.append(h('header.head', null,
     h('div.titles', null, h('h1', { text: 'Spend' }), sub),
     h('div.controls', null,
-      seg('Range', RANGES, days, (v) => setQuery({ days: v })),
+      rangeTabs(days),
       seg('Split by', GROUPS, group, (v) => { rememberGroup(v); setQuery({ group: v }); }))));
   const story = storyLine(d.regime);
   if (story) main.append(story);
