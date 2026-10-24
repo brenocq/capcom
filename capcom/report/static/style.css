@@ -823,3 +823,42 @@ a.lanebar { position: absolute; top: 5px; height: 12px; min-width: 3px; border-r
 a.lanebar:hover, a.lanebar:focus-visible { outline: 1.5px solid var(--text); outline-offset: 2px; opacity: 1 !important; }
 .agbar { display: flex; height: 10px; gap: 2px; border-radius: 3px; overflow: hidden; width: 200px; }
 .agbar > span { min-width: 2px; }
+
+/* agent page: a step's fold (agent.js, foldBody) */
+tr.agsrow { cursor: pointer; }
+tr.agsrow:hover { background: var(--l10); }
+tr.agsrow .agstep { padding-left: 0; }
+.agchev { flex: none; width: 20px; height: 20px; margin: -2px 0 -2px 0; padding: 0; border: 0; border-radius: 5px; background: none; color: var(--muted); cursor: pointer; display: inline-grid; place-items: center; }
+.agchev::before { content: ''; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform .15s ease; }
+.agchev[aria-expanded="true"]::before { transform: rotate(45deg); margin-top: -3px; }
+.agchev:hover { background: var(--l10); color: var(--text); }
+.agchev:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+tr.agfoldrow > td { padding-top: 0; padding-bottom: 10px; background: var(--sel); }
+.agfold { position: sticky; left: 0; max-width: min(100%, calc(100vw - 120px)); display: grid; gap: 8px; cursor: auto; font-size: 12px; }
+.agcall { background: var(--card); border: 1px solid var(--l12); border-radius: 8px; padding: 10px 12px; display: grid; gap: 8px; min-width: 0; }
+.agcallhead { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+.agcallhead b { font-weight: 600; color: var(--text); }
+.agcallmeta { color: var(--muted); font-family: var(--mono); font-size: 11.5px; }
+.agloading { margin: 0; animation: agpulse 1.2s ease-in-out infinite; }
+@keyframes agpulse { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .agloading { animation: none; } .agchev::before { transition: none; } }
+.agkv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin: 0; }
+.agkv dt { color: var(--muted); }
+.agkv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; color: var(--ink); }
+.agpre { margin: 0; font-family: var(--mono); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); background: var(--subtle); border-radius: 6px; padding: 6px 8px; max-height: 320px; overflow: auto; }
+.agout { max-height: 420px; white-space: pre; overflow-wrap: normal; }
+.agblock { display: grid; gap: 4px; min-width: 0; }
+.agblockhead { display: flex; gap: 10px; align-items: baseline; color: var(--muted); }
+.agdiff .del { color: var(--sc-red); }
+.agdiff .add { color: var(--sc-green); }
+.agdiff .agsep { color: var(--muted); }
+.agall { justify-self: start; font-size: 12px; }
+.agthink { background: var(--card); border: 1px solid var(--l12); border-radius: 8px; padding: 8px 12px; max-width: 520px; }
+table.agtok { border-collapse: collapse; width: 100%; font-size: 12px; }
+table.agtok th, table.agtok td { padding: 3px 8px 3px 0; text-align: left; font-weight: 400; }
+table.agtok thead th { color: var(--muted); font-weight: 600; }
+table.agtok tbody th { color: var(--ink); }
+table.agtok td.num, table.agtok th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+table.agtok tfoot th, table.agtok tfoot td { border-top: 1px solid var(--l12); font-weight: 600; color: var(--text); padding-top: 5px; }
+table.agtok .agsub { color: var(--muted); font-size: 11px; }
+@media (max-width: 600px) { .agkv { grid-template-columns: minmax(0, 1fr); gap: 2px; } .agkv dd + dt { margin-top: 6px; } }

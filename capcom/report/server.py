@@ -18,6 +18,10 @@ behind the part (`askfacts.py`), and the CLI may look up more through capcom's o
 read-only MCP server (`asktools.py`). It writes nothing, so it stays on under
 `--read-only`.
 
+`GET /api/tool/<session>` (`tooldetail.py`), the agent page's step fold, is the one
+reply with text from the logs: one tool call, read from its log file when asked,
+behind the same token, and never cached.
+
 API replies are cached per index generation (`ApiCache`): the key holds the index
 files' sizes and modification times and the index's `PRAGMA data_version` on a held
 read connection, so any write invalidates every entry and a scan that wrote nothing
@@ -69,7 +73,7 @@ from capcom.cost.prices import load_prices
 from capcom.limits.cli import adopt_samples
 from capcom.limits.model import samples_path
 from capcom.limits.record import ACCOUNTS_FILE, SESSIONS_FILE
-from capcom.report import api, ask, askfacts, asktools, didit
+from capcom.report import api, ask, askfacts, asktools, didit, tooldetail
 from capcom.report.analysis import Analysis, Unavailable, default_analysis
 from capcom.report.jobs import Job, Jobs, Result, computing_body
 from capcom.report.limit_window import limit_window
@@ -397,6 +401,8 @@ class Site:
     agent_dirs: Sequence[Path] | None = None  # where noticed() reads; None: its own
     request_timeout: float = 30.0  # seconds a client may take to send its request
     ask_on: bool = True  # False (--no-ask): no POST /api/ask, no Ask Roger in the pages
+    # where GET /api/tool may read a tool call's text (tooldetail.py); empty: never
+    log_roots: Sequence[Path] = ()
     ask_slots: threading.BoundedSemaphore = field(
         default_factory=lambda: threading.BoundedSemaphore(ask.SLOTS)
     )
@@ -972,6 +978,8 @@ class Handler(BaseHTTPRequestHandler):
             metas += '<meta name="capcom-read-only" content="1">\n'
         if not self.site.ask_on:
             metas += '<meta name="capcom-ask" content="off">\n'
+        if self.site.log_roots:
+            metas += '<meta name="capcom-tool-details" content="on">\n'
         return html.replace("</head>", metas + "</head>", 1).encode()
 
     def _static(self, name: str) -> None:
@@ -994,6 +1002,9 @@ class Handler(BaseHTTPRequestHandler):
         if route.strip("/") == "version":  # the pages' 10 s look for news: never a job
             self._json(HTTPStatus.OK, version(self.site))
             return
+        if name == "tool" and len(parts) == 2:
+            self._tool(parts[1], query)
+            return
         if name in MAY_ARG and len(parts) == 2 and not parts[1]:
             parts = parts[:1]
         sizes = {1, 2} if name in MAY_ARG else {2} if name in WITH_ARG else {1}
@@ -1010,6 +1021,41 @@ class Handler(BaseHTTPRequestHandler):
             self._reply(name, parts, query, low)
         finally:
             site.jobs.user_end()
+
+    def _tool(self, session_id: str, query: dict[str, str]) -> None:
+        """GET /api/tool/<session>?agent=<id or main>&id=<tool_use_id>: one tool
+        call's input and result, read from its log file now (`tooldetail.py`). It
+        needs this launch's token, as a header (no other site's page can send it),
+        and it is never cached: the logs' text goes to the page and nowhere else."""
+        site = self.site
+        token = self.headers.get(TOKEN_HEADER) or ""
+        if not site.log_roots:
+            self._error(HTTPStatus.NOT_FOUND, "off", "Tool details are off on this server.")
+            return
+        if not hmac.compare_digest(token.encode(), site.token.encode()):
+            self._error(HTTPStatus.FORBIDDEN, "bad_token", "Reload the page.")
+            return
+        try:
+            index = _open(site)
+        except IndexMissing as err:
+            self._error(HTTPStatus.SERVICE_UNAVAILABLE, "no_index", str(err))
+            return
+        try:
+            agent = query.get("agent") or "main"
+            hint = tooldetail.hint_of(query.get("t"))
+            tid = query.get("id", "")
+            found = tooldetail.lookup(index, session_id, agent, tid, site.log_roots, hint)
+            self._json(HTTPStatus.OK, found)
+        except ValueError:
+            self._error(HTTPStatus.BAD_REQUEST, "bad_request", "Malformed id.")
+        except tooldetail.NotFound as err:
+            self._error(HTTPStatus.NOT_FOUND, err.code, err.message)
+        except sqlite3.Error:
+            self._error(
+                HTTPStatus.SERVICE_UNAVAILABLE, "index_busy", "The index could not be read."
+            )
+        finally:
+            index.close()
 
     def _reply(self, name: str, parts: list[str], query: dict[str, str], low: bool) -> None:
         site = self.site
@@ -1356,6 +1402,7 @@ def run_serve(
         read_only=read_only,
         day_cache=config.cache_dir / DAY_CACHE,
         ask_on=ask_claude,
+        log_roots=(config.projects_dir,),
     )
     try:
         server = make_server(site, port)

@@ -486,8 +486,11 @@ known. Times are epoch ms.
           start_context, peak_context, alive_seconds, model_seconds, tool_seconds,
           idle_seconds},
  neighbors: {prev: {agent_id, name} | null, next: {agent_id, name} | null},
- steps: {start, end, kind, label, short, calls, phase, usd, next},   # columns
- requests: {t, context, usd, output, cache_read, cache_write, estimated},   # columns
+ steps: {start, end, kind, label, short, calls, phase, usd, next, moved, request,
+         tools: [[tool_use_id, name, label, end | null]]},   # columns
+ requests: {t, context, usd, output, cache_read, cache_write, estimated, input,
+            cache_write_5m, cache_write_1h, thinking, model,
+            parts: {input, cache_read, cache_write_5m, cache_write_1h, output, web}},   # columns
  phases: [{n, name, guessed, start, end, seconds, usd, kinds: {kind: seconds},
            first, last}],   # first, last: indexes into steps
  kinds: [{key, label, seconds, steps, usd}],
@@ -513,6 +516,30 @@ from a turn's end to the prompt that started the next one. `todo` says whether a
 came from a to-do list. `spawned_by` is the thread whose Agent call started it, and
 `neighbors` are the threads before and after it in the session's order (the main
 thread first).
+
+### `GET /api/tool/<session_id>?agent=<agent_id|main>&id=<tool_use_id>&t=<epoch ms>`
+
+One tool call in full, for a step's fold on the agent page: the only reply that
+carries text from the logs. It is read from the call's log file when asked, never
+cached (here or in the index) and sent only with this launch's token in
+`X-Capcom-Token` (403 without it). `id` must be a call of a request of that thread in
+the index, and only that thread's log files under the log roots (`~/.claude/projects`)
+are read; `t`, the request's time, only narrows the search. 400 on a malformed id,
+404 `not_found` when the index has no such call, 404 `gone` when no log holds it any
+more, 404 `off` on a server without log roots.
+
+```
+{id, name,
+ input: {fields: [{key, value, cut}],   # the input, its known keys first, values
+                                        # as text (JSON for others), each cut at 50 KB
+         edit?: {removed, added, hunks: [{old, new}], cut},   # Edit, MultiEdit
+         write?: {lines, bytes}},                               # Write
+ result: {error, exit: int | null, interrupted, seconds, text, lines, bytes, cut} | null}
+```
+
+`exit` is a failed command's code from its "Exit code N" line; `text` is the result's
+text (an image as "[image]"), its first 200 KB (`cut`), `lines` and `bytes` the whole
+result's. `result` is null when the call has no result yet.
 
 ### `GET /api/live`
 

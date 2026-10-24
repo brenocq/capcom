@@ -414,6 +414,7 @@ class Call:
     kind: str
     label: str  # "Bash (uv run pytest)", "Read app.js"
     short: str  # "pytest", "app.js"
+    id: str = ""  # the tool_use id: what the page's fold asks /api/tool for
 
 
 @dataclass(slots=True)
@@ -442,6 +443,14 @@ class Result:
 
 
 def _call(c: Any, results: Mapping[str, Result], commands: Mapping[str, tuple[str, str]]) -> Call:
+    call = _kind_call(c, results, commands)
+    call.id = c.tool_use_id
+    return call
+
+
+def _kind_call(
+    c: Any, results: Mapping[str, Result], commands: Mapping[str, tuple[str, str]]
+) -> Call:
     name, target = c.name, c.target
     res = results.get(c.tool_use_id)
     end = res.time if res else None
@@ -723,8 +732,11 @@ def timeline_json(
     steps: Sequence[Step],
     idle: Sequence[tuple[datetime, datetime]],
     phases: Sequence[Phase],
+    parts: Sequence[Mapping[str, float]] | None = None,
 ) -> dict[str, Any]:
-    """Steps, requests and phases as columns and rows, times in epoch ms."""
+    """Steps, requests and phases as columns and rows, times in epoch ms. `parts`:
+    each request's cost by token kind (input, cache_read, cache_write_5m,
+    cache_write_1h, output, web), for a thinking step's fold."""
     step_cols: dict[str, list[Any]] = {
         k: []
         for k in (
@@ -738,6 +750,8 @@ def timeline_json(
             "usd",
             "next",
             "moved",
+            "request",
+            "tools",
         )
     }
     for st in steps:
@@ -751,10 +765,26 @@ def timeline_json(
         step_cols["usd"].append(round(st.usd, 6))
         step_cols["next"].append(st.next)
         step_cols["moved"].append(st.moved)
+        step_cols["request"].append(st.request)
+        # each call: [tool_use id, tool name, label, end (epoch ms) or null]
+        step_cols["tools"].append(
+            [[c.id, c.name, c.label, _ms(c.end) if c.end else None] for c in st.calls]
+        )
+    keys = ("t", "context", "usd", "output", "cache_read", "cache_write", "estimated")
     req_cols: dict[str, list[Any]] = {
-        k: [] for k in ("t", "context", "usd", "output", "cache_read", "cache_write", "estimated")
+        k: []
+        for k in (*keys, "input", "cache_write_5m", "cache_write_1h", "thinking", "model", "parts")
     }
-    for r, usd in zip(reqs, costs, strict=True):
+    for n, (r, usd) in enumerate(zip(reqs, costs, strict=True)):
+        u = r.usage
+        req_cols["input"].append(u.input)
+        req_cols["cache_write_5m"].append(u.cache_write_5m)
+        req_cols["cache_write_1h"].append(u.cache_write_1h)
+        req_cols["thinking"].append(u.thinking)
+        req_cols["model"].append(r.model)
+        req_cols["parts"].append(
+            {k: round(v, 6) for k, v in parts[n].items()} if parts is not None else None
+        )
         req_cols["t"].append(_ms(r.timestamp))
         req_cols["context"].append(r.usage.context)
         req_cols["usd"].append(round(usd, 6))
