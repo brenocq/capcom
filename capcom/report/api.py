@@ -173,6 +173,16 @@ def _int(query: Mapping[str, str], name: str, default: int, lo: int, hi: int) ->
     return value
 
 
+_PROMPT_KINDS = frozenset({EventKind.PROMPT})
+
+
+def _count_prompts(
+    ctx: Context, w: Window, since: datetime | None, until: datetime | None = None
+) -> None:
+    """Give the window's session rows their prompts: the user's messages in the window."""
+    w.count_prompts(ctx.index.events(since=since, until=until, kinds=_PROMPT_KINDS))
+
+
 def _window(ctx: Context, names: ProjectNames | None = None) -> Window:
     infos = ctx.infos()
     return Window(ctx.table, infos, ctx.agents(), names or ctx.names(infos))
@@ -692,6 +702,7 @@ def spend(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
             hours_json = _day_hours(ctx, steps, keep, sc.day or ctx.today())
     marks = _spike_marks(ctx, since, until, w.infos, w.names, unavailable)
 
+    _count_prompts(ctx, w, since)
     rows = w.session_rows(ctx.tz)
     temporary = [r for r in rows if r["temporary"]]
     regime = _regime(ctx, ctx.local(since).date(), unavailable) if days else None
@@ -741,6 +752,7 @@ def day(ctx: Context, raw: str, query: Mapping[str, str] | None = None) -> dict[
     projects = w.groups_json(w.by_project)
     for p in projects:
         p["typical_usd"] = typical["by_project"].get(p["key"], 0.0) if typical else None
+    _count_prompts(ctx, w, since, until)
     rows = w.session_rows(ctx.tz)
     temporary = [r for r in rows if r["temporary"]]
     return {
@@ -1055,6 +1067,7 @@ def hour(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
         ]
         if explained is not None:
             causes_json = _cause_totals(explained)
+    _count_prompts(ctx, w, start, until)
     rows = w.session_rows(ctx.tz)
     return {
         "window": {
@@ -1099,14 +1112,27 @@ def sessions(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     days = _int(query, "days", 14, 0, 3660)
     limit = _int(query, "limit", 200, 1, 5000)
     sort = query.get("sort") or "usd"
-    keys = {"usd", "last", "peak_context", "active_seconds", "subagents", "requests"}
+    keys = {
+        "usd",
+        "last",
+        "peak_context",
+        "active_seconds",
+        "subagents",
+        "requests",
+        "prompts",
+        "usd_per_active_hour",
+    }
     if sort not in keys:
         raise ApiError(400, "bad_query", "sort must be one of: " + ", ".join(sorted(keys)))
+    direction = query.get("dir") or "desc"
+    if direction not in ("asc", "desc"):
+        raise ApiError(400, "bad_query", "dir must be asc or desc")
     q = (query.get("q") or "").strip().lower()
     since = ctx.midnight(days - 1) if days > 0 else None
     w = _window(ctx)
     for req in ctx.index.requests(since=since):
         w.add(req)
+    _count_prompts(ctx, w, since)
     rows = w.session_rows(ctx.tz)
     if q:
         types: dict[str, set[str]] = {}
@@ -1122,8 +1148,11 @@ def sessions(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
             or q in r["project_dir"].lower()
             or any(q in t for t in types.get(r["session_id"], ()))
         ]
-    # numbers stay numbers, ISO times stay strings; a missing value sorts last
-    rows.sort(key=lambda r: (r[sort] is not None, r[sort] or 0, r["usd"]), reverse=True)
+    # numbers stay numbers, ISO times stay strings; ties go by cost in the same
+    # direction, and a missing value sorts last either way (costliest first)
+    known = [r for r in rows if r[sort] is not None]
+    known.sort(key=lambda r: (r[sort], r["usd"]), reverse=direction == "desc")
+    rows = known + sorted((r for r in rows if r[sort] is None), key=lambda r: -r["usd"])
     return {
         "window": {"days": days, "since": iso(since, ctx.tz), "until": iso(ctx.now, ctx.tz)},
         "total": len(rows),

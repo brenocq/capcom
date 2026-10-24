@@ -177,8 +177,11 @@ def test_session_merge(ix: SqliteIndex) -> None:
         version="2.1.300",
         first_seen=at(5),
         last_seen=at(40),
+        prompts_counted=False,  # stored at offset 0: as if queued and never read
     )
-    assert by_id["s2"] == SessionInfo("s2", "p", entrypoint="cli", git_branch="main")
+    assert by_id["s2"] == SessionInfo(
+        "s2", "p", entrypoint="cli", git_branch="main", prompts_counted=False
+    )
     ix.forget_file(B.path)
     s1 = next(s for s in ix.sessions() if s.session_id == "s1")
     assert (s1.first_seen, s1.version) == (at(10), None)
@@ -449,3 +452,21 @@ def test_next_timestamp_does_not_depend_on_batch_edges(
             ix.apply(log, b, FileState(log.path, 1, b.end_offset, 1, b.end_offset))
         (cs,) = ix.last_cost_states()
         assert (cs.timestamp, cs.next_timestamp) == (at(10), at(20))
+
+
+def test_prompts_are_counted_only_for_sessions_whose_main_log_was_read(ix: SqliteIndex) -> None:
+    def put(log: LogFile, sid: str, pos: int) -> None:
+        state = FileState(log.path, 1, 100, 1, pos)
+        ix.apply(log, Batch([SessionInfo(sid, "-p", first_seen=at(1))], pos), state)
+
+    def main(sid: str) -> LogFile:
+        return LogFile(Path(f"/l/-p/{sid}.jsonl"), LogKind.SESSION, "-p", sid)
+
+    put(main("read"), "read", 100)
+    put(main("gone"), "gone", 0)  # queued by the 8 -> 9 migration, never read again
+    sub = Path("/l/-p/subonly/subagents/agent-a1.jsonl")
+    put(LogFile(sub, LogKind.SUBAGENT, "-p", "subonly", "a1"), "subonly", 100)
+    db = LogFile(Path("/o/openclaw-agent.sqlite"), LogKind.OPENCLAW_DB, "-o", "claw")
+    put(db, "claw", 7)
+    got = {s.session_id: s.prompts_counted for s in ix.sessions()}
+    assert got == {"read": True, "gone": False, "subonly": False, "claw": False}

@@ -31,7 +31,14 @@ from capcom.limits.model import (
     samples_path,
 )
 from capcom.limits.view import OTHER, TOP_MEMBERS
-from capcom.report.api import ApiError, Context, _spike_marks, _window, limit_split
+from capcom.report.api import (
+    ApiError,
+    Context,
+    _count_prompts,
+    _spike_marks,
+    _window,
+    limit_split,
+)
 from capcom.report.tally import iso, ms, project_display
 from capcom.timeline.groups import MAIN_THREAD
 
@@ -201,6 +208,7 @@ def _reply(ctx: Context, d: Detail, split: Split) -> dict[str, Any]:
             g["percent"] = _r(pct[kind].get(g["key"]), 3) if with_pct else None
         return out
 
+    _count_prompts(ctx, w, since, until)
     sessions = w.session_rows(tz)[:10]
     for s in sessions:
         s["percent"] = _r(pct["session"].get(s["session_id"]), 3) if with_pct else None

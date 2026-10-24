@@ -180,22 +180,22 @@ def test_v3_index_is_migrated_in_place_and_reread(config: Config) -> None:
         open_index(config.index_path, readonly=True)
     with open_index(config.index_path) as ix:
         assert ix.file_state(main).offset == 0  # type: ignore[union-attr]  # queued
-        assert ix.file_state(fork).offset == fork.stat().st_size  # type: ignore[union-attr]
+        assert ix.file_state(fork).offset == 0  # type: ignore[union-attr]  # 8 -> 9: prompts
         assert next(ix.last_cost_states()).next_timestamp is None
     con = sqlite3.connect(config.index_path)
     assert con.execute("SELECT version FROM schema_version").fetchall() == [(SCHEMA_VERSION,)]
-    assert SCHEMA_VERSION == 8
+    assert SCHEMA_VERSION == 9
     con.close()
 
     source = FakeSource(batch_lines=2)  # the cost-state ends a batch
     run_scan(config, quiet=True, source=source)
-    assert source.calls == [(main, 0)]
+    assert sorted(source.calls) == sorted([(main, 0), (fork, 0)])
     with open_index(config.index_path, readonly=True) as ix:
         (cs,) = ix.last_cost_states()
         assert (cs.offset, cs.timestamp, cs.next_timestamp) == (cost_pos, at(1), at(3))
-        # The reread replaced the fork's row of m1: both logs hold it, and the fork,
-        # which lost the row, is the one missing it.
-        assert (ix.shared_replies("s1"), ix.shared_replies("s3")) == (0, 1)
+        # Both logs hold m1 and both are reread (the fork by 8 -> 9, for prompts):
+        # the fork, read last as in a fresh scan, keeps the row, so s1 lacks it.
+        assert (ix.shared_replies("s1"), ix.shared_replies("s3")) == (1, 0)
         assert sorted(r.message_id for r in ix.requests()) == ["m1", "m2"]
 
 
@@ -251,24 +251,25 @@ def test_v4_index_rereads_every_file_of_sessions_with_cost_states(config: Config
     with open_index(config.index_path) as ix:
         assert ix.file_state(main).offset == 0  # type: ignore[union-attr]
         assert ix.file_state(sub).offset == 0  # type: ignore[union-attr]
-        assert ix.file_state(fork).offset == fork.stat().st_size  # type: ignore[union-attr]
+        assert ix.file_state(fork).offset == 0  # type: ignore[union-attr]  # 8 -> 9: prompts
         assert ix.shared_replies("s1") == ix.shared_replies("s3") == 0
 
     source = FakeSource(batch_lines=1)
     run_scan(config, quiet=True, source=source)
-    assert sorted(source.calls) == sorted([(main, 0), (sub, 0)])
+    assert sorted(source.calls) == sorted([(main, 0), (sub, 0), (fork, 0)])
     with open_index(config.index_path, readonly=True) as ix:
         (cs,) = ix.last_cost_states()
         assert (cs.timestamp, cs.next_timestamp) == (at(1), at(3))  # filled again
-        # The subagent log took m5's row back from the fork: s3 now lacks it.
-        assert (ix.shared_replies("s1"), ix.shared_replies("s3")) == (0, 1)
+        # The fork is reread too (8 -> 9, for prompts) and, read last as in a fresh
+        # scan, keeps m5's row: s1 lacks it.
+        assert (ix.shared_replies("s1"), ix.shared_replies("s3")) == (1, 0)
 
 
 def test_v6_index_gains_total_duration_and_rereads(config: Config) -> None:
     project = config.projects_dir / "-home-u-p"
     main = project / "s1.jsonl"
     sub = project / "s1" / "subagents" / "agent-a1.jsonl"  # same session: not reread
-    other = project / "s2.jsonl"  # no cost-state: not reread
+    other = project / "s2.jsonl"  # no cost-state: reread only by 8 -> 9 (prompts)
     write_lines(main, {"t": "req", "id": "m1", "ts": 1})
     write_lines(sub, {"t": "req", "id": "m3", "ts": 2})
     cost_pos = main.stat().st_size
@@ -294,13 +295,13 @@ def test_v6_index_gains_total_duration_and_rereads(config: Config) -> None:
 
     with open_index(config.index_path) as ix:
         assert ix.file_state(main).offset == 0  # type: ignore[union-attr]
-        assert ix.file_state(other).offset == other.stat().st_size  # type: ignore[union-attr]
+        assert ix.file_state(other).offset == 0  # type: ignore[union-attr]  # 8 -> 9: prompts
         assert ix.file_state(sub).offset == sub.stat().st_size  # type: ignore[union-attr]
         (cs,) = ix.last_cost_states()
         assert cs.total_duration_ms is None
     source = FakeSource()
     run_scan(config, quiet=True, source=source)
-    assert source.calls == [(main, 0)]
+    assert sorted(source.calls) == sorted([(main, 0), (other, 0)])
     with open_index(config.index_path, readonly=True) as ix:
         (cs,) = ix.last_cost_states()
         assert cs.total_duration_ms == 90_000
@@ -368,9 +369,38 @@ def test_v7_index_gains_custom_title_and_color_and_rereads_only_those_logs(confi
     with open_index(config.index_path) as ix:
         assert ix.file_state(renamed).offset == 0  # type: ignore[union-attr]
         assert ix.file_state(colored).offset == 0  # type: ignore[union-attr]
-        for f in (plain, sub):
-            assert ix.file_state(f).offset == f.stat().st_size  # type: ignore[union-attr]
+        # 8 -> 9 then queues every main log (prompt events), never a subagent log
+        assert ix.file_state(plain).offset == 0  # type: ignore[union-attr]
+        assert ix.file_state(sub).offset == sub.stat().st_size  # type: ignore[union-attr]
         assert [s.title for s in ix.sessions()] == ["generated"]
     source = FakeSource()
     run_scan(config, quiet=True, source=source)
-    assert sorted(source.calls) == [(renamed, 0), (colored, 0)]
+    assert sorted(source.calls) == [(renamed, 0), (plain, 0), (colored, 0)]
+
+
+def test_v8_index_rereads_every_main_session_log_for_prompts(config: Config) -> None:
+    project = config.projects_dir / "-home-u-p"
+    main = project / "s1.jsonl"
+    sub = project / "s1" / "subagents" / "agent-a1.jsonl"
+    other = config.index_path.parent / "openclaw-agent.sqlite"  # not a session log
+    for f in (main, sub, other):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text('{"type":"user","uuid":"u1","timestamp":"2026-10-20T09:00:00Z"}\n')
+    config.index_path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(config.index_path)
+    con.executescript(index_module._SCHEMA)
+    con.execute("INSERT INTO schema_version (version) VALUES (8)")
+    for f in (main, sub, other):
+        _file_row(con, f, f.stat().st_size)
+    _request_row(con, "m1", main, 7)
+    con.commit()
+    con.close()
+
+    with open_index(config.index_path) as ix:
+        assert ix.file_state(main).offset == 0  # type: ignore[union-attr]
+        for f in (sub, other):
+            assert ix.file_state(f).offset == f.stat().st_size  # type: ignore[union-attr]
+        assert [r.usage.output for r in ix.requests()] == [7]  # rows stay until reread
+    con = sqlite3.connect(config.index_path)
+    assert con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == SCHEMA_VERSION
+    con.close()

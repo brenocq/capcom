@@ -296,6 +296,44 @@ def test_sessions_list(client: Client) -> None:
     assert [r["session_id"] for r in last] == ["s1"]
     assert client.get("/api/sessions?days=3")[1]["total"] == 2  # s1, s2
     assert client.get("/api/sessions?sort=title")[0] == 400
+    assert client.get("/api/sessions?dir=up")[0] == 400
+
+
+def test_sessions_prompts_and_cost_per_active_hour(client: Client) -> None:
+    rows = client.get("/api/sessions?days=0&sort=prompts")[1]["sessions"]
+    assert (rows[0]["session_id"], rows[0]["prompts"]) == ("s1", 2)
+    # s4's log is gone (never reread since prompts were recorded): unknown, not 0
+    assert {r["session_id"]: r["prompts"] for r in rows[1:]} == {"s2": 0, "s3": 0, "s4": None}
+    for d in ("asc", "desc"):
+        got = client.get(f"/api/sessions?days=0&sort=prompts&dir={d}")[1]["sessions"]
+        assert got[-1]["session_id"] == "s4"  # unknown sorts last either way
+    for r in rows:
+        rate = r["usd_per_active_hour"]
+        if r["active_seconds"] < 300:
+            assert rate is None  # too short for a rate
+        else:
+            assert rate == pytest.approx(r["usd"] * 3600 / r["active_seconds"], rel=1e-3)
+    # a missing rate sorts last in both directions
+    for d in ("asc", "desc"):
+        got = client.get(f"/api/sessions?days=0&sort=usd_per_active_hour&dir={d}")[1]["sessions"]
+        rates = [r["usd_per_active_hour"] for r in got]
+        known = [x for x in rates if x is not None]
+        assert rates == known + [None] * (len(rates) - len(known))
+        assert known == sorted(known, reverse=d == "desc")
+
+
+def test_sessions_sort_direction(client: Client) -> None:
+    def order(qs: str) -> list[str]:
+        return [r["session_id"] for r in client.get("/api/sessions?days=0" + qs)[1]["sessions"]]
+
+    def costs(qs: str) -> list[float]:
+        return [r["usd"] for r in client.get("/api/sessions?days=0" + qs)[1]["sessions"]]
+
+    # no dir is descending, as before; asc is the exact reverse when costs differ
+    assert order("") == order("&sort=usd&dir=desc")
+    assert costs("&sort=usd&dir=asc") == sorted(costs(""))
+    assert order("&sort=last&dir=asc") == list(reversed(order("&sort=last")))
+    assert order("&sort=last&dir=asc&limit=1") == [order("&sort=last")[-1]]
 
 
 def test_session_detail(client: Client) -> None:
