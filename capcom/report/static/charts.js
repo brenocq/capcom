@@ -272,6 +272,40 @@ export function dayBars(days, members, todayIso, query = '') {
   return h('div.daychart', { style: many ? null : `--days:${days.length}` }, bars, labs);
 }
 
+// Today's spend per local clock hour, in the per-day bars' style: `hours` is
+// /api/spend's hourly.hours ([{start: ISO, values, total}]), `now` in ms. The
+// hours to come are empty; the hour holding `now` is marked like today. Every bar
+// opens `href` (today's Day page).
+export function hourBars(hours, members, now, href) {
+  const rows = hours.map((x) => ({ ...x, t: Date.parse(x.start) }));
+  const max = Math.max(...rows.map((x) => x.total), 1e-9);
+  const cur = rows.findIndex((x, i) => x.t <= now && (i === rows.length - 1 || now < rows[i + 1].t));
+  const top = rows.reduce((a, x, i) => (x.total > rows[a].total ? i : a), 0);
+  const span = (x) => `${hm(new Date(x.t))} to ${hm(new Date(x.t + 3600e3))}`;
+  const bars = h('div.days.hl.flat', { style: 'gap:3px' }, rows.map((x, i) => {
+    const bar = h('div.bar', null,
+      x.values.map((v, j) => (v > 0 ? h('div', { style: `flex:${v} 1 0px;background:${members[j].color}` }) : null)));
+    const amt = x.total > 0 ? h('span.amt' + (i === top || i === cur ? '.key' : ''), { text: usdShort(x.total), 'aria-hidden': 'true' }) : null;
+    const col = h('a.day', { href, style: `--f:${(x.total / max).toFixed(4)}` }, amt, bar);
+    if (cur >= 0 && i > cur) return tipOn(col, span(x), [{ label: 'Not yet', value: '' }], { native: true, aria: `${span(x)}: not yet` });
+    const so = i === cur ? ' so far' : '';
+    const parts = () => members
+      .map((m, j) => ({ label: m.label, value: usd(x.values[j]), color: m.color }))
+      .filter((r, j) => x.values[j] > 0).reverse();
+    return tipOn(col, `${span(x)}: ${usd(x.total)}${so}`, parts, { native: true, aria: `${span(x)}: ${usd(x.total)}${so}, open the day` });
+  }));
+  fitAmounts(bars, rows.map((x) => (x.total > 0 ? usdShort(x.total).length : 0)));
+  const labs = h('div.daylabs', { style: 'gap:3px' }, rows.map((x, i) => {
+    const hour = new Date(x.t).getHours();
+    const now = i === cur;
+    // every third hour, and the current one when it does not crowd a neighbor
+    const shown = now || (hour % 3 === 0 && !(cur >= 0 && Math.abs(i - cur) < 2));
+    return h('span', { class: now ? 'today' : null, text: shown ? two(hour) : '', style: 'overflow:visible' });
+  }));
+  // half a day's width per hour: the day fits a card, and scrolls only on a phone
+  return h('div.daychart', { style: `--days:${Math.ceil(rows.length / 2)}` }, bars, labs);
+}
+
 // Choose how the per-day amounts show for the bars' width now: "flat" (level),
 // "rot" (upright) or "key" (highest day and today only). A label is about 6 px a
 // character at 10 px; upright, it needs a bar at least 11 px wide.

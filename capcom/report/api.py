@@ -72,7 +72,7 @@ if TYPE_CHECKING:
 
 LIVE_WINDOW = timedelta(minutes=10)
 TOP_MEMBERS = 6  # series beyond these are folded into "other"
-SPEND_DAYS = (7, 14, 30, 90)
+SPEND_DAYS = (1, 7, 14, 30, 90)
 OTHER = "(other)"
 MAX_MARKERS = 12  # spike markers on a cumulative chart: the largest by excess
 MAX_POINTS = 4000  # per-request columns of a session above this are thinned
@@ -554,7 +554,7 @@ def spend(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
     if hourly is not None:
         hourly = _tidy(hourly, group, w.names)
     cum_json = None if cum is None else _cumulative_json(cum, step, ctx.now)
-    daily_json = heat_json = None
+    daily_json = heat_json = hours_json = None
     if hourly is not None:
         keep = [m["key"] for m in cum_json["members"] if m["key"] != OTHER] if cum_json else []
         if not keep:
@@ -570,6 +570,8 @@ def spend(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
             hourly = _tidy(full or [], group, w.names)
         daily_json, heat_json = _daily_and_heat(ctx, hourly, keep, days)
         heat_json |= _heat_hours(ctx, hourly, hour_projects, w.names)
+        if days == 1:
+            hours_json = _today_hours(ctx, hourly, keep)
     marks = _spike_marks(ctx, since, ctx.now, w.infos, w.names, unavailable)
 
     rows = w.session_rows(ctx.tz)
@@ -588,6 +590,7 @@ def spend(ctx: Context, query: Mapping[str, str]) -> dict[str, Any]:
         "spikes": marks,
         "regime": _regime(ctx, ctx.local(since).date(), unavailable),
         "daily": daily_json,
+        "hourly": hours_json,
         "heatmap": heat_json,
         "context_buckets": w.context_json(),
         "sessions": rows[:10],
@@ -758,6 +761,37 @@ def _daily_and_heat(
         "max": round(max(max(row) for row in cells), 6),
     }
     return daily, heat
+
+
+def _today_hours(ctx: Context, hourly: Sequence[Series], keep: Sequence[str]) -> dict[str, Any]:
+    """Today's hourly steps as one bar per local clock hour, from midnight to the
+    next one (23 or 25 hours on a daylight-saving day), the hours to come at zero."""
+    members = _fold(hourly, keep)
+    start, end = ctx.midnight(), ctx.at_midnight(ctx.today() + timedelta(days=1))
+    starts = []
+    t = start
+    while t < end:
+        starts.append(t)
+        t = (t.astimezone(UTC) + timedelta(hours=1)).astimezone(start.tzinfo)
+    pos = {ms(t): i for i, t in enumerate(starts)}
+    per_hour = [[0.0] * len(members) for _ in starts]
+    for i, t in enumerate(hourly[0].times if hourly else ()):
+        k = pos.get(_hour_ms(ctx, t))
+        if k is None:
+            continue
+        for j, (_, _, values) in enumerate(members):
+            per_hour[k][j] += values[i]
+    return {
+        "members": [{"key": k, "label": label} for k, label, _ in members],
+        "hours": [
+            {
+                "start": iso(t, ctx.tz),
+                "values": [round(v, 6) for v in per_hour[i]],
+                "total": round(sum(per_hour[i]), 6),
+            }
+            for i, t in enumerate(starts)
+        ],
+    }
 
 
 def _hour_ms(ctx: Context, t: datetime) -> int:
