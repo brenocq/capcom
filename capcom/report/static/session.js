@@ -166,7 +166,7 @@ function calVerdict(c) {
   const d = Math.abs(c.spread);
   if (d <= CAL_TARGET) return { kind: 'match', text: d >= 0.001 ? `It matches capcom's (${pct(d, 1)} apart).` : "It matches capcom's.", short: "This matches Claude Code's own estimate." };
   const dir = `${pct(d)} ${c.spread < 0 ? 'lower' : 'higher'}`;
-  const by = `capcom's is ${dir}`, shortBy = `capcom's estimate is ${dir}`;
+  const by = `capcom's is ${dir}`, shortBy = `capcom's estimate is ${dir} than Claude Code's own estimate`;
   const rest = Math.abs(c.rest_usd) >= Math.max(CAL_SAME, CAL_TARGET * c.claude_code_usd) ? usd(Math.abs(c.rest_usd), 2) : null;
   const why = !rest ? ', for known reasons.' : !c.comparable ? `, partly for known reasons (${rest} unexplained).` : `, and capcom cannot explain ${rest} of it.`;
   return { kind: rest && c.comparable ? 'problem' : 'known', text: by + why, short: shortBy + why };
