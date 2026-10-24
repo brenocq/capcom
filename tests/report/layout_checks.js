@@ -157,6 +157,16 @@
     if (!n) add('page-scroll', doc, `scrollWidth ${doc.scrollWidth} > ${W}`);
   }
 
+  // ------------------------------------------------------------ agent tables
+  // the agent page's two half-width tables fit their cards: no sideways scroll, no cut cell
+  for (const box of document.body.querySelectorAll('.agpair .scroll')) {
+    if (!visible(box)) continue;
+    if (box.scrollWidth > box.clientWidth + 1) add('table-scroll', box, `scrollWidth ${box.scrollWidth} > ${box.clientWidth}`);
+    for (const c of box.querySelectorAll('td, th')) {
+      if (c.scrollWidth > c.clientWidth + 1) add('cell-clipped', c, `scrollWidth ${c.scrollWidth} > ${c.clientWidth}`);
+    }
+  }
+
   // ------------------------------------------------------------ sticky or fixed boxes
   // a box that stays put while the page scrolls must not sit over the content: it
   // needs a solid background, and it must not take much of the screen if it spans it

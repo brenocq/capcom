@@ -428,6 +428,7 @@ class Step:
     usd: float = 0.0
     next: int = -1  # tools: the request that read the results (its cost is this step's)
     phase: int = -1
+    moved: bool = False  # think: its request's cost is counted on the tool step that read it
 
     @property
     def seconds(self) -> float:
@@ -523,6 +524,8 @@ def attribute_costs(steps: list[Step], costs: Sequence[float]) -> None:
         target.usd += usd
         if target is tools.get(j - 1):
             target.next = j
+            if j in think:
+                think[j].moved = True
 
 
 # ----------------------------------------------------------------- phases
@@ -723,7 +726,19 @@ def timeline_json(
 ) -> dict[str, Any]:
     """Steps, requests and phases as columns and rows, times in epoch ms."""
     step_cols: dict[str, list[Any]] = {
-        k: [] for k in ("start", "end", "kind", "label", "short", "calls", "phase", "usd", "next")
+        k: []
+        for k in (
+            "start",
+            "end",
+            "kind",
+            "label",
+            "short",
+            "calls",
+            "phase",
+            "usd",
+            "next",
+            "moved",
+        )
     }
     for st in steps:
         step_cols["start"].append(_ms(st.start))
@@ -735,6 +750,7 @@ def timeline_json(
         step_cols["phase"].append(st.phase)
         step_cols["usd"].append(round(st.usd, 6))
         step_cols["next"].append(st.next)
+        step_cols["moved"].append(st.moved)
     req_cols: dict[str, list[Any]] = {
         k: [] for k in ("t", "context", "usd", "output", "cache_read", "cache_write", "estimated")
     }

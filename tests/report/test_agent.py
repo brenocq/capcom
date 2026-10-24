@@ -105,6 +105,8 @@ def test_steps_and_costs_of_a_subagent_without_a_todo_list(config: Config) -> No
     assert st["next"][5] == 3
     assert st["usd"][7] == pytest.approx(usd[4])
     assert st["usd"][2] == 0 and st["usd"][8] == 0
+    # a thinking step whose request was counted on a tool step is marked, not shown as $0.00
+    assert [i for i, m in enumerate(st["moved"]) if m] == [2, 4, 6, 8]
     assert sum(st["usd"]) == pytest.approx(sum(usd))
     t = d["thread"]
     assert t["name"] == "agent-timeline" and t["agent_type"] == "builder"

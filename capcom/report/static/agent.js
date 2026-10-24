@@ -308,6 +308,13 @@ function stepTitle(d, i) {
   return d.steps.label[i] + (ph != null ? ` · phase ${ph + 1}` : '');
 }
 
+const MOVED_NOTE = 'Its cost is counted on the step whose result it read.';
+// a step's cost cell: "–" with a hover when its request's cost is counted on another step
+function costCell(st, i) {
+  if (st.moved && st.moved[i]) return h('td.num', { text: '–', title: MOVED_NOTE });
+  return h('td.num', { text: usd(st.usd[i]) });
+}
+
 function stepRows(d, i) {
   const st = d.steps, R = d.requests;
   const rows = [{ label: fromTo(st.start[i], st.end[i]), value: took((st.end[i] - st.start[i]) / 1000) }];
@@ -317,7 +324,7 @@ function stepRows(d, i) {
     rows.push({ label: st.kind[i] === 'think' ? 'Its request' : 'Next request', value: `${usd(R.usd[j])}, ${tokens(R.cache_read[j])} read from cache` });
     if (R.cache_write[j] >= 1000) rows.push({ label: 'Cache written', value: tokens(R.cache_write[j]) });
   } else {
-    rows.push({ label: 'Cost', value: usd(st.usd[i]) });
+    rows.push(st.moved && st.moved[i] ? { label: 'Cost', value: `– ${MOVED_NOTE.toLowerCase()}` } : { label: 'Cost', value: usd(st.usd[i]) });
   }
   if (st.kind[i] !== 'think' && st.kind[i] !== 'files' && (st.end[i] - st.start[i]) >= 60e3) rows.push({ note: WAIT_NOTE });
   return rows;
@@ -401,11 +408,11 @@ function phasesCard(d, draw) {
     for (let i = p.first; i <= p.last; i++) {
       if (st.phase[i] !== p.n - 1) continue;
       body.append(h('tr.agsrow', null, h('td'),
-        h('td', null, h('span.agstep', null, h('i', { style: `background:${KIND_COLOR[st.kind[i]]}` }), st.label[i])),
+        h('td.stepname', null, h('span.agstep', { title: st.label[i] }, h('i', { style: `background:${KIND_COLOR[st.kind[i]]}` }), h('span.agname', { text: st.label[i] }))),
         h('td.when', { text: at(st.start[i]) }),
         h('td.num', { text: took((st.end[i] - st.start[i]) / 1000) }),
         h('td'),
-        h('td.num', { text: usd(st.usd[i]) })));
+        costCell(st, i)));
     }
   }
   return h('section.card.agcard', null,
@@ -427,7 +434,7 @@ function timeCard(d, working) {
   const table = h('table.data.narrow', null,
     h('thead', null, h('tr', null, ['Activity', 'Time', 'Share', 'Steps', 'Cost'].map((c, i) => h('th', { scope: 'col', class: i ? 'num' : null, text: c })))),
     h('tbody', null, rows.map((k) => h('tr', null,
-      h('td', null, h('span.agstep', null, h('i', { style: `background:${KIND_COLOR[k.key]}` }), k.label)),
+      h('td.stepname', null, h('span.agstep', { title: k.label }, h('i', { style: `background:${KIND_COLOR[k.key]}` }), h('span.agname', { text: k.label }))),
       h('td.num', { text: took(k.seconds) }),
       h('td.num', { text: pct(k.seconds / total) }),
       h('td.num', { text: k.key === 'think' ? plural(k.steps, 'request') : k.steps.toLocaleString('en-US') }),
@@ -468,9 +475,9 @@ function slowCard(d, draw) {
     h('tbody', null, shown.map((i) => h('tr', null,
       h('td.when', { text: at(st.start[i]) }),
       h('td', null, st.phase[i] != null ? tipOn(h('span.agbadge', { text: String(st.phase[i] + 1) }), `Phase ${st.phase[i] + 1}`, [{ note: phaseName(i) }], { focus: false }) : null),
-      h('td', null, h('span.agstep', null, h('i', { style: `background:${KIND_COLOR[st.kind[i]]}` }), st.label[i])),
+      h('td.stepname', null, h('span.agstep', { title: st.label[i] }, h('i', { style: `background:${KIND_COLOR[st.kind[i]]}` }), h('span.agname', { text: st.label[i] }))),
       h('td.num', { text: took((st.end[i] - st.start[i]) / 1000) }),
-      h('td.num', { text: usd(st.usd[i]) })))));
+      costCell(st, i)))));
   const more = n > 6 ? h('button.link.agmore', { type: 'button', onclick: () => { view.all = !view.all; draw(); },
     text: view.all ? 'Only the slowest' : `All ${n.toLocaleString('en-US')} steps` }) : null;
   const capped = view.all && n > ROWS_MAX ? h('p.note', { text: `The first ${ROWS_MAX.toLocaleString('en-US')} steps are listed.` }) : null;

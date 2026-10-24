@@ -727,6 +727,13 @@ table.data td.when { font-family: var(--mono); font-size: 12px; color: var(--mut
 tr.agsrow td { padding-top: 6px; padding-bottom: 6px; font-size: 12px; }
 tr.agsrow .agstep { padding-left: 20px; color: var(--ink); }
 .agstep { display: inline-flex; align-items: center; gap: 8px; }
+.agtime table.data td, .agtime table.data th, .agslow table.data td, .agslow table.data th { padding-left: 6px; padding-right: 6px; }
+.agtime table.data td:first-child, .agtime table.data th:first-child, .agslow table.data td:first-child, .agslow table.data th:first-child { padding-left: 0; }
+.agtime table.data td:last-child, .agtime table.data th:last-child, .agslow table.data td:last-child, .agslow table.data th:last-child { padding-right: 0; }
+.agslow table.data td.when { padding-right: 8px; }
+table.data td.stepname { width: 100%; max-width: 0; overflow: hidden; }
+.agstep:has(.agname) { display: flex; min-width: 0; }
+.agname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agstep i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; flex: none; }
 .agmix { height: 8px; border-radius: 3px; }
 .agtime .stackbar.tall { height: 14px; border-radius: 4px; }
@@ -742,6 +749,9 @@ button.agmore { align-self: flex-start; border: 0; padding: 0; background: none;
   .agsum { font-size: 15px; }
   .agtl { grid-template-columns: 84px minmax(0, 1fr); }
   .agtile .v { font-size: 22px; }
+  .agtime table.data td, .agtime table.data th, .agslow table.data td, .agslow table.data th { padding-left: 4px; padding-right: 4px; }
+  .agtime table.data .num, .agslow table.data .num, .agslow table.data td.when { font-size: 11px; }
+  .agtime table.data th:nth-child(3), .agtime table.data td:nth-child(3) { display: none; }
 }
 /* the session page's agent bars open the agent's page */
 a.lanebar { position: absolute; top: 5px; height: 12px; min-width: 3px; border-radius: 3px; }
