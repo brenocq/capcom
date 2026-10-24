@@ -135,8 +135,12 @@ folder (`~` for home) for a tooltip. A model is named by its price-table id (a s
 dated id is one group.
 
 **Session row**: `session_id, title, project, project_path, project_dir, temporary, git_branch,
-subagents, active_seconds, first, last, peak_context, cache_read_share, usd, requests,
-estimated_output`. `temporary` is true for a folder under a temporary root (/tmp; on macOS also /private/tmp and $TMPDIR under /var/folders). Active time sums the gaps under 5 minutes between consecutive
+subagents, active_seconds, first, last, peak_context, cache_read_share, usd,
+usd_per_active_hour, prompts, requests, estimated_output`. `usd_per_active_hour` is
+`usd` over the active time, null for a session active under 5 minutes. `prompts`
+counts the messages the user sent in the window on the main thread (typed, queued or
+headless prompts and slash commands; not tool results, subagent prompts or task
+notifications), null where an endpoint does not count them. `temporary` is true for a folder under a temporary root (/tmp; on macOS also /private/tmp and $TMPDIR under /var/folders). Active time sums the gaps under 5 minutes between consecutive
 requests of the session.
 
 **Cumulative**: `{step_s, times: [ms], members: [{key, label, final}], values:
@@ -352,7 +356,7 @@ first; `title` is the headline of the largest. `spikes` is null without
 
 `days` 0 means all time. `q` matches the title, the project label or folder, or an
 agent type of the session (case-insensitive). `sort`: `usd`, `last`, `peak_context`,
-`active_seconds`, `subagents`, `requests`; `dir`: `desc` (the default) or `asc`.
+`active_seconds`, `subagents`, `requests`, `prompts`, `usd_per_active_hour`; `dir`: `desc` (the default) or `asc`.
 Ties go by cost in the same direction; zeros sort as numbers, and missing values
 come last in both directions (costliest first among them).
 `{window: {days, since, until}, total, temporary, sessions: [Session row]}`: `total`

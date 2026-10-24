@@ -170,6 +170,10 @@ class EventKind(StrEnum):
     - API_REQUEST: request_id, query_source, shape_hash, model, cache_ttl (str)
     - API_ERROR: status (int), error (str)
     - TURN: duration_ms (int)
+    - PROMPT: source (str: the record's promptSource when logged, e.g. "typed"): a
+      message the user sent on the main thread (a typed or queued prompt, a slash
+      command, a headless `claude -p` prompt); never tool results, subagent prompts,
+      task notifications or other text Claude Code added
     """
 
     COMPACTION = "compaction"
@@ -183,6 +187,7 @@ class EventKind(StrEnum):
     API_REQUEST = "api_request"
     API_ERROR = "api_error"
     TURN = "turn"
+    PROMPT = "prompt"
 
 
 AttrValue = str | int | float | bool | None | tuple[str, ...]

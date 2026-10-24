@@ -1,7 +1,7 @@
 // The sessions table (Spend and the Sessions page), and the block shown for a
 // part whose analysis module is not built yet.
 
-import { h, api, usd, tokens, pct, duration, stamp, seg, empty, setQuery, sessionHref, sessionDot, ApiError, LOWER_TITLE, tipOn } from './lib.js';
+import { h, api, usd, duration, stamp, seg, empty, setQuery, sessionHref, sessionDot, ApiError, LOWER_TITLE } from './lib.js';
 
 // The sort a click on a column header leads to: a new column sorts descending,
 // then the same column ascending, then no sort (the default order, costliest first).
@@ -30,18 +30,16 @@ export function sessionsTable(rows, sort, onSort, dir = 'desc') {
   return h('div.scroll', null, h('table.data', null,
     h('thead', null, h('tr', null,
       th(null, 'Session'), th('subagents', 'Subagents', 'num'), th('active_seconds', 'Active', 'num'),
-      th('peak_context', 'Peak context', 'num'), th(null, 'Cache reads'), th('last', 'Last record', 'num'), th('usd', 'Cost', 'num'))),
+      th('prompts', 'Prompts', 'num'), th('usd_per_active_hour', 'Cost / active hour', 'num'), th('last', 'Last record', 'num'), th('usd', 'Cost', 'num'))),
     h('tbody', null, rows.map((r) => h('tr', null,
       h('td', null, h('a.title', { href: sessionHref(r.session_id) },
         h(r.color ? 'span.sname' : 'span', null, sessionDot(r.color), h('span', null, r.title || 'Untitled session ' + r.session_id.slice(0, 8))),
         h('span', { text: r.project + (r.git_branch ? ' · ' + r.git_branch : ''), title: r.project_path || null }))),
       h('td.num', { text: String(r.subagents) }),
       h('td.num', { text: r.active_seconds ? duration(r.active_seconds) : '<1 min' }),
-      h('td.num', { text: tokens(r.peak_context) }),
-      h('td', null, h('div', { style: 'display:flex;align-items:center;gap:8px' },
-        tipOn(h('div.track', { style: 'width:80px' }, h('div', { style: `width:${(r.cache_read_share * 100).toFixed(1)}%;background:var(--s1)` })),
-          'Cache reads', [{ label: 'Share of tokens', value: pct(r.cache_read_share, 1), color: 'var(--s1)' }], { focus: false }),
-        h('span.note.mono', { text: pct(r.cache_read_share) }))),
+      h('td.num', { text: r.prompts == null ? '–' : String(r.prompts) }),
+      h('td.num', { text: r.usd_per_active_hour == null ? '–' : usd(r.usd_per_active_hour),
+        title: r.usd_per_active_hour == null ? 'Under 5 minutes of active time: too short for a rate' : null }),
       h('td.num', { text: r.last ? stamp(new Date(r.last)) : '' }),
       h('td.cost', { text: (r.estimated_output ? '≥ ' : '') + usd(r.usd), title: r.estimated_output ? LOWER_TITLE : null }),
     )))));

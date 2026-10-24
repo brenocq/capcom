@@ -153,7 +153,11 @@ def build_index(path: Path) -> Path:
         "s1", 99, total_cost_usd=round(usd(S1_MAIN + S1_AGENT), 6),
         models=model_usage(S1_MAIN + S1_AGENT),
     )  # fmt: skip
-    _put(ix, _log(ALPHA, "s1"), [s1, *S1_MAIN, *SYNTH, compaction, cost_state])
+    prompts = [  # two messages the user sent (the counts of the Sessions table)
+        Event(EventKind.PROMPT, "s1", None, ago(hours=5, minutes=50), "p1:prompt", {}),
+        Event(EventKind.PROMPT, "s1", None, ago(hours=5, minutes=45), "p2:prompt", {}),
+    ]
+    _put(ix, _log(ALPHA, "s1"), [s1, *S1_MAIN, *SYNTH, compaction, cost_state, *prompts])
     scout = AgentInfo("a1", "s1", agent_type="scout", description="Map the parser", finished=True)
     _put(ix, _log(ALPHA, "s1", "a1"), [scout, *S1_AGENT])
     s2 = SessionInfo("s2", TMP, cwd="/tmp/scratch/1", first_seen=S2[0].timestamp)

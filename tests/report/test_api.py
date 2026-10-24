@@ -208,6 +208,25 @@ def test_sessions_list(client: Client) -> None:
     assert client.get("/api/sessions?dir=up")[0] == 400
 
 
+def test_sessions_prompts_and_cost_per_active_hour(client: Client) -> None:
+    rows = client.get("/api/sessions?days=0&sort=prompts")[1]["sessions"]
+    assert (rows[0]["session_id"], rows[0]["prompts"]) == ("s1", 2)
+    assert all(r["prompts"] == 0 for r in rows[1:])
+    for r in rows:
+        rate = r["usd_per_active_hour"]
+        if r["active_seconds"] < 300:
+            assert rate is None  # too short for a rate
+        else:
+            assert rate == pytest.approx(r["usd"] * 3600 / r["active_seconds"], rel=1e-3)
+    # a missing rate sorts last in both directions
+    for d in ("asc", "desc"):
+        got = client.get(f"/api/sessions?days=0&sort=usd_per_active_hour&dir={d}")[1]["sessions"]
+        rates = [r["usd_per_active_hour"] for r in got]
+        known = [x for x in rates if x is not None]
+        assert rates == known + [None] * (len(rates) - len(known))
+        assert known == sorted(known, reverse=d == "desc")
+
+
 def test_sessions_sort_direction(client: Client) -> None:
     def order(qs: str) -> list[str]:
         return [r["session_id"] for r in client.get("/api/sessions?days=0" + qs)[1]["sessions"]]

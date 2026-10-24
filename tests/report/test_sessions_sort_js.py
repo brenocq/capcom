@@ -80,7 +80,7 @@ def test_next_sort_cycles_descending_ascending_then_none() -> None:
 def test_headers_show_the_direction_and_click_to_the_next_state() -> None:
     got = _run(
         "const calls = []; const on = (k, d) => calls.push([k, d]);"
-        "const pick = (hs, l) => hs.find((x) => x.label.startsWith(l));"
+        "const pick = (hs, l) => hs.find((x) => x.label.replace(/[↑↓]$/, '') === l);"
         "const desc = heads('usd', 'desc', on), asc = heads('usd', 'asc', on);"
         "const none = heads(null, 'desc', on);"
         "pick(desc, 'Cost').click(); pick(asc, 'Cost').click(); pick(none, 'Cost').click();"
@@ -95,7 +95,8 @@ def test_headers_show_the_direction_and_click_to_the_next_state() -> None:
     # the other sortable headers are "none" without an arrow; the plain ones have no button
     assert ["Active", "none", 1] in got["desc"]
     assert got["desc"][0] == ["Session", None, 0]
-    assert ["Cache reads", None, 0] in got["desc"]
+    assert ["Prompts", "none", 1] in got["desc"]
+    assert ["Cost / active hour", "none", 1] in got["desc"]
     assert got["calls"] == [
         ["usd", "asc"],
         [None, None],

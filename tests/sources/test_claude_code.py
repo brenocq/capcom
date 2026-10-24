@@ -937,3 +937,47 @@ def test_assistant_rate_limit_replies_carry_their_window(tmp_path: Path) -> None
     got = [(e.attrs.get("rate_limit_type"), e.attrs.get("resets_at")) for e in errors]
     assert got == [("five_hour", 1_800_000_000), ("seven_day", 1_800_500_000)]
     assert len(of(batches, Request)) == 2  # one request per reply, no double count
+
+
+def test_prompts_are_the_messages_the_user_sent(tmp_path: Path) -> None:
+    s = SessionWriter(tmp_path, cwd="/w", session_id="s1")
+
+    def user(t: int, content: object, **extra: object) -> None:
+        rec = s._common(at(t))
+        rec.update({"type": "user", "message": {"role": "user", "content": content}, **extra})
+        s.write(rec)
+
+    # newer records say where the text came from
+    user(1, "typed", promptSource="typed", uuid="p1")
+    user(2, "queued", promptSource="queued", uuid="p2")
+    user(3, "<task-notification>x</task-notification>", promptSource="system", uuid="n1")
+    user(4, "from a peer", promptSource="system", isMeta=True, uuid="n2")
+    # older ones by their shape: plain text, an image, a slash command
+    user(5, "an old prompt", uuid="p3")
+    user(6, [{"type": "image", "source": {}}, {"type": "text", "text": "look"}], uuid="p4")
+    user(7, "<command-name>/review</command-name>", uuid="p5")
+    user(8, "<local-command-caveat>c</local-command-caveat>", isMeta=True, uuid="n3")
+    user(9, "<local-command-stdout>out</local-command-stdout>", uuid="n4")
+    user(10, [{"type": "text", "text": "[Request interrupted by user]"}], uuid="n5")
+    user(11, "summary", isCompactSummary=True, isVisibleInTranscriptOnly=True, uuid="n6")
+    user(12, "subagent task", isSidechain=True, agentId="a1", uuid="n7")
+    user(13, [{"type": "tool_result", "tool_use_id": "t1", "content": "r"}], uuid="n8")
+    s.close()
+    found = events(parse(session_log(s.path)), EventKind.PROMPT)
+    assert [e.key for e in found] == [f"p{i}:prompt" for i in range(1, 6)]
+    assert [e.attrs.get("source") for e in found] == ["typed", "queued", None, None, None]
+    assert all(e.agent_id is None and e.session_id == "s1" for e in found)
+    # a slash command is a prompt and a skill invocation, each its own event
+    assert [e.key for e in events(parse(session_log(s.path)), EventKind.SKILLS_INVOKED)] == ["p5"]
+    assert all(set(e.attrs) <= {"source"} for e in found)  # never the text
+
+
+def test_a_subagent_log_has_no_prompts(tmp_path: Path) -> None:
+    s = SessionWriter(tmp_path, cwd="/w", session_id="s1")
+    s.user_prompt(at(1), "the task the parent wrote")
+    s.close()
+    log = LogFile(
+        path=s.path, kind=LogKind.SUBAGENT, project_dir="-p", session_id="s1", agent_id="a1"
+    )
+    assert events(parse(log), EventKind.PROMPT) == []
+    assert len(events(parse(session_log(s.path)), EventKind.PROMPT)) == 1

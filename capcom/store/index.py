@@ -32,7 +32,8 @@ cost_states.total_duration_ms, version 7 session_parts.custom_title and color: a
 migrates them in place (the index keeps history the logs may have lost); up to 5 it
 queues the files with cost-states, and every file of their sessions, for a reread,
 5 -> 6 only adds the column, 6 -> 7 queues the files with cost-states alone, and 7 -> 8
-the session logs that hold a custom-title or agent-color record.
+the session logs that hold a custom-title or agent-color record, and 8 -> 9 (prompt
+events) every Claude Code main session log.
 
 Times are stored as integer microseconds since the Unix epoch, UTC.
 """
@@ -68,7 +69,7 @@ from capcom.types import (
     Usage,
 )
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _US = timedelta(microseconds=1)
@@ -996,6 +997,30 @@ def _migrate_7_to_8(con: sqlite3.Connection) -> None:
     con.execute("COMMIT")
 
 
+def _migrate_8_to_9(con: sqlite3.Connection) -> None:
+    """No new table or column: version 9 adds the prompt events (a message the user
+    sent), so every Claude Code main session log (`projects/<dir>/<id>.jsonl`, the
+    only place prompts are written) is queued for a reread. Events are keyed by file
+    and record, so a reread adds the new ones and rewrites the rest in place; logs
+    Claude Code has since deleted keep their rows, without prompts. One transaction."""
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        if con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 8:
+            paths = [r[0] for r in con.execute("SELECT path FROM files")]
+            queued = [
+                p
+                for p in paths
+                if p.endswith(".jsonl") and Path(p).parent.parent.name == "projects"
+            ]
+            con.executemany("UPDATE files SET pos = 0 WHERE path = ?", [(p,) for p in queued])
+            con.execute("DELETE FROM schema_version")
+            con.execute("INSERT INTO schema_version (version) VALUES (9)")
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
+    con.execute("COMMIT")
+
+
 def open_index(path: Path, readonly: bool = False) -> SqliteIndex:
     """Open the index at `path` (normally `config.index_path`).
 
@@ -1035,6 +1060,8 @@ def open_index(path: Path, readonly: bool = False) -> SqliteIndex:
                     _migrate_6_to_7(con)
                 if con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 7:
                     _migrate_7_to_8(con)
+                if con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 8:
+                    _migrate_8_to_9(con)
         row = con.execute("SELECT MAX(version) FROM schema_version").fetchone()
         version = row[0] if row else None
         if version != SCHEMA_VERSION:
