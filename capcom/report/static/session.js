@@ -471,6 +471,16 @@ function unfolded(d, r) {
   const scroller = h('div.tlscroll', null, grid);
   card.append(scroller);
 
+  // an x label or a pause pill partly under the sticky lane names is hidden, at every
+  // scroll position, so none shows cut in half
+  let frame = 0;
+  const uncut = () => {
+    const edge = ctxLab.getBoundingClientRect().right;
+    const els = [...axis.children, ...chips.map((c) => c.el)].filter((el) => !el.hidden);
+    const cut = els.map((el) => el.getBoundingClientRect().left < edge - 0.5);
+    els.forEach((el, i) => el.classList.toggle('cut', cut[i]));
+  };
+
   // opens at the end (the latest requests), or centered on the time a link points at
   let opened = false, shownFloor = W;
   if (typeof ResizeObserver !== 'undefined') {
@@ -482,6 +492,7 @@ function unfolded(d, r) {
       if (!pauses.clientWidth) return;
       placeChips(pauses.clientWidth);
       placeAxis(pauses.clientWidth);
+      uncut();
       const scrolls = scroller.scrollWidth > scroller.clientWidth + 1;
       scroller.classList.toggle('scrolls', scrolls);
       card.querySelector('.split .note').textContent = NOTE + (scrolls ? ' Scroll sideways for the rest; hover for values.' : ' Hover for values.');
@@ -491,9 +502,14 @@ function unfolded(d, r) {
       scroller.scrollLeft = Number.isFinite(at)
         ? x(Number.isFinite(to) ? (at + Math.max(to, at)) / 2 : at) * pauses.clientWidth - view / 2
         : scroller.scrollWidth;
+      uncut();
     });
     watch.observe(scroller);
     watch.observe(pauses);
+    scroller.addEventListener('scroll', () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => { frame = 0; uncut(); });
+    }, { passive: true });
   } else {
     placeChips(W);
     placeAxis(W);

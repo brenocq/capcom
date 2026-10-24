@@ -6,6 +6,7 @@
 //   page-scroll        the document scrolls sideways; el is an element past the edge
 //   overlap            two visible text runs or controls cover each other (what
 //                      scrolls under a sticky box at a scroller's left edge is hidden)
+//   under-sticky       a text run cut in two by that sticky box: partly under it
 //   small-target       a control under 24 x 24 px (44 x 44 for the navigation and
 //                      buttons at touch widths); links inside running text and a
 //                      chart's data marks ([data-mark], .mk) are exempt
@@ -120,6 +121,8 @@
     range.selectNodeContents(n);
     for (const raw of range.getClientRects()) {
       if (raw.width < 1 || raw.height < 1) continue;
+      const edge = cover(el);
+      if (edge !== null && raw.left < edge - 1 && raw.right > edge + 1) add('under-sticky', el, `${Math.round(edge - raw.left)}px under`);
       const r = shown(raw, el);
       if (area(r) < 1) continue;
       texts.push({ r, raw, el });

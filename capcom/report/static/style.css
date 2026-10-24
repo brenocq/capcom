@@ -267,6 +267,8 @@ table.calparts tr.sum td { border-top: 1px solid var(--l25); border-bottom: 0; f
   .tlscroll .tl .lab .ylab { right: 6px; }
   .card .tllegend, .card .tllegend .tlgroup { gap: 6px 12px; font-size: 11px; }
 }
+/* an x label or pause pill partly under the lane names (charts.js thins the labels inline) */
+.tlscroll .cut { visibility: hidden !important; }
 .tlscroll .tl > .lab { position: sticky; left: 0; z-index: 3; background: var(--card); }
 .tlscroll .tl > .lab::after { content: ''; position: absolute; left: 0; right: 0; top: 100%; height: 10px; background: var(--card); }
 .tlscroll.scrolls .tl > .lab { box-shadow: 6px 0 6px -6px var(--l25); }
