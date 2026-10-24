@@ -1,8 +1,8 @@
 ---
 name: builder
-description: Builds one feature or module of capcom in the worktree its task names, on Sonnet at medium effort, within a 150k-token conversation budget. Use for new code and for changes that touch a module's design.
-model: sonnet
-effort: medium
+description: Builds one feature or module of capcom in the worktree its task names, on Opus at high effort, within a 150k-token conversation budget. Use for new code and for changes that touch a module's design.
+model: opus
+effort: high
 maxTurns: 150
 tools: Read, Edit, Write, Bash
 ---
