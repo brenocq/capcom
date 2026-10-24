@@ -1285,7 +1285,9 @@ def session(ctx: Context, session_id: str) -> dict[str, Any]:
         ids = _thin_keep_ids(found or ())
         spiky = {i for i, m in enumerate(message_ids) if m in ids}
         kept = thin(cols["agent"], cols["usd"], cols["context"], spiky, limit=MAX_POINTS)
+        usd_all = fold_dropped(cols["agent"], cols["usd"], kept)
         cols = {k: [v[i] for i in kept] for k, v in cols.items()}
+        cols["usd_all"] = usd_all
         thinned = {"requests": len(counted), "kept": len(kept), "spikes": len(spiky)}
     seen = [
         t for t in (reqs[-1].timestamp if reqs else None, info.last_seen if info else None) if t
@@ -1613,6 +1615,34 @@ def thin(
     small.sort()
     _runs(small, lo, usd, context, out)
     return sorted(out)
+
+
+def fold_dropped(threads: Sequence[int], usd: Sequence[float], kept: Sequence[int]) -> list[float]:
+    """The cost each kept request stands for once a session is thinned, in the order of
+    `kept`: its own plus that of the dropped requests of its thread since the thread's
+    previous kept one (the thread's last ones go to its last kept). A thread with none
+    kept goes to the next kept request of any thread, else the last. The sum is the
+    session's, so a spend rate drawn from the kept requests stays whole."""
+    out = [usd[i] for i in kept]
+    slot = {i: k for k, i in enumerate(kept)}
+    has = {threads[i] for i in kept}
+    pending: dict[int, float] = {}
+    last: dict[int, int] = {}
+    orphan = 0.0
+    for i, a in enumerate(threads):
+        if i in slot:
+            out[slot[i]] += pending.pop(a, 0.0) + orphan
+            orphan = 0.0
+            last[a] = slot[i]
+        elif a in has:
+            pending[a] = pending.get(a, 0.0) + usd[i]
+        else:
+            orphan += usd[i]
+    for a, rest in pending.items():
+        out[last[a]] += rest
+    if out:
+        out[-1] += orphan
+    return [round(v, 6) for v in out]
 
 
 def _runs(

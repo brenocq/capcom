@@ -409,7 +409,8 @@ counts every matching session, temporary folders included (`temporary` of them).
                session_usd, outside_usd, output_above_usd, output_range, unlogged_usd,
                unlogged_text, unlogged_mostly, logged_more_usd, logged_more_text,
                logged_more_mostly, rest_usd, note} | null,
- requests: {t, agent, context, usd, output, cache_write, estimated},   # columns, time order
+ requests: {t, agent, context, usd, output, cache_write, estimated,
+            usd_all},   # columns, time order; usd_all only when thinned
  thinned: {requests, kept, spikes} | null,
  main: {first, last, requests, usd, tool_calls, peak_context} | null,
  agents: [{agent_id, agent_type, description, first, last, requests, usd, tool_calls,
@@ -435,7 +436,11 @@ requests (`find_spikes` on the session) get up to half of them, all when they fi
 else cut into runs that each keep their costliest request and their largest and
 smallest context; the other requests get the rest the same way, in the shortest runs
 that fit, a thread with at least a run's worth of requests in runs of its own (the
-main thread keeps its line) and the smaller threads' requests together. The
+main thread keeps its line) and the smaller threads' requests together. A thinned
+session also has `usd_all`: what each kept request stands for, its own cost plus the
+dropped requests of its thread since that thread's previous kept one (a thread with
+none kept goes to the next kept request), so the spend rate drawn from it sums to the
+session's cost. The
 session's first and last request stay. Totals, `main`, `agents` and
 `pauses` count every request, and so does `cost_series`, the cost adding up for
 the session's cost card: about 300 requests evenly spread, the first and last, and

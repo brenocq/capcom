@@ -264,6 +264,16 @@ def test_session_thinning(spiky_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert cols["t"] == sorted(cols["t"])
     assert max(cols["usd"]) > 1  # the spike stays
     assert data["totals"]["requests"] == 43  # totals are not thinned
+    assert sum(cols["usd_all"]) == pytest.approx(data["totals"]["usd"], abs=1e-4)
+
+
+def test_fold_dropped_keeps_each_thread_whole() -> None:
+    threads = [-1, 0, -1, 0, -1, 1, -1, 0]
+    usd_col = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]
+    kept = [0, 3, 4, 6]  # thread 1 has none kept; thread 0's last is dropped
+    got = api.fold_dropped(threads, usd_col, kept)
+    assert got == [1.0, 2.0 + 8.0 + 128.0, 4.0 + 16.0, 32.0 + 64.0]
+    assert sum(got) == sum(usd_col)
 
 
 def test_thin_keeps_maxima_and_spikes() -> None:

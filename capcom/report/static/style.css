@@ -306,6 +306,9 @@ table.calparts tr.sum td { border-top: 1px solid var(--l25); border-bottom: 0; f
    vertical wheel stays the page's, a swipe past either end does not go back a page */
 .tlscroll { overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; padding-top: 6px; }
 .tlscroll .tl { --tllab: 160px; min-width: 100%; width: max-content; }
+.tlscroll { touch-action: pan-x pan-y; }
+.tlzoom { width: max-content; margin: 0 0 6px auto; }
+.tlzoom button { min-height: 28px; padding: 0 10px; font-size: 12px; }
 /* at phone width the lane names take less of the plot's room */
 @media (max-width: 560px) {
   .tlscroll .tl { --tllab: 104px; }
@@ -323,6 +326,7 @@ table.calparts tr.sum td { border-top: 1px solid var(--l25); border-bottom: 0; f
 .tl .lab.ctxlab { justify-content: flex-start; padding-top: 2px; }
 .tl .lab .ylab { position: absolute; right: 10px; transform: translateY(-50%); font-size: 11px; color: var(--muted); }
 .pauserow { position: relative; height: 26px; }
+.pauserow.two { height: 48px; }
 .tlgap { position: absolute; top: 0; bottom: 0; background: repeating-linear-gradient(135deg, var(--l15) 0 1.5px, transparent 1.5px 5px); pointer-events: none; }
 .tlspot { position: absolute; top: 0; bottom: 0; background: var(--sel); box-shadow: inset 0 0 0 1px var(--l25); pointer-events: none; }
 .tlcompact { position: absolute; top: 0; bottom: 0; width: 7px; margin-left: -3px; cursor: default;
@@ -351,6 +355,7 @@ table.calparts tr.sum td { border-top: 1px solid var(--l25); border-bottom: 0; f
 .lanetoggle svg { flex: none; }
 .lanetoggle[aria-expanded="true"] svg { transform: rotate(90deg); }
 .pausechip { position: absolute; top: 2px; transform: translateX(-50%); padding: 2px 7px; border-radius: 999px; font-size: 11px; white-space: nowrap; background: var(--subtle); color: var(--ink); }
+.pausechip.row2 { top: 24px; }
 .pausechip.warn { background: var(--warn-bg); color: var(--warn-text); }
 .pausetick { position: absolute; top: 8px; width: 2px; height: 10px; margin-left: -1px; background: var(--l35); border-radius: 1px; }
 .pausetick.warn { background: var(--warn-text); opacity: 0.6; }
