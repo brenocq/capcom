@@ -212,6 +212,10 @@ def test_session_detail(client: Client) -> None:
     assert data["pauses"][0]["next_cache_write"] == 5_000
     [comp] = data["compactions"]
     assert comp["pre_tokens"] == 180_000 and comp["trigger"] == "auto"
+    # requests per effort level, the most used first, over the same levels as efforts
+    counts = data["session"]["effort_counts"]
+    assert sorted(counts) == data["session"]["efforts"]
+    assert list(counts.values()) == sorted(counts.values(), reverse=True)
     cal = data["calibration"]
     assert cal["claude_code_usd"] == pytest.approx(usd(TODAY), abs=1e-5)
     assert cal["capcom_usd"] == pytest.approx(usd(TODAY), abs=1e-5)

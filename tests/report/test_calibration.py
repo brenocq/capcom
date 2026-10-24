@@ -9,10 +9,12 @@ from capcom.cost.prices import load_prices
 from capcom.report.calibration import (
     Part,
     difference_note,
+    logged_more_mostly,
     model_label,
     output_range,
     part_of,
     rest_summary,
+    unlogged_mostly,
     unlogged_text,
 )
 from capcom.types import Calibration, CostState
@@ -47,6 +49,8 @@ def test_note_names_every_part_of_the_gap() -> None:
         "by token counts, Claude Code saw about $97.00 in calls the log doesn't record "
         "(mostly cache reads on Opus 5.5)"
     )
+    assert unlogged_mostly(c) == "mostly cache reads on Opus 5.5"
+    assert logged_more_mostly(c) == "mostly output on Haiku 4.5"
     note = difference_note(c, _part(1000.0, gaps=True), UTC)
     assert note is not None
     assert "3 of 4 processes" in note
@@ -62,6 +66,7 @@ def test_no_note_when_everything_matches() -> None:
     c = Calibration("s1", capcom_usd=10.0, claude_code_usd=10.0)
     assert difference_note(c, _part(10.0), UTC) is None
     assert output_range(c) is None and unlogged_text(c) is None
+    assert unlogged_mostly(c) is None and logged_more_mostly(c) is None
 
 
 def test_rest_summary() -> None:
