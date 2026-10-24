@@ -190,16 +190,19 @@ def test_a_preset_shows_its_hours_of_active_time_per_screen() -> None:
         "console.log(JSON.stringify({ w, gap: m.TL.gap, back: m.zoomHours(w, a, gaps, room),"
         " fit: m.zoomWidth('fit', a, gaps, room), one: m.zoomWidth(1, a, gaps, room),"
         " short: m.zoomWidth(12, 120, gaps, room),"
-        " clamped: [m.zoomClamp(100, room), m.zoomClamp(99999, room), m.zoomClamp(2000, room)] }))"
+        " closest: m.zoomWidth(m.ZOOM_MIN, a, gaps, room),"
+        " clamped: [m.zoomClamp(100, room, 5e5), m.zoomClamp(9e5, room, 5e5),"
+        " m.zoomClamp(2000, room, 5e5), m.zoomClamp(2000, room, 10)] }))"
     )
     assert isinstance(got, dict)
     # 30 h of active time at 4 h per screen: 7.5 screens of active time, plus the pauses
     assert got["w"] == pytest.approx(900 * 7.5 + 3 * got["gap"])
     assert got["back"] == pytest.approx(4)
     assert got["fit"] == 900
-    assert got["one"] > 16000  # past the cap: the 1 h preset is disabled
+    assert got["one"] == pytest.approx(900 * 30 + 3 * got["gap"])  # no cap: 30 screens
+    assert got["closest"] == pytest.approx(900 * 120 + 3 * got["gap"])
     assert got["short"] < 900  # a 2 h session fits at 12 h a screen
-    assert got["clamped"] == [900, 16000, 2000]
+    assert got["clamped"] == [900, 5e5, 2000, 900]
 
 
 # a 40 h span with 30 h of active time: runs of 10 h, 5 h and 15 h between two pauses
@@ -264,3 +267,37 @@ def test_the_zoom_round_trips_through_the_url() -> None:
         " m.parseZoom('0h'), m.parseZoom('wide'), m.parseZoom(null)]))"
     )
     assert got == ["fit", "4h", "2.5h", None, "fit", 12, 2.5, None, None, None]
+
+
+def test_only_the_view_and_a_screen_on_either_side_is_drawn() -> None:
+    got = _run(
+        "console.log(JSON.stringify([m.drawWindow(0, 900, 100000),"
+        " m.drawWindow(50000, 900, 100000),"
+        " m.drawWindow(99100, 900, 100000), m.drawWindow(0, 900, 700),"
+        " m.drawWindow(200000, 900, 100000, 100)]))"
+    )
+    assert got == [
+        [0, 1800],  # at the start: nothing to draw before it
+        [49100, 51800],
+        [98200, 100000],  # at the end
+        [0, 700],  # a plot narrower than the view is drawn whole
+        [99900, 100000],  # scrolled past the end (mid-zoom): the end
+    ]
+
+
+def test_a_window_slices_the_points_in_it_and_one_past_each_edge() -> None:
+    got = _run(
+        "const ts = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90], px = (t) => t * 10;"
+        "console.log(JSON.stringify([m.sliceWindow(ts, px, 250, 520),"
+        " m.sliceWindow(ts, px, 0, 900),"
+        " m.sliceWindow(ts, px, -50, 5), m.sliceWindow(ts, px, 950, 2000),"
+        " m.sliceWindow(ts, px, 210, 290), m.sliceWindow([], px, 0, 100)]))"
+    )
+    assert got == [
+        [2, 7],  # 30, 40 and 50 are inside; 20 and 60 carry the line past the edges
+        [0, 10],
+        [0, 2],
+        [9, 10],  # past the last point: only it, to end the line at
+        [2, 4],  # no point inside: the two around it, so the line still crosses
+        [0, 0],
+    ]
