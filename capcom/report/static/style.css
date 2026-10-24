@@ -269,13 +269,24 @@ button.switch[aria-checked="true"] .knob { background: var(--clay); }
 button.switch[aria-checked="true"] .knob::after { left: 14px; }
 @media (prefers-reduced-motion: reduce) { button.switch .knob, button.switch .knob::after { transition: none; } }
 .crumb a { color: var(--clay); }
-/* the gap leaves room for the price's serif, whose text box (Iowan Old Style, on
-   macOS) reaches about 7px above its 1-line-high box */
-.costbig { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
-.costbig .v { font-family: var(--serif); font-size: 40px; line-height: 1; }
+/* the session's cost card: the cost adding up on the left, the number on the right
+   past a thin rule; stacked on a phone, the number first. The side's gap leaves room
+   for the price's serif, whose text box (Iowan Old Style, on macOS) reaches about
+   7px above its 1-line-high box */
+.costcard { display: grid; grid-template-columns: minmax(0, 3fr) minmax(240px, 2fr); align-items: center; gap: 16px 28px; }
+.costcard.alone { grid-template-columns: minmax(0, 1fr); }
+.costside { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; min-width: 0; align-self: stretch; justify-content: center; }
+.costcard:not(.alone) .costside { border-left: 0.5px solid var(--l15); padding-left: 28px; }
+.costside .v { font-family: var(--serif); font-size: 40px; line-height: 1; margin-top: 4px; }
+.costplot { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+@media (max-width: 719.98px) {
+  .costcard { grid-template-columns: minmax(0, 1fr); }
+  .costside { order: -1; }
+  .costcard:not(.alone) .costside { border-left: 0; padding-left: 0; }
+}
 /* the session's cost check: a quiet line under the cost, the parts in a fold */
-.calline { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; max-width: 420px; font-size: 12px; line-height: 1.45; color: var(--muted); text-align: right; }
-.calline .linkbtn { color: var(--clay); min-height: 24px; }
+.calline { max-width: 420px; font-size: 12px; line-height: 1.45; color: var(--muted); }
+.calline .linkbtn { color: var(--clay); min-height: 24px; margin: -4px 0; }
 .calline .bad, .calfold .bad, .calfold tr.bad td { color: var(--clay); }
 details.calfold { display: block; }
 details.calfold > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; cursor: pointer; list-style: none; min-height: 24px; }
@@ -662,6 +673,7 @@ code, .mono, pre { overflow-wrap: anywhere; }
   .calline .linkbtn, details.calfold > summary { min-height: 44px; }
   button.switch, .stepbtn { min-height: 44px; }
   .stepbtn { width: 44px; height: 44px; }
+  .calline .linkbtn { margin: -13px 0; vertical-align: middle; } /* the target stays 44px, the line keeps its height */
   .calbody { padding-left: 0; }
 }
 

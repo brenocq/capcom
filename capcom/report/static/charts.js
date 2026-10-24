@@ -62,13 +62,14 @@ export function xAxis(ticks, x0, x1, left, xOf) {
   return thinned(h('div.xaxis', { style: `margin-left:${left}px` }, ticks.map((tk, i) => {
     const f = pos(tk.t);
     const shift = f < 0.03 ? '0' : f > 0.97 ? '-100%' : '-50%';
-    return h('span', { style: `left:${(f * 100).toFixed(2)}%;transform:translateX(${shift})`, text: tk.label });
+    return h('span', { class: tk.keep ? 'keep' : null, style: `left:${(f * 100).toFixed(2)}%;transform:translateX(${shift})`, text: tk.label });
   })));
 }
 
 // Axis labels that would run into each other when the chart is narrow: whenever the
 // row's width changes, every label is shown again and then, left to right, each one
-// too close to the last one kept is hidden (a `.today` label is always kept).
+// too close to the last one kept is hidden (a `.today` label, or a tick with
+// `keep: true`, is always kept).
 const thinner = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver((entries) => entries.forEach((e) => thin(e.target)));
 
 export function thinned(row) {
@@ -81,7 +82,7 @@ function thin(row) {
   labels.forEach((el) => { el.style.visibility = ''; });
   const range = document.createRange();
   const boxes = labels.map((el) => { range.selectNodeContents(el); return range.getBoundingClientRect(); });
-  const kept = labels.map((el) => el.classList.contains('today'));
+  const kept = labels.map((el) => el.classList.contains('today') || el.classList.contains('keep'));
   const clear = (i) => kept.every((k, j) => !k || j === i || boxes[i].right + 6 <= boxes[j].left || boxes[j].right + 6 <= boxes[i].left);
   labels.forEach((el, i) => { if (!kept[i] && clear(i)) kept[i] = true; });
   labels.forEach((el, i) => { if (!kept[i]) el.style.visibility = 'hidden'; });
@@ -119,7 +120,10 @@ export function memberBands({ id, xs, Y, lines, colors, total, tint, cls }) {
 // in its own color with a vertical fade; the total on top in the text color, with
 // a gray band down to the largest series and its amount labeled at its right end.
 // opts: {times, members: [{label, values, color}], total, start, end, now,
-//        height, left, timeLabel(t), marks: [{n, t, href, aria}]}
+//        height, left, timeLabel(t), marks: [{n, t, href, aria}], axis, ticks, endLabel}
+// axis: time to a fraction of the width (activeAxis), linear by default; ticks:
+// the x labels [{t, label}], timeTicks by default; endLabel: false leaves the
+// total's amount off (the dot stays), when the page shows it beside the chart.
 export function bandChart(opts) {
   const { members, total } = opts;
   const times = [opts.start, ...opts.times];
@@ -129,7 +133,8 @@ export function bandChart(opts) {
   const W = 1000, H = opts.height || 300, left = opts.left || 52;
   const ticks = niceTicks(maxOf(tot, 1e-6));
   const ymax = ticks[ticks.length - 1];
-  const X = (t) => ((t - x0) / (x1 - x0) * W).toFixed(1);
+  const fx = opts.axis || ((t) => (t - x0) / (x1 - x0));
+  const X = (t) => (fx(t) * W).toFixed(1);
   const Y = (v) => (H - v / ymax * H).toFixed(1);
   const id = 'band' + (++uid);
   const marks = memberBands({ id, xs: times.map(X), Y, lines, colors: members.map((m) => m.color), total: tot, tint: 'var(--text)' });
@@ -141,7 +146,7 @@ export function bandChart(opts) {
   yGrid(plot, ticks, ymax, left, (v) => usd(v, v >= 100 || Number.isInteger(v) ? 0 : 2));
   plot.append(svg);
   if (opts.now && opts.now < x1) {
-    const f = ((opts.now - x0) / (x1 - x0) * 100).toFixed(2) + '%';
+    const f = (fx(opts.now) * 100).toFixed(2) + '%';
     plot.append(h('div.nowline', { style: `left:${f}` }), h('span.nowlab', { style: `left:${f}`, text: 'now' }));
   }
   // spike markers: numbered, on the total line at the spike's start, linking to /spikes
@@ -150,7 +155,7 @@ export function bandChart(opts) {
     if (m.t < x0 || m.t > x1) continue;
     let i = times.findIndex((tm) => tm >= m.t);
     if (i < 0) i = times.length - 1;
-    placed.push({ fx: (m.t - x0) / (x1 - x0), fy: 1 - tot[i] / ymax });
+    placed.push({ fx: fx(m.t), fy: 1 - tot[i] / ymax });
     const left = (placed[placed.length - 1].fx * 100).toFixed(2) + '%';
     const top = (placed[placed.length - 1].fy * 100).toFixed(2) + '%';
     plot.append(h('a.spikemark', { href: m.href || '/spikes', style: `left:${left};top:${top}`, 'aria-label': m.aria || `Spike ${m.n}`, title: m.aria || '', text: String(m.n) }));
@@ -159,35 +164,36 @@ export function bandChart(opts) {
   // clear of the markers (above the line, below it near a marker, beside the end at the very top)
   const end = tot[tot.length - 1];
   if (end > 0) {
-    const fx = (times[times.length - 1] - x0) / (x1 - x0), fy = 1 - end / ymax;
-    const near = placed.some((p) => fx - p.fx < 0.16 && fx - p.fx > -0.04);
+    const ex = fx(times[times.length - 1]), fy = 1 - end / ymax;
+    const near = placed.some((p) => ex - p.fx < 0.16 && ex - p.fx > -0.04);
     const place = near ? '.below' : fy < 0.1 ? '.beside' : '';
-    const pos = `left:${(fx * 100).toFixed(2)}%;top:${(fy * 100).toFixed(2)}%`;
-    const lab = h('span.endlab' + place + (fx < 0.15 ? '.leftward' : ''), { style: pos, text: usd(end, end >= 100 ? 0 : 2) });
-    plot.append(h('span.enddot', { style: pos }), lab);
+    const pos = `left:${(ex * 100).toFixed(2)}%;top:${(fy * 100).toFixed(2)}%`;
+    const lab = h('span.endlab' + place + (ex < 0.15 ? '.leftward' : ''), { style: pos, text: usd(end, end >= 100 ? 0 : 2) });
+    plot.append(h('span.enddot', { style: pos }));
+    if (opts.endLabel !== false) plot.append(lab);
     // once laid out, move the label clear of the spike markers and the "now" label
-    if (typeof ResizeObserver !== 'undefined') {
-      const ro = new ResizeObserver(() => clearOfMarks(plot, lab, fx, fy, left));
+    if (opts.endLabel !== false && typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(() => clearOfMarks(plot, lab, ex, fy, left));
       ro.observe(plot);
     }
   }
   const guide = h('div.guide', { hidden: true });
   plot.append(guide);
   const label = opts.timeLabel || ((t) => `${monthDay(new Date(t))} ${hm(new Date(t))}`);
+  const fracs = times.map(fx);
   plot.addEventListener('mousemove', (e) => {
     const r = plot.getBoundingClientRect();
-    const t = x0 + (e.clientX - r.left) / r.width * (x1 - x0);
-    const i = nearest(times, t);
+    const i = nearest(fracs, (e.clientX - r.left) / r.width);
     guide.hidden = false;
-    guide.style.left = ((times[i] - x0) / (x1 - x0) * 100).toFixed(2) + '%';
+    guide.style.left = (fracs[i] * 100).toFixed(2) + '%';
     showTip(e, i === 0 ? label(times[0]) : 'Up to ' + label(times[i]), [
       { label: 'Total', value: usd(tot[i]), color: 'var(--text)' },
       ...members.map((m, j) => ({ label: m.label, value: usd(lines[j][i]), color: m.color })),
     ]);
   });
   plot.addEventListener('mouseleave', () => { guide.hidden = true; hideTip(); });
-  const xt = timeTicks(x0, x1);
-  return h('div', null, plot, xAxis(xt, x0, x1, left));
+  const xt = opts.ticks || timeTicks(x0, x1);
+  return h('div', null, plot, xAxis(xt, x0, x1, left, fx));
 }
 
 // Where the total's label goes beside the end of the total line (`pt`, px in the
