@@ -20,7 +20,8 @@ def _out() -> io.StringIO:
 
 def test_mark_a_row_then_list_detail_and_unmark(tmp_path: Path) -> None:
     config = capcom.config.load_config()
-    idx = build({**before(40, 3), **after(40, 3)})
+    # in a subagent: a main thread's lifetime has no setting, so no saving to list
+    idx = build({**before(40, 3), **after(40, 3)}, agent="a1")
     p = tmp_path / "c.jsonl"
     now = now_after()
     out = _out()

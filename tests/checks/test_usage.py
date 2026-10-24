@@ -225,7 +225,7 @@ def test_a_subagent_cache_expiring_during_a_tool_call_is_its_own_finding() -> No
     assert f.metrics["subagent_cheapest"] == "ping" and f.change is None
     assert "background" in f.advice and "every 4 minutes" in f.advice
     assert "approve the command sooner" in f.advice  # a permission wait looks the same
-    assert "Bash (1)" in f.summary and "12 min" in f.summary
+    assert f.metrics["longest_wait_minutes"] == pytest.approx(12, abs=1)
     assert f.metrics["rewrites"] == 1 and f.metrics["tools"] == ("Bash",)
     assert "Bash (pytest)" in f.evidence[0].label
     assert "idle_cache_rewrites" not in kinds(found)  # counted once
@@ -293,7 +293,7 @@ def test_a_main_thread_waiting_on_its_subagents_is_a_tool_wait() -> None:
     )
     found = _checks(index(reqs, agents=[agent("a1", "coder")]))
     f = only(found, "subagent_cache_expiry")
-    assert "background agents" in f.summary
+    assert f.metrics["tools"] == ("background agents",)
     assert "idle_cache_rewrites" not in kinds(found)
 
 
