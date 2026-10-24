@@ -153,7 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--no-ask",
         action="store_true",
-        help="no Ask Claude chat: the website never starts your claude CLI",
+        help="no Ask Roger chat: the website never starts your claude CLI",
     )
     serve.set_defaults(func=_serve)
 

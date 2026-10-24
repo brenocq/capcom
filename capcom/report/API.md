@@ -2,7 +2,7 @@
 
 `capcom serve` listens on `127.0.0.1` only (default port 8787). Every endpoint is a
 `GET` (`HEAD` gives the same headers without the body) but two: `POST /api/changes`
-(the marks of "Did it work?", below) and `POST /api/ask` (Ask Claude, at the end);
+(the marks of "Did it work?", below) and `POST /api/ask` (Ask Roger, at the end);
 other methods and paths get 405. There are no CORS headers, and a request whose `Host`
 header is not `127.0.0.1` or `localhost` gets 403 (DNS rebinding). Each request opens
 the index read-only and closes it before answering.
@@ -813,7 +813,7 @@ before the first day the index holds; `id` must be an open mark (404). The reply
 `{mark: Mark}`, or `{unmarked: id}`. `capcom serve --read-only` answers 405 and the
 pages leave out every button that writes.
 
-### Ask Claude
+### Ask Roger
 
 #### `POST /api/ask`
 
@@ -823,18 +823,33 @@ in the panel; the choice stays in that browser. Each question starts the user's 
 `claude` CLI headless:
 
 ```
-claude -p --model claude-haiku-5-5 --tools "" --strict-mcp-config --setting-sources ""
+claude -p --model claude-haiku-5-5 --tools "" --strict-mcp-config
+  --mcp-config <capcom's own server> --allowedTools mcp__capcom__spend,...
+  --permission-mode dontAsk --setting-sources ""
   --disallowedTools Bash,Write,Edit,... --disable-slash-commands --no-session-persistence
-  --no-chrome --effort low --output-format stream-json --verbose --include-partial-messages
-  --system-prompt <capcom's>
+  --no-chrome --max-turns 6 --effort low --output-format stream-json --verbose
+  --include-partial-messages --system-prompt <capcom's>
 ```
 
 with `ENABLE_CLAUDEAI_MCP_SERVERS=false`, in an empty temporary folder, the prompt on
 stdin. capcom makes no network request itself; the CLI does, signed in as the user.
 
+The one MCP server is capcom's (`asktools.py`, `python -I -m capcom.report.asktools
+--index <path> --now <iso> [--tz <zone>]`), which the CLI starts for the question and
+which ends with it. Its four read-only tools answer from the index (`askfacts.py`),
+in aggregates, labels, ids and file paths only, never a session's title or other
+text from the logs, at most 4 calls per question:
+
+| Tool | Arguments | Answers |
+| --- | --- | --- |
+| `spend` | `group_by` (project, model, agent_type, day, session), `days` (1 to 90, default 14) or `since`/`until` (local dates), filters `project`, `model` (a part of the id, such as "opus"), `agent_type` ("main": the main threads), `session_id` | the total and up to 15 rows (every day for `day`): dollars, share, requests, sessions; a project's folder; a session's id, project, folder, first and last request |
+| `session` | `session_id` (or its first 8 characters) | its project, folders, entrypoint, version, first and last request, total, spend by model, agent type and day, subagents spawned by type |
+| `findings` | `days` | the Checks findings: kind, scope, title, summary, saving per week, numeric metrics (no evidence) |
+| `where_defined` | `name`, `kind` (agent, skill, command) | the files that define it (a project's `.claude/`, `~/.claude/`, a plugin's folder), and for an agent the projects that spawned it |
+
 Guarded like `POST /api/changes`: this launch's token in `X-Capcom-Token`, an Origin
 (or Referer) of this server, `application/json`, a Content-Length of at most 20 KB.
-Two answers at a time (a third gets 429), each stopped after 60 s; when the page
+Two answers at a time (a third gets 429), each stopped after 90 s, lookups included; when the page
 closes the connection the child is killed by its PID (and its process group).
 `--no-ask` turns it off (405); `--read-only` does not, as it writes nothing.
 
@@ -842,9 +857,13 @@ Body, every other field ignored:
 
 ```
 {page: "Checks",                         # the page's name
- part: {label, text} | null,             # the part a mark was clicked on (at most 160
+ part: {label, text, ref} | null,        # the part a mark was clicked on (at most 160
                                          #   and 3000 characters): its numbers and labels
                                          #   in capcom's words, never text from the logs
+                                         # ref: what it is about, each field checked, else
+                                         #   dropped: {kind: "finding", finding, scope, days},
+                                         #   {kind: "mark", id}, {kind: "session", id},
+                                         #   {kind: "day", date}, {kind: "view", days}
  selection: "..." | null,                # the text the user selected (at most 1000
                                          #   characters), each private piece it crossed
                                          #   replaced by "[left out]"
@@ -863,10 +882,18 @@ sessions, a session page's heading, a spike's session), a subagent's spawn
 description, evidence rows, tables, the user's notes and anything typed in a field,
 and pasted config (`PRIVATE` in `static/ask.js`).
 
+With a `ref`, the server adds to the prompt what stands behind the part, from the
+index, in at most about 600 tokens (`askfacts.Facts.context`): the total over the
+part's range and its split by project (with folders), model, agent type and day, the
+top 3 session ids, and for an agent type the files that define it and the projects
+that spawned it; for a marked change, from 4 weeks before its date.
+
 Reply: `200 application/x-ndjson`, one JSON object per line as the answer is written,
 until the connection closes:
 
 ```
+{type: "tool", tool, label, done}        # a lookup starts: "Looking up the spend by
+                                         #   project…", and "Looked up ..." once it is done
 {type: "text", text}                     # the next piece of the answer
 {type: "done", suggestions: [str]}       # last: 2 or 3 suggested replies
 {type: "error", error: "timeout"|"claude_failed", message}   # last, instead of done

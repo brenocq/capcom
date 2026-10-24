@@ -173,8 +173,9 @@ def test_streams_the_answer_and_suggestions(server: Server, fake: Path) -> None:
 def test_runs_the_cli_with_everything_off(server: Server, fake: Path) -> None:
     server.ask(BODY)
     run = wait_run(fake)
-    assert run["argv"] == ask.command("claude")[1:]
     argv = run["argv"]
+    # capcom's own lookup server, and nothing else (test_ask_lookups.py has more)
+    assert argv == ask.command("claude", argv[argv.index("--mcp-config") + 1])[1:]
     for flag in (
         "-p",
         "--strict-mcp-config",
