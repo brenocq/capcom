@@ -89,6 +89,32 @@ function thin(row) {
 
 // ------------------------------------------------------------------ band chart
 
+// The marks of a cumulative chart, shared by Spend's charts and the limit charts:
+// each member's own line from zero (largest first, not stacked), with a band down
+// to the next line filled in its color with a vertical fade, and a fainter band in
+// `tint` from the total down to the largest member. xs: each point's x (in the
+// SVG's units), Y(value) its y; lines: [values], colors: one per line; total: the
+// values on top, or null. Returns {defs, fills, strokes} to append in that order
+// (the total's own line is the caller's, drawn as it likes); `cls` classes the
+// members' fills.
+export function memberBands({ id, xs, Y, lines, colors, total, tint, cls }) {
+  const lineOf = (vals) => vals.map((v, i) => (i ? 'L' : 'M') + xs[i] + ' ' + Y(v)).join('');
+  const bandOf = (up, lo) => {
+    let d = lineOf(up);
+    for (let i = xs.length - 1; i >= 0; i--) d += 'L' + xs[i] + ' ' + Y(lo ? lo[i] : 0);
+    return d + 'Z';
+  };
+  const defs = [gradient(`${id}-t`, tint, 0.18, 0.02), ...colors.map((c, i) => gradient(`${id}-${i}`, c, 0.32, 0.04))];
+  const fills = [];
+  if (total) fills.push(s('path', { d: bandOf(total, lines[0]), fill: `url(#${id}-t)` }));
+  lines.forEach((ln, i) => fills.push(s('path', { d: bandOf(ln, lines[i + 1]), fill: `url(#${id}-${i})`, class: cls || null })));
+  const strokes = [];
+  for (let i = lines.length - 1; i >= 0; i--) {
+    strokes.push(s('path', { d: lineOf(lines[i]), fill: 'none', 'stroke-width': 2, 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke', style: `stroke:${colors[i]}` }));
+  }
+  return { defs, fills, strokes, lineOf };
+}
+
 // Cumulative lines, largest first, each with a band down to the next line, filled
 // in its own color with a vertical fade; the total on top in the text color, with
 // a gray band down to the largest series and its amount labeled at its right end.
@@ -105,22 +131,11 @@ export function bandChart(opts) {
   const ymax = ticks[ticks.length - 1];
   const X = (t) => ((t - x0) / (x1 - x0) * W).toFixed(1);
   const Y = (v) => (H - v / ymax * H).toFixed(1);
-  const lineOf = (vals) => vals.map((v, i) => (i ? 'L' : 'M') + X(times[i]) + ' ' + Y(v)).join('');
-  const bandOf = (up, lo) => {
-    let d = lineOf(up);
-    for (let i = times.length - 1; i >= 0; i--) d += 'L' + X(times[i]) + ' ' + Y(lo ? lo[i] : 0);
-    return d + 'Z';
-  };
   const id = 'band' + (++uid);
-  const defs = s('defs', null, gradient(`${id}-t`, 'var(--text)', 0.18, 0.02),
-    members.map((m, i) => gradient(`${id}-${i}`, m.color, 0.32, 0.04)));
-  const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' }, defs);
-  svg.append(s('path', { d: bandOf(tot, lines[0]), fill: `url(#${id}-t)` }));
-  lines.forEach((ln, i) => svg.append(s('path', { d: bandOf(ln, lines[i + 1]), fill: `url(#${id}-${i})` })));
-  for (let i = lines.length - 1; i >= 0; i--) {
-    svg.append(s('path', { d: lineOf(lines[i]), fill: 'none', 'stroke-width': 2, 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke', style: `stroke:${members[i].color}` }));
-  }
-  svg.append(s('path', { d: lineOf(tot), fill: 'none', 'stroke-width': 2.5, 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke', style: 'stroke:var(--text)' }));
+  const marks = memberBands({ id, xs: times.map(X), Y, lines, colors: members.map((m) => m.color), total: tot, tint: 'var(--text)' });
+  const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' }, s('defs', null, marks.defs));
+  svg.append(...marks.fills, ...marks.strokes);
+  svg.append(s('path', { d: marks.lineOf(tot), fill: 'none', 'stroke-width': 2.5, 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke', style: 'stroke:var(--text)' }));
 
   const plot = h('div.chart', { style: `height:${H}px;margin:12px 0 0 ${left}px` });
   yGrid(plot, ticks, ymax, left, (v) => usd(v, v >= 100 || Number.isInteger(v) ? 0 : 2));
