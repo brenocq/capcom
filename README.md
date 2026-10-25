@@ -249,7 +249,7 @@ answers in a few plain words.
 
 <!-- Placeholder: replace this URL once the MP4 is uploaded. -->
 <p align="center">
-  <a href="https://github.com/brenocq/capcom/releases/download/tour/capcom-tour.mp4"><img alt="The launch video's opening: capcom's Spend chart over two weeks, with a play button." src="https://github.com/brenocq/capcom/raw/assets/video-poster.png" width="720"></a>
+  <a href="https://github.com/brenocq/capcom/releases/download/tour/capcom-tour.mp4"><img alt="The launch video: 14 days of data beside capcom's Spend chart, with a play button." src="https://github.com/brenocq/capcom/raw/assets/video-poster.png" width="720"></a>
   <br>
   <a href="https://github.com/brenocq/capcom/releases/download/tour/capcom-tour.mp4">Watch the 80-second tour, with sound</a>
 </p>
