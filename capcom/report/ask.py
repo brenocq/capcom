@@ -306,15 +306,16 @@ def find_claude() -> str | None:
     return shutil.which("claude")
 
 
-def command(claude: str, tools: str | None = None) -> list[str]:
+def command(claude: str, tools: str | None = None, system: str | None = None) -> list[str]:
     """`claude -p` with nothing to act with: no built-in tools, no MCP servers (with
     `ENV`, not the claude.ai connectors either) but capcom's own when `tools` gives
     its `--mcp-config` (asktools.mcp_config), and then only its tools allowed and
     anything else denied without asking; no slash commands or skills, no settings
     files (so no hooks or plugins from them), no session saved, a few turns; the
-    answer as stream-json with the partial messages."""
+    answer as stream-json with the partial messages. `system` replaces Roger's own
+    system prompt (the phase names, phasenames.py, use their own)."""
     lookups: list[str] = []
-    system = SYSTEM
+    system = system or SYSTEM
     if tools is not None:
         from capcom.report.asktools import allowed
 
@@ -326,7 +327,7 @@ def command(claude: str, tools: str | None = None) -> list[str]:
             "--permission-mode",
             "dontAsk",
         ]
-        system = SYSTEM + SYSTEM_TOOLS
+        system = system + SYSTEM_TOOLS
     return [
         claude,
         "-p",
@@ -501,13 +502,14 @@ class Child:
         shutil.rmtree(self.folder, ignore_errors=True)
 
 
-def start(claude: str, prompt: str, tools: str | None = None) -> Child:
+def start(claude: str, prompt: str, tools: str | None = None, system: str | None = None) -> Child:
     """Start the CLI on the prompt, in an empty temporary folder; with `tools` (an
-    `--mcp-config`), able to look things up with capcom's tools only."""
+    `--mcp-config`), able to look things up with capcom's tools only; with `system`,
+    under that system prompt instead of Roger's."""
     folder = tempfile.mkdtemp(prefix="capcom-ask-")
     try:
         proc = subprocess.Popen(
-            command(claude, tools),
+            command(claude, tools, system),
             cwd=folder,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,

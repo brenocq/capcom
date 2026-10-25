@@ -16,7 +16,10 @@ body of at most 20 KB, two at a time, with a timeout, its child killed by PID wh
 the page goes away; `--no-ask` turns it off (405). The prompt carries what stands
 behind the part (`askfacts.py`), and the CLI may look up more through capcom's own
 read-only MCP server (`asktools.py`). It writes nothing, so it stays on under
-`--read-only`.
+`--read-only`. `POST /api/phasenames` (`phasenames.py`), behind the same checks and
+the same switch, asks that CLI once per thread for short titles of an agent page's
+guessed phases (calls, paths, commands with their descriptions, exit codes and
+thinking summaries; never outputs or file contents), kept in capcom's cache folder.
 
 `GET /api/tool/<session>` and `GET /api/reply/<session>` (`tooldetail.py`), the
 agent page's step fold, are the only replies with text from the logs: one tool
@@ -74,7 +77,7 @@ from capcom.cost.prices import load_prices
 from capcom.limits.cli import adopt_samples
 from capcom.limits.model import samples_path
 from capcom.limits.record import ACCOUNTS_FILE, SESSIONS_FILE
-from capcom.report import api, ask, askfacts, asktools, didit, tooldetail
+from capcom.report import api, ask, askfacts, asktools, didit, phasenames, tooldetail
 from capcom.report.analysis import Analysis, Unavailable, default_analysis
 from capcom.report.jobs import Job, Jobs, Result, computing_body
 from capcom.report.limit_window import limit_window
@@ -409,6 +412,9 @@ class Site:
     )
     ask_timeout: float = ask.TIMEOUT  # seconds one answer may take
     ask_tools: bool = True  # False: no facts and no lookups, only what the page sends
+    # where Haiku's phase titles are kept (phasenames.py); None: not kept
+    phase_names: Path | None = None
+    namer: phasenames.Namer | None = None  # made on first use from `phase_names`
 
 
 class Scanner:
@@ -771,6 +777,9 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/ask":
             self._ask()
             return
+        if route == "/api/phasenames":
+            self._phase_names()
+            return
         if route != "/api/changes":
             self._not_allowed()
             return
@@ -907,6 +916,59 @@ class Handler(BaseHTTPRequestHandler):
             if child is not None:
                 child.close()  # killed by its PID if it still runs: the page went away
             site.ask_slots.release()
+
+    def _phase_names(self) -> None:
+        """POST /api/phasenames {session, agent}: Haiku's short titles for the guessed
+        phases of that thread (phasenames.py), from capcom's cache or one call of the
+        user's `claude` CLI. Off with Ask Roger (--no-ask) and without log roots."""
+        site = self.site
+        if not site.ask_on or not site.log_roots:
+            self._not_allowed()
+            return
+        body = self._checked_body(1024)
+        if body is _REFUSED:
+            return
+        sid = body.get("session") if isinstance(body, dict) else None
+        agent = (body.get("agent") or "main") if isinstance(body, dict) else None
+        if not (
+            isinstance(sid, str)
+            and isinstance(agent, str)
+            and tooldetail.valid_id(sid)
+            and tooldetail.valid_id(agent)
+        ):
+            self._error(HTTPStatus.BAD_REQUEST, "bad_request", "Malformed id.")
+            return
+        try:
+            index = _open(site)
+        except IndexMissing as err:
+            self._error(HTTPStatus.SERVICE_UNAVAILABLE, "no_index", str(err))
+            return
+        try:
+            th = api.agent_thread(self._context(index, site.clock()), sid, {"agent": agent})
+        except api.ApiError as err:
+            self._error(err.status, err.code, err.message)
+            return
+        except sqlite3.Error:
+            self._error(HTTPStatus.SERVICE_UNAVAILABLE, "index_busy", "The index is busy.")
+            return
+        finally:
+            index.close()
+        with site.write_lock:
+            if site.namer is None:
+                site.namer = phasenames.Namer(phasenames.NameCache(site.phase_names))
+            namer = site.namer
+        ai = th.agent_infos.get(th.aid) if th.aid else None
+        named = namer.name(
+            sid,
+            agent,
+            th.steps,
+            th.phases,
+            [r.message_id for r in th.reqs],
+            tooldetail.allowed(th.paths, site.log_roots),
+            th.aid,
+            phasenames.about_thread(ai.agent_type if ai else None, ai.description if ai else None),
+        )
+        self._json(HTTPStatus.OK, phasenames.reply(named))
 
     def _ask_facts(self, question: ask.Question, now: datetime) -> str:
         """What stands behind the asked-about part, from the index (askfacts), or
@@ -1377,6 +1439,9 @@ class _Server(ThreadingHTTPServer):
     daemon_threads = True
 
 
+PHASE_NAMES = "phase-names"  # the folder of Haiku's phase titles, in capcom's cache folder
+
+
 def make_server(site: Site, port: int) -> ThreadingHTTPServer:
     """A server bound to 127.0.0.1:`port` (0: any free port); not started."""
     # `timeout`: a socket timeout, so a client that sends less than it announced (or
@@ -1409,6 +1474,7 @@ def run_serve(
         day_cache=config.cache_dir / DAY_CACHE,
         ask_on=ask_claude,
         log_roots=(config.projects_dir,),
+        phase_names=config.cache_dir / PHASE_NAMES,
     )
     try:
         server = make_server(site, port)

@@ -42,7 +42,13 @@ modules. Never add or commit anything under `docs/`.
   needs the launch's token. The text is never stored (not in the index, the API
   cache or any file), never in an exported report (numbers only), and never
   sent to Ask Roger (a selection over an open fold leaves it out as "tool
-  details" or "reply text").
+  details" or "reply text"). The agent page's phase names are the other: a
+  guessed phase may be named from the short descriptions the model wrote for
+  its Bash and Agent calls (`capcom/report/agent.py`), shown like a spawn
+  description and left out of Ask Roger as "agent names"; and Haiku's titles
+  for them (`capcom/report/phasenames.py`) are kept, by phase key, only in
+  `~/.cache/capcom/phase-names/` (one file per thread, readable by the user
+  only), never in the index, the API cache, `/api/agent` or an export.
 - **No network.** capcom makes no network requests at run time. The one
   exception is Ask Roger (`capcom/report/ask.py`): when the user asks in a
   page of `capcom serve` (after turning it on there once), capcom starts the
@@ -60,7 +66,16 @@ modules. Never add or commit anything under `docs/`.
   `where_defined`), served by `python -m capcom.report.asktools` over stdio for
   that one question, at most 4 lookups and 6 turns. Never session titles, file
   contents, tool inputs or other text from the logs beyond tool names, file
-  paths and short labels. `--no-ask` turns it off. Never read `~/.claude/.credentials.json`,
+  paths and short labels. The one other request goes the same way, behind the
+  same switch: the agent page's phase names (`capcom/report/phasenames.py`),
+  one call per thread with no MCP server and no tool at all, which sends only
+  each guessed phase's length, tool names, file paths, Bash commands (a
+  heredoc's body dropped, secret-looking values replaced, 200 characters each)
+  with their descriptions and failed exit codes, an Agent call's type and
+  description, a few thinking summaries cut short, and the thread's agent type
+  and spawn description, at most 12,000 characters; never a tool's output, a
+  file's contents, an edit's text, the user's prompts or the replies' text.
+  `--no-ask` turns both off. Never read `~/.claude/.credentials.json`,
   `~/.openclaw/credentials/`, auth profiles or any token. The one read of account data: `oauthAccount.emailAddress` and
   `oauthAccount.accountUuid` from `~/.claude.json`, only those two keys, to tell
   accounts apart in the limits (`capcom/limits/`); nothing else in that file.

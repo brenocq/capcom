@@ -1400,8 +1400,28 @@ def _life(
     }
 
 
-def agent(ctx: Context, session_id: str, query: Mapping[str, str]) -> dict[str, Any]:
-    """One thread of a session (`?agent=<agent_id>`, or `main`), step by step."""
+@dataclass(slots=True)
+class Thread:
+    """One thread's steps and phases, as the agent page and its phase names see it."""
+
+    info: Any
+    order: list[str | None]
+    agent_infos: dict[str, AgentInfo]
+    aid: str | None
+    want: str
+    reqs: list[Request]
+    breakdowns: list[CostBreakdown]
+    costs: list[float]
+    parent: Request | None
+    paths: list[Path]
+    steps: list[thread.Step]
+    idle: list[tuple[datetime, datetime]]
+    phases: list[thread.Phase]
+
+
+def agent_thread(ctx: Context, session_id: str, query: Mapping[str, str]) -> Thread:
+    """The thread `?agent=<agent_id>` (or `main`) of a session, cut into steps and
+    phases. Raises ApiError 404 when there is no such thread."""
     want = query.get("agent") or "main"
     aid = None if want == "main" else want
     info = next((x for x in ctx.index.sessions() if x.session_id == session_id), None)
@@ -1430,10 +1450,24 @@ def agent(ctx: Context, session_id: str, query: Mapping[str, str]) -> dict[str, 
         start=parent.timestamp if parent else None,
         prompts=extras.prompts,
         commands=extras.commands,
+        descriptions=extras.descriptions,
     )
     thread.attribute_costs(steps, costs)
     times = {c.tool_use_id: r.timestamp for r in reqs for c in r.tool_calls}
     phases = thread.build_phases(steps, thread.todo_intervals(extras.todos, times))
+    return Thread(
+        info, order, agent_infos, aid, want, reqs, breakdowns, costs, parent, list(paths),
+        steps, idle, phases,
+    )  # fmt: skip
+
+
+def agent(ctx: Context, session_id: str, query: Mapping[str, str]) -> dict[str, Any]:
+    """One thread of a session (`?agent=<agent_id>`, or `main`), step by step."""
+    th = agent_thread(ctx, session_id, query)
+    info, order, agent_infos, aid, want = th.info, th.order, th.agent_infos, th.aid, th.want
+    reqs, breakdowns, costs, parent = th.reqs, th.breakdowns, th.costs, th.parent
+    steps, idle, phases = th.steps, th.idle, th.phases
+    ai = agent_infos.get(aid) if aid else None
     model_s, tool_s = thread.busy_seconds(steps)
     first = steps[0].start if steps else reqs[0].timestamp
     last = max([reqs[-1].timestamp, *(st.end for st in steps)])
