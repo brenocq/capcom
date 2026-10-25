@@ -5,7 +5,7 @@
 import {
   h, s, api, usd, tokens, pct, duration, stamp, hm, monthDay, empty, tipOn, showTip, hideTip,
   outputUsd, lowerMark, LOWER_TITLE, CATEGORY_LABELS, CATEGORY_ORDER, categoryColor, entityColor, maxOf,
-  spikeText, spikeHref, sessionDot,
+  spikeText, spikeHref, sessionDot, sessionColor,
 } from './lib.js';
 import { niceTicks, activeAxis, thinned, bandChart } from './charts.js';
 import { timelineMissing } from './spend.js';
@@ -553,6 +553,12 @@ function rateLane(d, R, start, end, x, X, at, draw, fitSvg, mainColor, hasMain, 
 
 const NOTE = 'Active time; pauses over 30 minutes are squeezed to a mark.';
 
+// The main thread's color on the timeline: the session's own (/color in Claude Code), or
+// the main thread's usual color when it has none.
+export function mainThreadColor(color) {
+  return sessionColor(color) || entityColor('main', 'agent');
+}
+
 function unfolded(d, r) {
   const card = h('section.card', null, h('div.split', null, h('h2', { text: 'How the session unfolded' }),
     h('span.note', { text: NOTE + ' Hover for values.' })));
@@ -619,7 +625,7 @@ function unfolded(d, r) {
   const spot = () => (Number.isFinite(at) ? [place(h('div.tlspot'), () => ({ left: pc(x(at)), width: `max(4px, ${pc(Math.max(0, x(Number.isFinite(to) ? to : at) - x(at)))})` }))] : []);
 
   // context per request: the main thread as a line (in its lane's color), subagents as dots
-  const mainColor = entityColor('main', 'agent');
+  const mainColor = mainThreadColor(d.session && d.session.color);
   const main = R.t.map((_, i) => i).filter((i) => R.agent[i] < 0);
   const line = main.length ? main : R.t.map((_, i) => i);
   const ticks = niceTicks(maxOf(R.context, 1), 3);
@@ -713,7 +719,7 @@ function unfolded(d, r) {
   const span = (el, a) => place(el, () => ({ left: `min(${pc(x(a.first))}, calc(100% - 3px))`, width: `max(3px, ${pc(Math.max(x(a.last) - x(a.first), 0))})` }));
   if (d.main) {
     lanes.push(h('div.lab', null, h('b', { text: 'Main thread' })),
-      h('div.lane', { style: 'background:transparent' }, tipOn(span(h('a.lanebar', { 'data-mark': '', href: agentHref(sid, 'main'), style: `background:${entityColor('main', 'agent')}` }), d.main),
+      h('div.lane', { style: 'background:transparent' }, tipOn(span(h('a.lanebar', { 'data-mark': '', href: agentHref(sid, 'main'), style: `background:${mainColor}` }), d.main),
         'Main thread', [{ label: 'Requests', value: String(d.main.requests) }, { label: 'Cost', value: usd(d.main.usd) }, { note: OPEN_NOTE }],
         { native: true, aria: 'Main thread: open its timeline' }), gapMarks));
   }

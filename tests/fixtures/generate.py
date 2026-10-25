@@ -468,6 +468,9 @@ class SessionWriter:
     def ai_title(self, title: str) -> None:
         self.write({"type": "ai-title", "aiTitle": title, "sessionId": self.session_id})
 
+    def agent_color(self, color: str) -> None:
+        self.write({"type": "agent-color", "agentColor": color, "sessionId": self.session_id})
+
     def cost_state(self, total_usd: float, models: dict[str, dict[str, Any]]) -> None:
         """`models`: model id -> {inputTokens, outputTokens, cacheReadInputTokens,
         cacheCreationInputTokens, thinkingTokens, webSearchRequests, costUSD}."""
