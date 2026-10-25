@@ -2,7 +2,7 @@
 
     uv run python .github/scripts/build_all.py [--out DIR] [--check DIR] [--no-demo] [--keep DIR]
 
-1. demo/data.py writes two made-up weeks of Claude Code logs into a temporary
+1. demo/data.py writes four made-up weeks of Claude Code logs into a temporary
    folder and runs capcom on them there (never on ~/.claude or ~/.cache/capcom).
 2. banner/build.py and features/build.py draw banner.svg and the eight
    feature-*.svg from capcom's numbers.

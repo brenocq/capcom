@@ -229,7 +229,10 @@ class SessionWriter:
         chars: int = 1000,
         is_image: bool = False,
         is_error: bool = False,
+        text: str | None = None,
     ) -> None:
+        """A tool's result: `chars` of filler, or `text` (the caller keeps it `chars`
+        long when the size matters) for pages that show a result's own words."""
         if is_image:
             content: Any = [
                 {
@@ -238,7 +241,7 @@ class SessionWriter:
                 }
             ]
         else:
-            content = "x" * chars
+            content = "x" * chars if text is None else text
         rec = self._common(t)
         rec.update(
             {
@@ -255,7 +258,7 @@ class SessionWriter:
                     ],
                 },
                 "toolUseResult": {
-                    "stdout": "x" * min(chars, 50),
+                    "stdout": "x" * min(chars, 50) if text is None else text,
                     "stderr": "",
                     "interrupted": False,
                 },
