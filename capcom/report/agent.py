@@ -7,16 +7,19 @@ launched (from the reply to the last result coming back). Steps are grouped into
 phases: the thread's own to-do list (TodoWrite, or TaskCreate and TaskUpdate) when
 it kept one, an item's phase running from when it went in progress to when it was
 completed; a stretch with no item is cut where the work changed (reading, editing,
-commands) and named from the files and commands it touched (`guessed`).
+commands) and named (`guessed`) from the short descriptions the model wrote for its
+Bash and Agent calls when it wrote them, else from the files and commands it touched.
 
 Everything comes from the index (requests and tool results) plus one read-only
 pass over the thread's own log files for what the index does not keep: the
 to-do list, the Bash commands (only a short label of each: the program and its
-first plain words) and the times of the user's prompts (never their text).
+first plain words), the Bash and Agent calls' own descriptions (a short label the
+model writes with each call) and the times of the user's prompts (never their text).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shlex
@@ -91,6 +94,7 @@ OPERATORS = frozenset({"&&", "||", ";", "|", "&", "|&"})
 IDLE_FALLBACK = 10 * 60  # seconds: a turn's end this long before the next request waited for you
 MAX_GUESSED = 8  # phases one stretch without a to-do item is cut into, at most
 NAME_MAX = 60
+DESC_MAX = 120  # longest call description kept
 
 
 # ----------------------------------------------------------------- the log extras
@@ -115,6 +119,8 @@ class Extras:
 
     # Bash tool_use_id -> (short label, kind)
     commands: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # Bash and Agent tool_use_id -> the call's own description (a short label)
+    descriptions: dict[str, str] = field(default_factory=dict)
     prompts: list[datetime] = field(default_factory=list)  # the user's messages (times only)
     todos: list[TodoEvent] = field(default_factory=list)
 
@@ -168,7 +174,15 @@ def _read_line(
     line: bytes, agent_id: str | None, out: Extras, creates: dict[str, TodoEvent]
 ) -> None:
     tool_use = b'"tool_use"' in line and any(
-        w in line for w in (b'"Bash"', b'"TodoWrite"', b'"TaskCreate"', b'"TaskUpdate"')
+        w in line
+        for w in (
+            b'"Bash"',
+            b'"Agent"',
+            b'"Task"',
+            b'"TodoWrite"',
+            b'"TaskCreate"',
+            b'"TaskUpdate"',
+        )
     )
     user = b'"type":"user"' in line
     task_result = user and b'"tool_result"' in line and bool(creates) and b'"task' in line
@@ -214,6 +228,10 @@ def _tool_use(
     name, tid, inp = block.get("name"), block.get("id"), block.get("input")
     if not isinstance(tid, str) or not isinstance(inp, dict):
         return
+    if name in ("Bash", "Agent", "Task"):
+        desc = _text(inp.get("description"), DESC_MAX)
+        if desc:
+            out.descriptions[tid] = desc.rstrip(".")
     if name == "Bash":
         command = inp.get("command")
         label = command_label(command)
@@ -415,6 +433,7 @@ class Call:
     label: str  # "Bash (uv run pytest)", "Read app.js"
     short: str  # "pytest", "app.js"
     id: str = ""  # the tool_use id: what the page's fold asks /api/tool for
+    desc: str = ""  # the call's own description (Bash, Agent), when it wrote one
 
 
 @dataclass(slots=True)
@@ -442,9 +461,15 @@ class Result:
     is_image: bool = False
 
 
-def _call(c: Any, results: Mapping[str, Result], commands: Mapping[str, tuple[str, str]]) -> Call:
+def _call(
+    c: Any,
+    results: Mapping[str, Result],
+    commands: Mapping[str, tuple[str, str]],
+    descriptions: Mapping[str, str],
+) -> Call:
     call = _kind_call(c, results, commands)
     call.id = c.tool_use_id
+    call.desc = descriptions.get(c.tool_use_id, "")
     return call
 
 
@@ -477,10 +502,12 @@ def build_steps(
     start: datetime | None = None,
     prompts: Sequence[datetime] = (),
     commands: Mapping[str, tuple[str, str]] | None = None,
+    descriptions: Mapping[str, str] | None = None,
 ) -> tuple[list[Step], list[tuple[datetime, datetime]]]:
     """The thread's steps in time order, and its idle stretches (waiting for the
     user: from a turn's end to the prompt that started the next one)."""
     commands = commands or {}
+    descriptions = descriptions or {}
     steps: list[Step] = []
     idle: list[tuple[datetime, datetime]] = []
     ready = start  # when the model had what it needed for its next reply
@@ -504,7 +531,7 @@ def build_steps(
             steps.append(Step(begin, t, "think", KIND_LABELS["think"], "thinking", i))
         if r.tool_calls:
             nxt = reqs[i + 1].timestamp if i + 1 < len(reqs) else None
-            calls = [_call(c, results, commands) for c in r.tool_calls]
+            calls = [_call(c, results, commands, descriptions) for c in r.tool_calls]
             ends = [c.end for c in calls if c.end is not None and c.end >= t]
             end = max(ends) if ends else (nxt or t)
             if nxt is not None and end > nxt:
@@ -546,6 +573,7 @@ class Phase:
     guessed: bool
     steps: list[int]
     key: str | None = None  # the to-do item, for a phase from the list
+    source: str = "todo"  # "todo", or for a guessed one "described" or "touched"
 
 
 def todo_intervals(
@@ -650,6 +678,61 @@ def guess_name(steps: Sequence[Step]) -> str:
     return name if len(name) <= NAME_MAX else name[: NAME_MAX - 1] + "…"
 
 
+def _fit(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _scored(steps: Sequence[Step]) -> tuple[list[str], set[str], Counter[str]]:
+    """The descriptions of a stretch's calls, the one that stood for most time
+    first (a look at files counts a quarter; the first written wins a tie), those
+    of calls that were not file lookups, and how often each file was edited."""
+    seen: dict[str, float] = {}
+    plain: set[str] = set()
+    edits: Counter[str] = Counter()
+    for st in steps:
+        for c in st.calls:
+            if c.name in EDIT_TOOLS and c.target:
+                edits[Path(c.target).name] += 1
+            if not c.desc:
+                continue
+            secs = max(0.0, ((c.end or st.end) - st.start).total_seconds())
+            weight = 0.25 if c.kind == "files" else 1.0
+            seen[c.desc] = seen.get(c.desc, 0.0) + (secs + 1.0) * weight
+            if c.kind != "files":
+                plain.add(c.desc)
+    first = {d: i for i, d in enumerate(seen)}
+    order = sorted(seen, key=lambda d: (-seen[d], first[d]))
+    return order, plain, edits
+
+
+def describe_name(steps: Sequence[Step]) -> str | None:
+    """A stretch's name from its calls' own descriptions (the short label the model
+    writes with each Bash and Agent call), or None when it wrote none.
+
+    The description that stands for the most time wins, a quick look around (a
+    command that only reads files, "List the folder") counting a quarter, and the
+    first one written wins a tie; the others go in the name's tooltip
+    (`other_descriptions`).
+    A stretch that edited files leads with the file it edited most, as "Editing
+    a.py +2", then the description of what it ran."""
+    order, plain, edits = _scored(steps)
+    if not order:
+        return None
+    best = order[0]
+    if edits:
+        top, n = edits.most_common(1)[0][0], len(edits)
+        lead = f"Editing {top}" + (f" +{n - 1}" if n > 1 else "")
+        if best not in plain:
+            return None  # only looks around while editing: the files say more
+        return _fit(f"{lead} · {_fit(best, NAME_MAX - len(lead) - 3)}", NAME_MAX)
+    return _fit(best, NAME_MAX)
+
+
+def other_descriptions(steps: Sequence[Step]) -> list[str]:
+    """The descriptions a described phase's name left out, most time first."""
+    return _scored(steps)[0][1:]
+
+
 def _guess(steps: Sequence[Step], idx: list[int]) -> list[Phase]:
     """Cut a stretch without a to-do item where its work changed, and name each part."""
     modes: list[str | None] = [(_mode(steps[i]) if steps[i].calls else None) for i in idx]
@@ -672,7 +755,15 @@ def _guess(steps: Sequence[Step], idx: list[int]) -> list[Phase]:
             runs.append([i])
         prev = m
     runs = _merge_small(steps, runs, MAX_GUESSED)
-    return [Phase(guess_name([steps[i] for i in r]), True, r) for r in runs]
+    out = []
+    for r in runs:
+        own = [steps[i] for i in r]
+        said = describe_name(own)
+        if said:
+            out.append(Phase(said, True, r, source="described"))
+        else:
+            out.append(Phase(guess_name(own), True, r, source="touched"))
+    return out
 
 
 def build_phases(
@@ -718,6 +809,19 @@ def build_phases(
 
 def _ms(t: datetime) -> int:
     return int(t.timestamp() * 1000)
+
+
+def phase_key(steps: Sequence[Step], phase: Phase) -> str:
+    """A guessed phase's identity, for the names Haiku gave it (phasenames.py): its
+    first and last times and its calls. A thread that grows keeps the keys of the
+    phases it did not change; a phase that changed gets a new one."""
+    own = [steps[i] for i in phase.steps]
+    h = hashlib.sha256()
+    h.update(f"{_ms(own[0].start)}-{_ms(own[-1].end)}-{len(own)}".encode())
+    for st in own:
+        for c in st.calls:
+            h.update(b"|" + c.id.encode())
+    return h.hexdigest()[:16]
 
 
 def busy_seconds(steps: Sequence[Step]) -> tuple[float, float]:
@@ -814,6 +918,9 @@ def timeline_json(
                 "n": n + 1,
                 "name": ph.name,
                 "guessed": ph.guessed,
+                "source": ph.source,
+                "also": other_descriptions(own) if ph.source == "described" else [],
+                "key": phase_key(steps, ph) if ph.guessed else None,
                 "start": _ms(own[0].start),
                 "end": _ms(own[-1].end),
                 "seconds": round(sum(st.seconds for st in own), 1),

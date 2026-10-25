@@ -90,6 +90,66 @@ export async function renderAgent(main, r) {
   };
   draw();
   main.append(lower);
+  naming.d = d; naming.draw = draw; naming.key = key;
+  nameWithHaiku(d, draw, key);
+}
+
+// ------------------------------------------------------------------ Haiku's phase titles
+// With Ask Roger on in this browser, the guessed phases get a short task title from
+// the user's own claude CLI (POST /api/phasenames, capcom/report/phasenames.py: one
+// call per thread, then kept in capcom's cache folder). The page never waits on it:
+// the names fill in when they come, and on failure capcom's own names stay.
+const naming = { d: null, draw: null, key: null };
+const SOURCE_TIPS = {
+  described: "Named by capcom from the descriptions the agent wrote for its commands: it kept no task list here",
+  touched: 'Named by capcom from the files and commands it touched: it kept no task list here',
+  haiku: 'Named by Haiku through your claude CLI, from this phase’s tool calls, commands and thinking summaries',
+};
+if (typeof window !== 'undefined') {
+  window.addEventListener('capcom-ask', (e) => {
+    if (e.detail && e.detail.on && naming.d && naming.key === view.key) nameWithHaiku(naming.d, naming.draw, naming.key);
+  });
+}
+
+// A guessed phase's tooltip: where its name came from, then the other descriptions
+// its calls carried (the first ALSO_SHOWN, then how many more).
+const ALSO_SHOWN = 8;
+function phaseTip(p) {
+  if (!SOURCE_TIPS[p.source]) return null;
+  let tip = SOURCE_TIPS[p.source] + (p.capcomName ? ` (capcom’s name: ${p.capcomName})` : '');
+  const also = p.also || [];
+  if (also.length) {
+    tip += '\nAlso: ' + also.slice(0, ALSO_SHOWN).join('; ')
+      + (also.length > ALSO_SHOWN ? `; and ${also.length - ALSO_SHOWN} more` : '');
+  }
+  return tip;
+}
+
+async function nameWithHaiku(d, draw, key) {
+  if (!askOn() || !toolDetailsOn() || d.naming) return;
+  if (!d.phases.some((p) => p.guessed && p.key && p.source !== 'haiku')) return;
+  d.naming = 'busy';
+  draw();
+  let names = {};
+  try {
+    const res = await fetch('/api/phasenames', { method: 'POST', cache: 'no-store',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-Capcom-Token': writeToken() },
+      body: JSON.stringify({ session: view.sid, agent: view.aid }) });
+    const body = await res.json().catch(() => ({}));
+    if (res.ok && body && typeof body.names === 'object' && body.names) names = body.names;
+    d.naming = res.ok && !body.error ? 'done' : 'failed';
+  } catch {
+    d.naming = 'failed';
+  }
+  for (const p of d.phases) {
+    const name = p.guessed && p.key && typeof names[p.key] === 'string' ? names[p.key] : null;
+    if (name) Object.assign(p, { capcomName: p.name, name, source: 'haiku' });
+  }
+  if (view.key === key) draw();
+}
+
+function haikuMark() {
+  return h('span.aghaiku', { title: SOURCE_TIPS.haiku, 'aria-label': ', named by Haiku', text: '✦' });
 }
 
 // ------------------------------------------------------------------ header
@@ -214,7 +274,7 @@ function timelineCard(d, draw) {
       type: 'button', class: 'agphase' + (on ? ' on' : '') + (p.guessed ? ' guessed' : ''),
       style: `left:${pc(x(p.start))};width:calc(${pc(Math.max(x(p.end) - x(p.start), 0))} - 3px)`,
       onclick: () => { view.sel = on ? null : p.n; view.scroll = -1; draw(); },
-    }, h('span.agbadge', { text: String(p.n) }), h('span.agpname.privname', { text: p.name }));
+    }, h('span.agbadge', { text: String(p.n) }), h('span.agpname.privname', { text: p.name }), p.source === 'haiku' ? haikuMark() : null);
     return tipOn(box, `${p.n}. ${p.name}`, phaseRows(p), { native: true, aria: `Phase ${p.n}, ${took(p.seconds)}: ${on ? 'show every phase' : 'zoom to it'}` });
   }));
 
@@ -287,8 +347,8 @@ function timelineCard(d, draw) {
   const legend = h('div.aglegend', null, used.map((kk) => h('span', null, h('i', { style: `background:${KIND_COLOR[kk]}` }), d.kinds.find((r) => r.key === kk).label)),
     h('span', null, h('i.ctx'), 'Context'), gaps.length ? h('span', null, h('i.gap'), 'Waiting for you') : null);
   const noteBits = [d.todo
-    ? "Phase names are the agent's own task list, as it started and finished each item; a stretch with no task is named from the commands and files it touched, in gray italics."
-    : 'This thread kept no task list: each phase is named from the commands and files it touched, in gray italics.',
+    ? "Phase names are the agent's own task list, as it started and finished each item; a stretch with no task is named by capcom, in gray italics, from the descriptions the agent wrote for its commands, or else from the commands and files it touched."
+    : 'This thread kept no task list: capcom names each phase, in gray italics, from the descriptions the agent wrote for its commands, or else from the commands and files it touched.',
   "A step's cost is the request that read its result: a long wait costs little unless its cache expired.",
   'A command\'s time runs until its result came back, so it includes any permission prompt or anything the command waited on.'];
   if (T.is_main && gaps.length) noteBits.push('Waits for you longer than 5 minutes are squeezed to a sliver.');
@@ -401,8 +461,9 @@ function phasesCard(d, draw) {
     const total = Object.values(p.kinds).reduce((a, v) => a + v, 0) || 1;
     body.append(h('tr', { class: 'agprow' + (on ? ' on' : ''), onclick: pick },
       h('td', null, h('span.agbadge', { text: String(p.n) })),
-      h('td', null, h('button', { type: 'button', class: 'agpbtn privname' + (p.guessed ? ' guessed' : ''), 'aria-expanded': String(on), text: p.name,
-        onclick: (e) => { e.stopPropagation(); pick(); } })),
+      h('td', null, h('button', { type: 'button', class: 'agpbtn privname' + (p.guessed ? ' guessed' : ''), 'aria-expanded': String(on),
+        title: phaseTip(p),
+        onclick: (e) => { e.stopPropagation(); pick(); } }, p.name, p.source === 'haiku' ? haikuMark() : null)),
       h('td.when', { text: fromTo(p.start, p.end) }),
       h('td.num', { text: took(p.seconds) }),
       h('td', null, h('div.agmix', { style: `background:${mix(p.kinds, total)}`, title: phaseRows(p).slice(3).map((r) => `${r.label} ${r.value}`).join(', ') })),
@@ -430,7 +491,8 @@ function phasesCard(d, draw) {
   }
   return h('section.card.agcard', null,
     h('div.aghrow', null, h('h2', { text: 'What it did' }),
-      h('span.note', { text: `${plural(d.phases.length, 'phase')} · click one to see its steps and zoom the timeline to it` })),
+      h('span.note', { text: `${plural(d.phases.length, 'phase')} · click one to see its steps and zoom the timeline to it`
+        + (d.naming === 'busy' ? ' · naming the gray ones with Haiku…' : d.phases.some((p) => p.source === 'haiku') ? ' · ✦ named by Haiku' : '') })),
     h('div.scroll', null, h('table.data.agtable', null,
       h('thead', null, h('tr', null, ['', 'Phase', 'When', 'Took', 'Doing', 'Cost'].map((c, i) =>
         h('th', { scope: 'col', class: i === 3 || i === 5 ? 'num' : null, style: i === 0 ? 'width:28px' : i === 4 ? 'width:160px' : null, text: c })))),
@@ -454,6 +516,13 @@ const MONO_KEYS = new Set(['command', 'pattern', 'glob']);
 const REPLY = 'reply'; // a thinking fold's one entry, beside the tool calls' ids
 const RETRY_MS = 1000; // a 503 (the index busy under a scan) is asked once more after this
 const RUNNING_HOURS = 12; // a call without a result this recent may still be running
+// Ask Roger's switch (ask.js), read here rather than imported: ask.js loads the page's
+// marks, which need a document, and session.js (tested under node) imports this file.
+const askOn = () => {
+  const m = document.querySelector('meta[name="capcom-ask"]');
+  if (m && m.getAttribute('content') === 'off') return false;
+  try { return localStorage.getItem('capcom-ask-on') === '1'; } catch (e) { return false; }
+};
 const toolDetailsOn = () => !!document.querySelector('meta[name="capcom-tool-details"][content="on"]');
 const writeToken = () => (document.querySelector('meta[name="capcom-token"]') || {}).content || '';
 

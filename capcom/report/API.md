@@ -2,7 +2,8 @@
 
 `capcom serve` listens on `127.0.0.1` only (default port 8787). Every endpoint is a
 `GET` (`HEAD` gives the same headers without the body) but two: `POST /api/changes`
-(the marks of "Did it work?", below) and `POST /api/ask` (Ask Roger, at the end);
+(the marks of "Did it work?", below), `POST /api/ask` (Ask Roger, at the end) and
+`POST /api/phasenames` (Haiku's phase names, after it);
 other methods and paths get 405. There are no CORS headers, and a request whose `Host`
 header is not `127.0.0.1` or `localhost` gets 403 (DNS rebinding). Each request opens
 the index read-only and closes it before answering.
@@ -95,10 +96,10 @@ Errors are JSON: `{"error": code, "message": text, ...}`.
 | Status | `error` | When |
 | --- | --- | --- |
 | 400 | `bad_query` | A query parameter is out of range or unknown. |
-| 400 | `bad_request`, `bad_json` | `POST /api/changes` or `/api/ask`: a body outside the schema, or not JSON. |
-| 403 | `bad_token`, `cross_origin` | `POST /api/changes` or `/api/ask` without this launch's token, or from another origin. |
+| 400 | `bad_request`, `bad_json` | `POST /api/changes`, `/api/ask` or `/api/phasenames`: a body outside the schema, or not JSON. |
+| 403 | `bad_token`, `cross_origin` | `POST /api/changes`, `/api/ask` or `/api/phasenames` without this launch's token, or from another origin. |
 | 404 | `not_found` | Unknown endpoint, session or change. |
-| 405 | | A method other than GET and HEAD, except `POST /api/changes` and `/api/ask`; the first under `--read-only` too, the second under `--no-ask`. |
+| 405 | | A method other than GET and HEAD, except `POST /api/changes`, `/api/ask` and `/api/phasenames`; the first under `--read-only` too, the other two under `--no-ask`. |
 | 409 | `already_marked` | `POST /api/changes`: the finding already has an open mark. |
 | 411, 413, 415 | `no_length`, `too_large`, `bad_type` | `POST /api/changes` or `/api/ask`: no Content-Length, a body over 4 KB (20 KB for `/api/ask`, or one of its fields past its limit), not `application/json`. |
 | 429 | `busy` | `POST /api/ask`: two answers are being written already. |
@@ -491,8 +492,8 @@ known. Times are epoch ms.
  requests: {t, context, usd, output, cache_read, cache_write, estimated, input,
             cache_write_5m, cache_write_1h, thinking, model,
             parts: {input, cache_read, cache_write_5m, cache_write_1h, output, web}},   # columns
- phases: [{n, name, guessed, start, end, seconds, usd, kinds: {kind: seconds},
-           first, last}],   # first, last: indexes into steps
+ phases: [{n, name, guessed, source, also, key, start, end, seconds, usd,
+           kinds: {kind: seconds}, first, last}],   # first, last: indexes into steps
  kinds: [{key, label, seconds, steps, usd}],
  idle: [[start, end]],   # waits for the user
  todo: bool}
@@ -510,8 +511,12 @@ tool result, so `steps.usd` adds up to the thread's cost. `phases` follow the
 thread's to-do list (TodoWrite snapshots, or TaskCreate and TaskUpdate) when it has
 one (`guessed` false, the item's active form as `name`); the stretches between, or
 the whole thread without one, are cut where the work changes (reading, editing,
-testing, other commands), small parts merged into their neighbors, and named from the
-files and commands they touched (`guessed` true). `idle` are the waits for the user:
+testing, other commands), small parts merged into their neighbors, and named
+(`guessed` true) from the short descriptions the model gave its Bash and Agent calls
+when it did (`source` "described": the one covering most of the phase's time; `also`
+lists the others, most time first), else from the files and commands they touched (`source` "touched");
+a to-do phase's `source` is "todo". `key` (16 hex characters, null for a to-do phase)
+changes whenever a guessed phase's steps do, and names it for `POST /api/phasenames`. `idle` are the waits for the user:
 from a turn's end to the prompt that started the next one. `todo` says whether any phase
 came from a to-do list. `spawned_by` is the thread whose Agent call started it, and
 `neighbors` are the threads before and after it in the session's order (the main
@@ -1003,3 +1008,38 @@ until the connection closes:
 {type: "error", error: "timeout"|"claude_failed", message}   # last, instead of done
 ```
 
+#### `POST /api/phasenames`
+
+Haiku's short titles for an agent page's guessed phases (`phasenames.py`), behind the
+same switch as Ask Roger: the agent page asks once it has loaded, only when the user
+turned Ask Roger on in that browser and the step folds are on. Guarded the same way
+(token, origin, `application/json`, at most 1 KB); `--no-ask` turns it off (405), as
+does a server without log roots (`--no-scan` keeps them).
+
+Body: `{session: <session_id>, agent: <agent_id>|"main"}`.
+
+The server reads the thread from the index, and from its own log files (only those the
+index lists for it, under the log roots, read-only) its Bash commands, the exit codes
+of the failed ones and the thinking summaries, and asks the user's `claude` CLI once
+for the whole thread, as Ask Roger does but with no MCP server at all and a system
+prompt of its own. The prompt holds, per guessed phase, its length, tool names, file
+paths, each command (a heredoc's body dropped, secret-looking values replaced, at most
+200 characters) with its description and failed exit code, an Agent call's type and
+description, and up to 3 thinking summaries of 300 characters; for the thread, its
+agent type and spawn description; at most 24 phases and 12,000 characters. Never a
+tool's output, a file's contents, an edit's text, a search pattern, the user's prompts
+or the replies' text. Each call is stopped after 60 s; two threads at a time.
+
+The titles are kept by phase `key` in `~/.cache/capcom/phase-names/` (one file per
+thread, readable by the user only), so a later visit asks only for the phases that
+changed. They never go into the index, the API cache or `/api/agent`.
+
+Reply, `200`, always (the page keeps capcom's names for the phases left out):
+
+```
+{names: {<phase key>: "Fix the failing backfill tests", ...},
+ by: "haiku",
+ error: "no_claude"|"busy"|"timeout"|"claude_failed"|"no_names"|"failed_recently"}
+                                         # error: only when some phase got no name;
+                                         #   a failed set is not asked again for 10 min
+```

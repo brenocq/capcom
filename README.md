@@ -112,8 +112,11 @@ own `claude` CLI (Haiku, with every tool and MCP server off and no session
 saved) when you ask a question. It sends the page's name, the numbers and labels
 of what you asked about, the text you selected (session titles and other private
 pieces left out), and capcom's own totals it may look up (spend, sessions,
-findings and where an agent or skill is defined); never file contents or tool
-output. It opens Claude Code's logs
+findings and where an agent or skill is defined). With it on, your `claude` CLI
+also writes short titles for an agent's unnamed phases from its tool names, file
+paths, commands and their descriptions. Neither sends file contents, tool
+output, your prompts or Claude's replies, and `--no-ask` turns both off. It
+opens Claude Code's logs
 read-only, never reads credentials, writes only its
 own files (the index in `~/.cache/capcom`, and the usage-limit samples in
 `~/.local/state/capcom`), and serves the website on 127.0.0.1 only. The one

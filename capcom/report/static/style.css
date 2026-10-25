@@ -757,6 +757,7 @@ h2.acct { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .agphase:hover { border-color: var(--l35); }
 .agphase.on { background: var(--sel); border-color: var(--text); }
 .agphase.guessed, .agpbtn.guessed { color: var(--muted); font-style: italic; }
+.aghaiku { flex: none; margin-left: 4px; font-style: normal; font-size: 10px; color: var(--muted); opacity: .8; vertical-align: 1px; }
 .agphase:focus-visible, .agpbtn:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
 .agpname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .agbadge { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 18px; height: 18px; border-radius: 50%;

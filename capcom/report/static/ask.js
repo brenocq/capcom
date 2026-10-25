@@ -52,7 +52,12 @@ function syncNote() { for (const el of document.querySelectorAll('.netnote')) el
 const PAGE_NAMES = { overview: 'Overview', spend: 'Spend', sessions: 'Sessions', session: 'Session', day: 'Day', spikes: 'Spikes', checks: 'Checks', changes: 'Did it work?', limits: 'Limits' };
 
 function enabled() { try { return localStorage.getItem(KEY) === '1'; } catch (e) { return false; } }
-function setEnabled(on) { try { if (on) localStorage.setItem(KEY, '1'); else localStorage.removeItem(KEY); } catch (e) { /* storage off: asks again next visit */ } }
+function setEnabled(on) {
+  try { if (on) localStorage.setItem(KEY, '1'); else localStorage.removeItem(KEY); } catch (e) { /* storage off: asks again next visit */ }
+  window.dispatchEvent(new CustomEvent('capcom-ask', { detail: { on } }));
+}
+// Whether this browser turned Ask Roger on (and the server allows it): the agent
+// page's Haiku phase titles (agent.js) run behind the same switch.
 const reducedMotion = () => !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
 function route() {
