@@ -492,7 +492,7 @@ known. Times are epoch ms.
  requests: {t, context, usd, output, cache_read, cache_write, estimated, input,
             cache_write_5m, cache_write_1h, thinking, model,
             parts: {input, cache_read, cache_write_5m, cache_write_1h, output, web}},   # columns
- phases: [{n, name, guessed, source, key, start, end, seconds, usd,
+ phases: [{n, name, guessed, source, also, key, start, end, seconds, usd,
            kinds: {kind: seconds}, first, last}],   # first, last: indexes into steps
  kinds: [{key, label, seconds, steps, usd}],
  idle: [[start, end]],   # waits for the user
@@ -513,8 +513,8 @@ one (`guessed` false, the item's active form as `name`); the stretches between, 
 the whole thread without one, are cut where the work changes (reading, editing,
 testing, other commands), small parts merged into their neighbors, and named
 (`guessed` true) from the short descriptions the model gave its Bash and Agent calls
-when it did (`source` "described": the one covering most of the phase's time, `+N`
-for the others), else from the files and commands they touched (`source` "touched");
+when it did (`source` "described": the one covering most of the phase's time; `also`
+lists the others, most time first), else from the files and commands they touched (`source` "touched");
 a to-do phase's `source` is "todo". `key` (16 hex characters, null for a to-do phase)
 changes whenever a guessed phase's steps do, and names it for `POST /api/phasenames`. `idle` are the waits for the user:
 from a turn's end to the prompt that started the next one. `todo` says whether any phase

@@ -682,17 +682,12 @@ def _fit(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
-def describe_name(steps: Sequence[Step]) -> str | None:
-    """A stretch's name from its calls' own descriptions (the short label the model
-    writes with each Bash and Agent call), or None when it wrote none.
-
-    The description that stands for the most time wins, a quick look around (a
-    command that only reads files, "List the folder") counting a quarter, and the
-    first one written wins a tie; " +N" says how many other things it described.
-    A stretch that edited files leads with the file it edited most, as "Editing
-    a.py +2", then the description of what it ran."""
+def _scored(steps: Sequence[Step]) -> tuple[list[str], set[str], Counter[str]]:
+    """The descriptions of a stretch's calls, the one that stood for most time
+    first (a look at files counts a quarter; the first written wins a tie), those
+    of calls that were not file lookups, and how often each file was edited."""
     seen: dict[str, float] = {}
-    plain: set[str] = set()  # the descriptions of calls that did more than read
+    plain: set[str] = set()
     edits: Counter[str] = Counter()
     for st in steps:
         for c in st.calls:
@@ -705,18 +700,37 @@ def describe_name(steps: Sequence[Step]) -> str | None:
             seen[c.desc] = seen.get(c.desc, 0.0) + (secs + 1.0) * weight
             if c.kind != "files":
                 plain.add(c.desc)
-    if not seen:
+    first = {d: i for i, d in enumerate(seen)}
+    order = sorted(seen, key=lambda d: (-seen[d], first[d]))
+    return order, plain, edits
+
+
+def describe_name(steps: Sequence[Step]) -> str | None:
+    """A stretch's name from its calls' own descriptions (the short label the model
+    writes with each Bash and Agent call), or None when it wrote none.
+
+    The description that stands for the most time wins, a quick look around (a
+    command that only reads files, "List the folder") counting a quarter, and the
+    first one written wins a tie; the others go in the name's tooltip
+    (`other_descriptions`).
+    A stretch that edited files leads with the file it edited most, as "Editing
+    a.py +2", then the description of what it ran."""
+    order, plain, edits = _scored(steps)
+    if not order:
         return None
-    order = list(seen)
-    best = max(order, key=lambda d: (seen[d], -order.index(d)))
-    more = f" +{len(order) - 1}" if len(order) > 1 else ""
+    best = order[0]
     if edits:
         top, n = edits.most_common(1)[0][0], len(edits)
         lead = f"Editing {top}" + (f" +{n - 1}" if n > 1 else "")
         if best not in plain:
             return None  # only looks around while editing: the files say more
         return _fit(f"{lead} · {_fit(best, NAME_MAX - len(lead) - 3)}", NAME_MAX)
-    return _fit(best, NAME_MAX - len(more)) + more
+    return _fit(best, NAME_MAX)
+
+
+def other_descriptions(steps: Sequence[Step]) -> list[str]:
+    """The descriptions a described phase's name left out, most time first."""
+    return _scored(steps)[0][1:]
 
 
 def _guess(steps: Sequence[Step], idx: list[int]) -> list[Phase]:
@@ -905,6 +919,7 @@ def timeline_json(
                 "name": ph.name,
                 "guessed": ph.guessed,
                 "source": ph.source,
+                "also": other_descriptions(own) if ph.source == "described" else [],
                 "key": phase_key(steps, ph) if ph.guessed else None,
                 "start": _ms(own[0].start),
                 "end": _ms(own[-1].end),

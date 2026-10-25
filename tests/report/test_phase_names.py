@@ -200,7 +200,9 @@ def test_a_described_stretch_takes_the_description_that_stood_for_most_time() ->
         _step(10, 200, _bash("Run the events backfill tests", "test")),
         _step(220, 2, _bash("List the folder", "files")),
     ]
-    assert thread.describe_name(steps) == "Run the events backfill tests +2"
+    assert thread.describe_name(steps) == "Run the events backfill tests"
+    # the others, most time first, for the tooltip
+    assert thread.other_descriptions(steps) == ["Check git status", "List the folder"]
     # one description: as written, without its period
     assert thread.describe_name(steps[1:2]) == "Run the events backfill tests"
     # no description: None, and the old name stays the fallback
@@ -232,7 +234,7 @@ def test_reading_around_counts_less_and_edits_lead_the_name() -> None:
         is None
     )
     long = thread.describe_name([_step(0, 2, _bash("x" * 90)), _step(3, 1, _bash("y"))])
-    assert long is not None and len(long) <= thread.NAME_MAX and long.endswith("… +1")
+    assert long is not None and len(long) <= thread.NAME_MAX and long.endswith("…")
 
 
 def test_the_agent_reply_names_guessed_phases_from_descriptions(

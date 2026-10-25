@@ -111,6 +111,20 @@ if (typeof window !== 'undefined') {
   });
 }
 
+// A guessed phase's tooltip: where its name came from, then the other descriptions
+// its calls carried (the first ALSO_SHOWN, then how many more).
+const ALSO_SHOWN = 8;
+function phaseTip(p) {
+  if (!SOURCE_TIPS[p.source]) return null;
+  let tip = SOURCE_TIPS[p.source] + (p.capcomName ? ` (capcom’s name: ${p.capcomName})` : '');
+  const also = p.also || [];
+  if (also.length) {
+    tip += '\nAlso: ' + also.slice(0, ALSO_SHOWN).join('; ')
+      + (also.length > ALSO_SHOWN ? `; and ${also.length - ALSO_SHOWN} more` : '');
+  }
+  return tip;
+}
+
 async function nameWithHaiku(d, draw, key) {
   if (!askOn() || !toolDetailsOn() || d.naming) return;
   if (!d.phases.some((p) => p.guessed && p.key && p.source !== 'haiku')) return;
@@ -448,7 +462,7 @@ function phasesCard(d, draw) {
     body.append(h('tr', { class: 'agprow' + (on ? ' on' : ''), onclick: pick },
       h('td', null, h('span.agbadge', { text: String(p.n) })),
       h('td', null, h('button', { type: 'button', class: 'agpbtn privname' + (p.guessed ? ' guessed' : ''), 'aria-expanded': String(on),
-        title: SOURCE_TIPS[p.source] ? SOURCE_TIPS[p.source] + (p.capcomName ? ` (capcom’s name: ${p.capcomName})` : '') : null,
+        title: phaseTip(p),
         onclick: (e) => { e.stopPropagation(); pick(); } }, p.name, p.source === 'haiku' ? haikuMark() : null)),
       h('td.when', { text: fromTo(p.start, p.end) }),
       h('td.num', { text: took(p.seconds) }),
