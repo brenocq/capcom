@@ -356,3 +356,14 @@ def test_the_lane_words_tell_how_many_are_in_view() -> None:
     assert none["note"] == "none in view"
     assert none["button"]["text"] == "Show all 47"
     assert one == {"note": None, "button": None}
+
+
+def test_the_main_thread_takes_the_sessions_color_or_its_usual_one() -> None:
+    got = _run(
+        "console.log(JSON.stringify({ red: m.mainThreadColor('red'), none: m.mainThreadColor(null),"
+        " odd: m.mainThreadColor('mauve'), usual: m.mainThreadColor(undefined) }))"
+    )
+    assert isinstance(got, dict)
+    assert got["red"] == "var(--sc-red)"
+    assert got["none"] == got["odd"] == got["usual"]
+    assert not str(got["none"]).startswith("var(--sc-")
