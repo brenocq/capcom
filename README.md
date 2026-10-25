@@ -4,6 +4,7 @@
   <a href="#install">Install</a> · <a href="#what-you-get">What you get</a> · <a href="#commands">Commands</a> · <a href="#faq">FAQ</a>
 
   <a href="https://github.com/brenocq/capcom/actions/workflows/tests.yml"><img src="https://github.com/brenocq/capcom/actions/workflows/tests.yml/badge.svg" alt="🧪 Tests"/></a>
+  <a href="https://pypi.org/project/capcom/"><img src="https://img.shields.io/pypi/v/capcom" alt="PyPI version"/></a>
 </div>
 
 <br>
@@ -30,13 +31,13 @@ reset.
 ## Install
 
 ```
-uv tool install git+https://github.com/brenocq/capcom
+uv tool install capcom
 ```
 
-Or `pipx install git+https://github.com/brenocq/capcom`; from a clone,
-`uv tool install --editable .`. You need Python 3.12 or newer (3.14 also reads
-OpenClaw's compressed rows), and Claude Code's logs, which it writes under
-`~/.claude/projects` as you use it. Then:
+Or `pipx install capcom`; for the latest main,
+`uv tool install git+https://github.com/brenocq/capcom`. You need Python 3.12
+or newer (3.14 also reads OpenClaw's compressed rows), and Claude Code's logs,
+which it writes under `~/.claude/projects` as you use it. Then:
 
 ```
 capcom scan
