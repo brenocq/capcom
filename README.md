@@ -22,6 +22,10 @@ one timeline, which habits of your setup cost the most with the change to make
 (and later, whether it worked), and where your usage limits will be at their
 reset.
 
+https://github.com/user-attachments/assets/72dd7392-398c-499c-9ad2-099da38ecaba
+
+<p align="center"><sub>The 96-second film, with sound · Voice: ElevenLabs · Music: Suno</sub></p>
+
 > [!NOTE]
 > capcom is new and may still get things wrong. Its costs, causes, savings and
 > forecasts are estimates from the logs, not your bill: check anything you act on
