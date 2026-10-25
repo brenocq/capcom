@@ -1,0 +1,74 @@
+name: 🚀 Release
+
+# Pushing a tag v<version> (the version in pyproject.toml) runs the checks,
+# builds the wheel and sdist, publishes them to PyPI by trusted publishing (no
+# token: pypi.org trusts this workflow in the `pypi` environment), and creates
+# the GitHub release with the notes in .github/releases/<tag>.md.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Tag matches the package version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME, pyproject $version"; exit 1; }
+          grep -q "__version__ = \"$version\"" capcom/__init__.py
+          test -f ".github/releases/$GITHUB_REF_NAME.md"
+      - run: uv sync
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy capcom
+      - run: uv run pytest
+      - run: uv build
+      - name: The wheel installs and runs
+        run: |
+          uv venv /tmp/smoke
+          uv pip install -p /tmp/smoke/bin/python dist/*.whl
+          /tmp/smoke/bin/capcom --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/capcom/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github:
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --title "capcom $GITHUB_REF_NAME"
+          --notes-file ".github/releases/$GITHUB_REF_NAME.md"
