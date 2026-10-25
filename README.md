@@ -34,10 +34,18 @@ reset.
 uv tool install capcom
 ```
 
-Or `pipx install capcom`; for the latest main,
+<details>
+<summary>Other ways to install, and what it needs</summary>
+<br>
+
+With pipx, `pipx install capcom`; for the latest main,
 `uv tool install git+https://github.com/brenocq/capcom`. You need Python 3.12
 or newer (3.14 also reads OpenClaw's compressed rows), and Claude Code's logs,
-which it writes under `~/.claude/projects` as you use it. Then:
+which it writes under `~/.claude/projects` as you use it.
+
+</details>
+
+Then:
 
 ```
 capcom scan
