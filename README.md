@@ -1,7 +1,7 @@
 <div align="center">
   <img alt="capcom: Roger, a terracotta capsule in mission-control headphones, and the word capcom, beside a two-week spend chart drawing itself, with numbered spike markers; Roger waves and says: Roger that! Mission control for your Claude Code spend." src="https://github.com/brenocq/capcom/raw/assets/banner.svg" width="880">
 
-  <a href="#demo">Demo</a> · <a href="#install">Install</a> · <a href="#what-you-get">What you get</a> · <a href="#commands">Commands</a> · <a href="#faq">FAQ</a>
+  <a href="#install">Install</a> · <a href="#what-you-get">What you get</a> · <a href="#commands">Commands</a> · <a href="#faq">FAQ</a>
 
   <a href="https://github.com/brenocq/capcom/actions/workflows/tests.yml"><img src="https://github.com/brenocq/capcom/actions/workflows/tests.yml/badge.svg" alt="🧪 Tests"/></a>
 </div>
@@ -244,15 +244,6 @@ Ask Roger chat: ask about the page, or press Explain on a dense card, and he
 answers in a few plain words.
 
 </details>
-
-## Demo
-
-<!-- Placeholder: replace this URL once the MP4 is uploaded. -->
-<p align="center">
-  <a href="https://github.com/brenocq/capcom/releases/download/tour/capcom-tour.mp4"><img alt="The launch video: 14 days of data beside capcom's Spend chart, with a play button." src="https://github.com/brenocq/capcom/raw/assets/video-poster.png" width="720"></a>
-  <br>
-  <a href="https://github.com/brenocq/capcom/releases/download/tour/capcom-tour.mp4">Watch the 80-second tour, with sound</a>
-</p>
 
 ## License
 

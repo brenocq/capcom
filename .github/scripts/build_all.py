@@ -1,7 +1,6 @@
 """Builds every picture in the README, from synthetic logs.
 
     uv run python .github/scripts/build_all.py [--out DIR] [--check DIR] [--no-demo] [--keep DIR]
-        [--video MP4]
 
 1. demo/data.py writes four made-up weeks of Claude Code logs into a temporary
    folder and runs capcom on them there (never on ~/.claude or ~/.cache/capcom).
@@ -12,9 +11,6 @@
    of each, demo-light.png and demo-dark.png.
 4. social/build.py composes social.png, the 1280 x 640 social preview card, from
    the banner and its chart (uploaded by hand: Settings, Social preview).
-5. With --video (the narrated launch video, made in its own project from the
-   same synthetic logs), video/poster.sh draws video-poster.png from one of its
-   frames. publish-assets.sh needs it, so pass it whenever the assets change.
 
 Everything lands in --out (default .github/assets/, gitignored); then
 .github/scripts/publish-assets.sh puts it on the `assets` branch. With --check,
@@ -31,7 +27,6 @@ import argparse
 import importlib.util
 import json
 import shutil
-import subprocess
 import sys
 import tempfile
 from datetime import UTC, datetime
@@ -59,7 +54,6 @@ def main() -> None:
     ap.add_argument("--check", type=Path, help="write contact sheets and a preview here")
     ap.add_argument("--no-demo", action="store_true", help="skip the demo recording")
     ap.add_argument("--keep", type=Path, help="build the synthetic data here and keep it")
-    ap.add_argument("--video", type=Path, help="the launch video's MP4, for video-poster.png")
     a = ap.parse_args()
 
     import data  # demo/data.py
@@ -95,12 +89,6 @@ def main() -> None:
             record.main()
         social = load(HERE / "social" / "build.py", "social_build")
         print(social.build(out, numbers))
-        if a.video:
-            poster = out / "video-poster.png"
-            subprocess.run(
-                [str(HERE / "video" / "poster.sh"), str(a.video), str(poster)], check=True
-            )
-            print(poster)
 
         if stills:
             import page
