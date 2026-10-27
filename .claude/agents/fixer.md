@@ -4,6 +4,7 @@ description: Fixes one bug or makes one small, well-specified change in capcom, 
 model: sonnet
 effort: medium
 maxTurns: 60
+autoCompactWindow: 200000
 tools: Read, Edit, Write, Bash
 ---
 

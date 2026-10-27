@@ -4,6 +4,7 @@ description: Builds one feature or module of capcom in the worktree its task nam
 model: opus
 effort: high
 maxTurns: 150
+autoCompactWindow: 200000
 tools: Read, Edit, Write, Bash
 ---
 
