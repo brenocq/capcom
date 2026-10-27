@@ -4,6 +4,7 @@ description: Runs capcom on the real logs and judges its output (do the totals m
 model: opus
 effort: medium
 maxTurns: 50
+autoCompactWindow: 200000
 tools: Read, Bash
 ---
 

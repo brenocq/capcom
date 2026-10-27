@@ -4,6 +4,7 @@ description: Reviews one branch of capcom before it merges, on Sonnet at medium 
 model: sonnet
 effort: medium
 maxTurns: 50
+autoCompactWindow: 200000
 tools: Read, Bash
 ---
 

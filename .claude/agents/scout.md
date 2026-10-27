@@ -4,6 +4,7 @@ description: Answers one factual question about the code or the log formats (whe
 model: haiku
 effort: low
 maxTurns: 30
+autoCompactWindow: 200000
 tools: Read, Bash
 ---
 
